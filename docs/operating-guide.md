@@ -206,3 +206,19 @@ The Vibe Product Development top page is a dashboard, not the policy manual.
 - Treat live database state as authoritative for current status.
 - Keep the top page optimized for current position, focus, key links and important visualizations.
 - Keep detailed rules, definitions and exception conditions in this Operating Guide and related governed artifacts.
+
+## 14. Portfolio Health automation
+
+Portfolio Health is an **objective derived signal**, not a manually assigned opinion. Manual Health fields are retained only as legacy history and must not be used for prioritization.
+
+`Health Auto` is derived from Epic and Task risk signals using `Priority`, `Status`, and operational deadlines (`Target` / `Due Date`). Manual `Health` and `Schedule` values are not inputs to the calculation.
+
+Risk rules:
+
+- **Red** — any P0 Task is `Blocked`, or any P0 Epic is `Paused`.
+- **Yellow** — any P1 Task is `Blocked`; any open P0 Task is past `Due Date`; any P1 Epic is `Paused`; or any open P0/P1 Epic is past `Target`.
+- **Green** — none of the Red or Yellow conditions apply.
+
+Portfolio views must display `Health Auto`. Legacy manually entered Health is named `Health Manual (Legacy)` and is non-authoritative.
+
+The purpose of Health is to expose priority and delivery risk, not to create an independent priority signal. If Health appears wrong, fix the underlying Priority, Status, Target, Due Date, or relationship data rather than manually changing Health.
