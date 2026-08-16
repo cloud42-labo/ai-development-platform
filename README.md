@@ -8,11 +8,20 @@ This repository is the **system of record for ADP artifacts and intellectual ass
 
 | Domain | System of Record | Purpose |
 |---|---|---|
-| Operational state / work records | Notion | Products, Epics, Stories, Tasks, Sprints, timestamps, results, decisions and execution evidence |
+| Operational state / work records | [Notion — Vibe Product Development](https://app.notion.com/p/3affbd826f3b819d84ebe3015c6f946b) | Products, Epics, Stories, Tasks, Sprints, timestamps, results, decisions and execution evidence |
 | Artifacts / intellectual assets | This repository | Durable documents, models, standards, diagrams and templates |
-| Organizational memory | `cloud42-labo/brain` | Learned context, rationale, lessons and accumulated organizational memory |
+| Organizational memory | [`cloud42-labo/brain`](https://github.com/cloud42-labo/brain) | Learned context, rationale, lessons and accumulated organizational memory |
 
 In short: **State = Notion / Artifact = GitHub / Memory = brain**.
+
+## Start here
+
+- [Operating Guide](docs/operating-guide.md)
+- [Organization Digital Twin Capability Map](docs/capability-map.md)
+- [Source-of-Truth Policy](governance/source-of-truth.md)
+- [Knowledge Asset Model: State / Artifact / Memory](decisions/0001-knowledge-asset-model.md)
+- [AI agent working rules](AGENTS.md)
+- [Notion Operating Guide](https://app.notion.com/p/3bdfbd826f3b8119b7b4e623c9cdc94e)
 
 ## Repository map
 
