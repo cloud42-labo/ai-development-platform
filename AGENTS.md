@@ -8,7 +8,7 @@ This repository is the system of record for durable ADP artifacts and intellectu
 
 1. Read the relevant Notion Product / Epic / Story / Task.
 2. Confirm acceptance criteria and the authoritative artifact path in this repository.
-3. Record `Status = In Progress` and `Started At` (JST) in Notion immediately before execution.
+3. Execute the managed-work pre-flight in `governance/ai-execution-constraints.md`: exact Task exists, executable state/Blocker is valid, `Status = In Progress` + `Started At` (JST) are recorded, Task Time Event is opened, and actor authority is valid. Do not perform the substantive write/work until this gate passes.
 4. Verify current primary documentation when the work depends on an external SDK, library, service, standard, or API.
 5. Before external retrieval, communication, or use of a metered service, execute the pre-flight gate in `governance/research-security-policy.md`. If data classification, secret handling, extraction budget, billing, or write authority is unclear, stop before the external action.
 
@@ -31,9 +31,11 @@ This repository is the system of record for durable ADP artifacts and intellectu
 
 ## Completion
 
-Before marking a Notion task Done:
+Before marking a Notion task Done, execute the completion post-flight in `governance/ai-execution-constraints.md`:
 
-- verify the artifact exists at its intended repository path;
-- record the commit or pull request URL in `Result` or the relevant reference property;
-- confirm the acceptance criteria;
-- set `Completed At` (JST) and `Status = Done`.
+- directly verify acceptance criteria and intended artifact/result;
+- record material evidence and commit/PR URLs in `Result` or the relevant reference property;
+- close the current Task Time Event with `Ended At` (JST);
+- record `Completed At` (JST);
+- route residual Human/other-agent work instead of falsely marking the task Done;
+- transition `Status = Done` only after the supporting evidence/time records exist.
