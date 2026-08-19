@@ -10,6 +10,7 @@ This repository is the system of record for durable ADP artifacts and intellectu
 2. Confirm acceptance criteria and the authoritative artifact path in this repository.
 3. Record `Status = In Progress` and `Started At` (JST) in Notion immediately before execution.
 4. Verify current primary documentation when the work depends on an external SDK, library, service, standard, or API.
+5. Before external retrieval, communication, or use of a metered service, execute the pre-flight gate in `governance/research-security-policy.md`. If data classification, secret handling, extraction budget, billing, or write authority is unclear, stop before the external action.
 
 ## Source-of-truth rules
 
@@ -23,6 +24,8 @@ This repository is the system of record for durable ADP artifacts and intellectu
 - Keep changes scoped to the assigned Notion ticket.
 - Prefer Markdown and Mermaid for durable, diffable documents.
 - Never commit secrets, credentials, tokens, private personal data, company-confidential information, or material that is not intended to be public.
+- Never transmit secrets or non-public material to an external service unless the governing task explicitly authorizes the data transfer; follow `governance/research-security-policy.md`.
+- Do not silently switch to a metered external AI API or other pay-as-you-go path when a subscription/bundled path is unavailable. Prior Human approval is required for a paid path.
 - If a change alters an operating policy, governance rule, control, or architecture, update the related Notion Decision or task result as well.
 - If the repository artifact is the authoritative original, Notion should link to it instead of duplicating the full text unless an operational view is intentionally maintained there.
 
