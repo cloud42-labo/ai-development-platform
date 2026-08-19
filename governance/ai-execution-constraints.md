@@ -43,9 +43,12 @@ Before setting a managed task to `Done`, the acting AI MUST verify **all** of th
 If managed work is discovered to have bypassed the execution pre-flight or completion post-flight:
 
 - correct the current task/time/evidence records without hiding the original gap;
-- record the violation in the relevant Postmortem (or create one under the governing Postmortem process when required);
+- execute `governance/postmortem-improvement-loop.md`;
+- record or update the violation in Notion Postmortems;
 - connect the preventive task/control to that Postmortem;
-- treat the control as high-risk/manual-check-required until the preventive action is implemented and tested.
+- treat the control as high-risk/manual-check-required until the preventive action is implemented and retested.
+
+Documentation of the violation is not closure. Closure requires the preventive work and representative retest defined by the Postmortem Improvement Loop.
 
 ## Enforcement rule
 
