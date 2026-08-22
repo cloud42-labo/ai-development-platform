@@ -29,14 +29,21 @@ A chat instruction, branch, commit, draft artifact, or external action performed
 
 ## Managed-work completion post-flight
 
-Before setting a managed task to `Done`, the acting AI MUST verify **all** of the following:
+Before setting a managed task to `Done`, the acting AI MUST verify **all** of the following, in this order:
 
 1. **Acceptance criteria verified** — directly check the required artifact/result, not only the implementer's completion claim.
 2. **Evidence recorded** — update `Result` with the material outcome, decisions, relevant URLs/commit/PR identifiers, and any remaining limitations.
-3. **Time interval closed** — set the current Task Time Event `Ended At` in JST. Active Time is derived from the event; do not invent an `Actual Time` value independently when the rollup is authoritative.
-4. **Completion timestamp recorded** — set `Completed At` in JST in the same completion operation.
+3. **Time interval closed** — verify that a Task Time Event exists for the actor/current active interval and set its `Ended At` in JST. Active Time is derived from the event; do not invent an `Actual Time` value independently when the rollup is authoritative. **A task with no applicable Time Event, or with an open Time Event, MUST NOT be marked Done.**
+4. **Completion timestamp recorded** — set `Completed At` in JST after the time record is complete.
 5. **Status transition last** — set `Status = Done` only after the evidence and time records needed to support Done are present.
 6. **Residual work routed** — if Human/another agent action remains necessary to satisfy the task's own acceptance criteria, do not mark the task Done; create/route the explicit follow-up and use the correct waiting/blocked state.
+
+### Human work and PR completion
+
+- Human physical/account/validation work is also managed work when it is represented by a Notion Task. Record its Task Time Event using observable real start/end timestamps when those timestamps are available from the interaction or system record.
+- If an exact Human start or end timestamp cannot be established, **do not fabricate or estimate it**. Ask the Human for the missing time before closing the Task.
+- A merged PR is evidence of artifact completion, not evidence that the related Notion Task is administratively complete. Before treating a PR-related Task as complete, verify its Result, Task Time Event, Completed At, and residual Human work.
+- Chris/ChatGPT and Claude are subject to the same pre-flight and post-flight gates. Agent identity does not waive the control.
 
 ## Postmortem connection
 
