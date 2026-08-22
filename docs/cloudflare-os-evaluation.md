@@ -1,18 +1,18 @@
 # Cloudflare OS Evaluation for ADP
 
 Date: 2026-08-22 (JST)
-Status: Decision-support report
-Scope: Cloudflare OS as an architecture option for ADP, with emphasis on Gatekeepers, agent authority, sandboxed execution, and reusable application patterns.
+Status: **Provisional decision-support report — final adoption decision pending comparative PoC**
+Scope: Cloudflare OS as an architecture option for ADP, with emphasis on Gatekeepers, agent authority, sandboxed execution, reusable application patterns, and the recurring Claude→Notion approval-stall problem.
 
 ## Executive summary
 
-Cloudflare OS is not a single authorization product. It is an AI productivity environment built around three major ideas: an agent workspace with company context, sandboxed user/agent-created applications called Gadgets, and a capability-based security framework called Gatekeepers.
+Cloudflare OS is not a single authorization product. It is an AI productivity environment built around an agent workspace with company context, sandboxed user/agent-created applications called Gadgets, and a capability-based security framework called Gatekeepers.
 
-For the current ADP, the recommended decision is **selective adoption of the security architecture pattern, not full migration to Cloudflare OS at this stage**.
+The current document-level assessment suggests that ADP may only need part of this architecture, especially runtime authorization and policy enforcement. **That assessment is not yet the final adoption decision.**
 
-The reason is not that Cloudflare OS is inferior. The reason is scope fit. ADP already has operational state in Notion, durable artifacts in GitHub, organizational memory in `brain`, agent-specific work instructions, and execution/completion gates. Replacing that environment with Cloudflare OS would introduce a new workspace/runtime/application model in order to obtain capabilities that ADP currently needs mainly in one area: **runtime authorization and policy enforcement for agent actions**.
+Before ADP chooses among full Cloudflare OS adoption, Gatekeeper-inspired partial adoption, or an ADP-native Policy Checker, ADP must run a practical comparative PoC using the same autonomy scenario. The primary scenario is the problem already observed in Claude: repeated Notion operations can trigger approval prompts and stop autonomous execution.
 
-However, this conclusion is conditional. If ADP evolves toward large numbers of agents and users dynamically creating isolated applications and accessing many external systems, Cloudflare OS itself should be re-evaluated. Its Gadget + Gatekeeper architecture is designed for exactly that operating model.
+The final decision must therefore be based on measured behavior, not architectural preference.
 
 ## 1. What Cloudflare OS actually is
 
@@ -37,27 +37,27 @@ Cloudflare explicitly frames the open-source project as something organizations 
 | ACL/access control | Shared permissions |
 | New first-class entity | AI Agent |
 
-The central architectural point is that Cloudflare treats AI agents as neither ordinary users nor untrusted arbitrary code. Agents are accountable to a human while receiving their own restricted capabilities.
+The central architectural point is that Cloudflare treats AI agents as neither ordinary users nor unrestricted arbitrary code. Agents receive restricted capabilities and remain accountable to humans.
 
 ## 2. Gatekeepers
 
-Gatekeepers are the most directly relevant component for ADP.
+Gatekeepers are the component most directly relevant to ADP.
 
-A Gatekeeper is created when an Agent or Gadget is connected to an external resource. According to Cloudflare's official architecture, a Gatekeeper:
+A Gatekeeper is placed between an Agent/Gadget and an external resource. According to Cloudflare's official architecture, it can:
 
-- wraps the native service API behind a clean API;
-- handles authorization such as OAuth;
-- narrows access to the specific resource intended by the user;
-- logs actions for later review;
-- provides a human approval point for operations with side effects.
+- wrap the native service API behind a controlled interface;
+- handle authorization such as OAuth;
+- narrow access to specific resources;
+- log actions for later review;
+- provide a human approval point for operations with side effects.
 
-This is more than an instruction file. It is an **enforcement point placed between the agent and the external system**.
+This is more than an instruction file. It is an **enforcement point between the agent and the external system**.
 
 ### Simulated approval / deferred commit
 
-A particularly important design is the treatment of side-effecting actions. Instead of always blocking the agent synchronously while waiting for a human, the Gatekeeper can simulate an action locally and return the simulated result to the agent. The agent can continue reasoning and queue additional actions. A human can later approve or reject queued side effects.
+A particularly relevant design is the treatment of side-effecting actions. Instead of always blocking the agent synchronously while waiting for a human, a Gatekeeper can simulate an action locally and return the simulated result to the agent. The agent can continue reasoning and queue additional actions while a human later approves or rejects side effects.
 
-This addresses a common failure mode of agent automation: synchronous approval on the first write causes the whole job to stop, while disabling approvals entirely is unsafe.
+This directly targets an autonomy failure mode that ADP experiences today: one write approval can halt an otherwise autonomous task.
 
 ### Important distinction
 
@@ -65,206 +65,208 @@ Service credentials and native IAM remain necessary. Gatekeeper is an additional
 
 ## 3. Gadgets
 
-Gadgets are dynamically-created applications that run in isolated execution environments. Cloudflare OS uses Workers primitives such as Durable Objects, Dynamic Workers, and Facets. A workspace is backed by its own Durable Object and Gadgets execute as isolated dynamic workers/facets.
+Gadgets are dynamically-created applications that run in isolated execution environments. Cloudflare OS uses Workers primitives including Durable Objects and Dynamic Workers.
 
-The important design implication for ADP is not that every task needs a Gadget. Rather, Gadgets show a model in which agents can create and execute custom software without receiving unrestricted access to the host environment or all company resources.
+The relevant lesson for ADP is not that every task should become a Gadget. It is that agent-created software can execute in an isolated environment without receiving unrestricted access to company resources.
 
-Current ADP does not yet require this as a core capability. Its primary workloads are task orchestration, research, coding, review, documentation, and connected-system operations using existing tools.
+Current ADP workloads are primarily task orchestration, research, coding, review, documentation, and connected-system operations, so Gadget-style execution is not yet obviously a core requirement.
 
 ## 4. Blueprints
 
-Blueprints are reusable Gadget definitions. They capture source code and binding requirements, but deliberately exclude live data and credentials.
+Blueprints are reusable Gadget definitions. They capture source code and required bindings while excluding live data and credentials.
 
-A Blueprint includes:
+A Blueprint contains reusable executable structure, not simply agent instructions. This makes it adjacent to ADP Skills and templates, but not equivalent to them.
 
-- source code;
-- required connection/binding shapes;
-- metadata.
-
-It does not include:
-
-- SQLite contents;
-- chat/edit history;
-- live connections or credentials.
-
-Each new Gadget created from a Blueprint receives independent state and bindings.
-
-For ADP, this is conceptually adjacent to reusable Skills and templates, but they are not equivalent. A Skill primarily defines how an agent performs work. A Blueprint defines a reusable executable application plus its required capability bindings.
+- Skill: how an agent should perform work.
+- Blueprint: reusable executable application structure plus required bindings.
 
 ## 5. Deployment and maturity
 
-Cloudflare OS is open source and can be run locally. Its architecture is deeply built around Workers, Durable Objects, Dynamic Workers and Facets.
+Cloudflare OS is open source and can be run locally. Its architecture is strongly aligned with Cloudflare Workers primitives. The documented production path is currently most mature on Cloudflare infrastructure, and the official starter is explicitly early-access software.
 
-The official project states that it can conceptually run on open-source `workerd`, but production deployment to one's own server using workerd is still marked as coming soon. The supported production path is therefore currently most mature on Cloudflare infrastructure.
+A customized deployment can require Cloudflare platform capabilities such as Workers, KV, R2, Browser Rendering and Dynamic Worker Loaders. AI provider usage can add separate cost depending on configuration.
 
-The official starter also labels Cloudflare OS as early-access software and recommends pinning releases, reviewing changes, and re-verifying the trust boundary before production upgrades.
-
-A customized deployment requires Cloudflare platform capabilities including Workers, KV, R2, Browser Rendering, and Dynamic Worker Loaders. AI products are optional, but model usage can introduce separate cost depending on provider and configuration.
-
-This does not imply Cloudflare OS is prohibitively expensive; it means adoption creates a new runtime/platform dependency that must be justified by value.
+This does not mean Cloudflare OS is too expensive or unsuitable. It means its runtime/platform dependency must be evaluated against the value it provides.
 
 ## 6. Current ADP architecture relevant to this decision
 
-ADP currently separates its systems of record:
+ADP already separates systems of record and durable artifacts:
 
 - Notion: operational work state.
 - `cloud42-labo/ai-development-platform`: durable architecture, policy, governance and reusable artifacts.
 - `cloud42-labo/brain`: organizational memory.
 
-`AGENTS.md` already requires all managed work to execute pre-flight and post-flight controls. Existing `governance/ai-execution-constraints.md` requires, among other things:
+`AGENTS.md` and `governance/ai-execution-constraints.md` already define managed-work pre-flight/post-flight controls and Human/AI authority boundaries.
 
-- an exact task must exist;
-- the task must be executable;
-- execution state/time tracking must be opened before substantive work;
-- actor authority must be checked;
-- acceptance criteria and evidence must be verified before Done;
-- Human/AI authority boundaries must be respected.
-
-The ADP capability map already explicitly identifies Governance capabilities including Security, Guardrails, Human-on-the-Loop controls, Internal controls, and Decision records.
-
-Therefore, ADP does **not** lack governance rules. The current gap is that many of those rules are documented/pre-flight controls rather than one uniform runtime policy-enforcement layer placed in front of all external actions.
+Therefore ADP does **not** lack governance rules. The important gap is that these rules are not yet enforced through one uniform runtime authorization point before every connected-system side effect.
 
 ## 7. Same-axis comparison
 
 | Evaluation axis | Current ADP | Cloudflare OS |
 |---|---|---|
-| Work/task source of truth | Notion | Cloudflare OS workspace/context; not a Notion replacement by design |
-| Durable design artifacts | GitHub | Application/runtime source within OS deployment/Gadgets/Blueprints |
-| Organizational memory | Separate `brain` repository | Company context supplied to Agents |
+| Work/task source of truth | Notion | OS workspace/context; not inherently a Notion replacement |
+| Durable design artifacts | GitHub | OS/Gadgets/Blueprints source |
+| Organizational memory | Separate `brain` | Company context supplied to agents |
 | Agent work instructions | AGENTS / Skills / guides | Agent instructions/context |
-| Runtime authorization | Distributed across agent/tool/service controls; documented execution constraints | Gatekeeper as explicit capability enforcement layer |
-| Credential mediation | Connector/service specific | Gatekeeper owns service-specific auth mediation |
-| Human approval | Workflow/tool-specific | First-class Gatekeeper action approval |
+| Runtime authorization | Distributed across agent/tool/service controls | Gatekeeper as explicit enforcement layer |
+| Credential mediation | Connector/service specific | Gatekeeper-mediated service auth |
+| Human approval | Workflow/tool specific | First-class Gatekeeper action approval |
 | Approval without stopping reasoning | Not uniformly available | Simulated actions + deferred approval |
-| Audit | Notion/GitHub/tool logs and process evidence | Gatekeeper action logging |
-| Sandboxed dynamic apps | Not a core ADP capability | First-class Gadget model |
-| Reusable executable apps | Skills/templates are procedural | Blueprints package executable Gadget code + binding requirements |
-| Runtime dependency | Existing heterogeneous tools | Strongly aligned with Cloudflare Workers stack |
-| Current maturity risk | ADP is custom and evolving | Cloudflare OS itself is early access |
+| Audit | Notion/GitHub/tool logs | Gatekeeper action logging |
+| Sandboxed dynamic apps | Not core today | First-class Gadget model |
+| Runtime dependency | Existing heterogeneous tools | Cloudflare Workers stack |
+| Maturity risk | Custom/evolving | Cloudflare OS early access |
 
-## 8. Options
+## 8. Candidate options
 
-### Option A — Adopt Cloudflare OS as the primary ADP runtime/workspace now
+### Option A — Adopt Cloudflare OS as the primary ADP runtime/workspace
 
-**Benefits**
+**Potential benefits**
 
-- Gets Gatekeeper, Gadget, Blueprint and agent-runtime architecture as one coherent system.
-- Strong capability-security design from the outset.
-- Simulated side effects/deferred approval solve an important autonomy problem elegantly.
-- Reduces the need to invent a sandboxed app runtime later.
+- Coherent Gatekeeper, Gadget, Blueprint and agent-runtime architecture.
+- Capability-security design is built in.
+- Deferred approval is directly relevant to autonomous execution.
+- Sandboxed agent-created applications are available if ADP grows into that model.
 
-**Costs / risks**
+**Potential costs / risks**
 
-- Requires ADP to adopt a new central workspace/runtime model rather than only solving the authorization gap.
-- Duplicates or displaces parts of the existing Notion/GitHub/brain operating model.
-- Introduces Cloudflare Workers primitives and operations as central architecture dependencies.
-- Cloudflare OS is currently early access.
-- Production self-hosting on standalone workerd is not yet the mature documented path.
+- Introduces a new central workspace/runtime model.
+- May duplicate or displace existing Notion/GitHub/brain responsibilities.
+- Makes Cloudflare Workers primitives central dependencies.
+- Cloudflare OS is still early access.
 
-**Assessment:** strategically interesting, but too broad for the present need.
+**Current status:** must be tested, not rejected by assumption.
 
-### Option B — Adopt the Gatekeeper architecture pattern in ADP, keep current systems of record
+### Option B — Keep ADP systems of record and adopt Gatekeeper-style enforcement selectively
 
-**Benefits**
+**Potential benefits**
 
-- Solves the immediate gap: uniform agent authority decisions before connected-system side effects.
-- Preserves Notion, GitHub, Skills and brain responsibilities.
-- Can standardize decisions such as `allow`, `require_approval`, and `deny` across agents.
-- Creates a migration path toward stronger enforcement without moving all work into a new platform.
+- Targets the immediate authorization gap while preserving Notion, GitHub, Skills and brain.
+- Standardizes `allow / require_approval / deny` across agents.
+- Can be intentionally smaller than a full Gatekeeper clone.
 
-**Costs / risks**
+**Potential costs / risks**
 
-- ADP must implement and maintain a policy checker/enforcement adapter.
-- A naive YAML policy is not equivalent to Cloudflare Gatekeeper security.
-- Deferred action simulation is non-trivial and should not be reimplemented casually.
-- Credential isolation remains connector/service-specific unless a true proxy layer is added.
+- ADP must implement and maintain a trusted enforcement adapter.
+- A policy YAML alone is not security enforcement.
+- Credential isolation and deferred action simulation are difficult to reproduce correctly.
 
-**Assessment:** best fit now, provided the implementation is deliberately smaller than a Gatekeeper clone.
+**Current status:** plausible candidate, but must be compared against actual Cloudflare OS behavior.
 
 ### Option C — Keep current ADP controls only
 
 **Benefits**
 
 - No new component.
-- Current governance already captures many authority boundaries.
 
 **Costs / risks**
 
-- Rules remain distributed across guides, Skills, tool permissions and service IAM.
-- Agents can still encounter inconsistent approval behavior across tools.
-- No common policy decision/audit model.
-- No general solution to synchronous approval stalls.
+- Approval behavior remains tool-dependent.
+- Rules remain distributed.
+- No common runtime decision/audit model.
+- Does not solve synchronous approval stalls consistently.
 
-**Assessment:** insufficient for the stated autonomy goal.
+**Current status:** unlikely to satisfy the autonomy goal unless existing Claude/MCP permission settings alone eliminate the problem.
 
-## 9. Recommended architecture
+## 9. Required comparative PoC before final decision
 
-Recommendation: **Option B, with a deliberately narrow first phase.**
+The adoption decision is blocked on a practical comparison.
 
-The target responsibility split should be:
+### Scenario
 
-- **Notion** — what work exists, state, priority, decisions and operational evidence.
-- **Skills / AGENTS** — how work should be performed.
-- **Agent Policy** — whether a requested action is allowed, needs human approval, or is denied in the current context.
-- **Service IAM / credentials** — final hard security boundary on what is technically possible.
-- **Future enforcement adapter** — executes the Agent Policy decision immediately before external side effects and records the decision.
+Use the same representative managed-work sequence in each environment:
 
-This is analogous to a human organization's separation between procedure manuals and delegated-authority rules.
+1. Read a Notion task/resource.
+2. Update a reversible field such as Status or Result.
+3. Read back the result.
+4. Repeat multiple times in one autonomous run.
+5. Include one intentionally approval-worthy action in a safe test context if possible.
 
-### Phase 1
+### Variant A — Current Claude environment
 
-Implement only a policy decision function with fail-closed defaults:
+Measure the baseline approval-stall behavior using current Claude permissions/MCP configuration.
+
+### Variant B — Cloudflare OS / Gatekeeper practical PoC
+
+Run the equivalent sequence through Cloudflare OS Gatekeeper or the closest supported Notion-capable Gatekeeper path.
+
+### Variant C — ADP-native Policy Checker PoC
+
+Run the same logical sequence with a fail-closed runtime decision function:
 
 `decision = evaluate(actor, service, action, resource, environment, task_context)`
 
-Possible decisions:
+Decisions:
 
 - `allow`
 - `require_approval`
 - `deny`
 
-The default must be `deny` or `require_approval`, not automatic approval.
+### Required measurements
 
-### Phase 2
+For every variant, record:
 
-Add service adapters for the highest-value operations, beginning with GitHub and Notion. Record every decision and side effect.
+- number of Human approval prompts;
+- whether approval blocks the entire agent run;
+- which actions can safely execute without approval;
+- credential exposure to the agent;
+- resource-scope isolation;
+- audit-log availability;
+- setup and maintenance complexity;
+- additional fixed or metered cost;
+- compatibility with existing Notion/GitHub/Skills operations.
 
-### Phase 3
+### Decision rule
 
-Evaluate whether a proper Gatekeeper-style proxy is warranted for credential isolation, resource-scoped capabilities, centralized audit, and deferred approval.
+**No final Cloudflare OS adoption decision may be recorded until the comparative PoC is complete or a specific technical blocker makes one variant impossible.** If a variant cannot be run, the blocker must be documented rather than guessed away.
 
-### Explicit non-goal
+## 10. Provisional architecture hypothesis
 
-Do not attempt to reproduce Cloudflare OS's simulated side-effect engine in Phase 1. That feature depends on modeling service state and action semantics correctly. It should either be adopted from a proven Gatekeeper implementation or implemented only after a narrow PoC demonstrates the need.
+Until the PoC is complete, the following is a hypothesis only:
 
-## 10. Correction to the initial ADP policy draft
+- **Notion** — what work exists, state, priority, decisions and operational evidence.
+- **Skills / AGENTS** — how work should be performed.
+- **Runtime authorization layer** — whether an action is allowed, requires approval, or is denied in the current context.
+- **Service IAM / credentials** — final technical security boundary.
 
-The current experimental `governance/agent-policy.yaml` uses `default_decision: approve`. This is not recommended as the durable authorization model.
+The key question is not whether this separation is sensible. It is **whether Cloudflare OS should provide the runtime authorization layer or ADP should implement a smaller one itself**.
 
-A capability-oriented policy should fail closed. Unknown actions must not become authorized merely because no rule matched. The draft should therefore be treated as an experiment, not the approved policy, until changed to a fail-closed default and backed by an enforcement point.
+## 11. Correction to the initial ADP policy draft
 
-Likewise, a YAML document alone is not a security control. It becomes a control only when all relevant external actions are forced through a trusted evaluator that the acting agent cannot bypass or modify.
+The current experimental `governance/agent-policy.yaml` uses `default_decision: approve`. This must not be treated as a final authorization model.
 
-## 11. Decision criteria for re-evaluating full Cloudflare OS adoption
+A capability-oriented policy should fail closed. Unknown actions should resolve to `deny` or `require_approval`, not automatic permission.
 
-Re-open Option A if one or more of the following becomes true:
+Likewise, a YAML document alone is not a security control. It becomes an enforceable control only when relevant external actions are forced through a trusted evaluator that the acting agent cannot bypass or freely modify.
 
-1. ADP needs many users to generate and share custom AI-built applications.
-2. Agent sandboxing becomes a recurring infrastructure problem rather than an occasional need.
-3. The number of external service integrations makes maintaining custom policy adapters expensive.
-4. Deferred approvals/action simulation become critical to daily throughput.
-5. Credential mediation and per-resource capability isolation cannot be reliably achieved with existing connectors.
-6. Cloudflare OS leaves early access and its operational model is acceptable for ADP's production requirements.
+## 12. Conditions that strengthen the case for full Cloudflare OS
 
-## 12. Final decision
+Cloudflare OS becomes more attractive if one or more of the following is demonstrated:
 
-**Decision for the current stage:** retain the current ADP systems of record and adopt a Gatekeeper-inspired runtime authorization layer incrementally.
+1. It materially reduces approval stalls in the Claude→Notion scenario.
+2. Deferred approval keeps agent reasoning/work progressing safely.
+3. Credential mediation and per-resource isolation are significantly stronger than the practical ADP-native alternative.
+4. ADP begins to need many agent-created sandboxed applications.
+5. The number of external service integrations makes custom adapters expensive.
+6. Cloudflare OS operational maturity and cost are acceptable for ADP production use.
 
-**Do not claim:** that ADP has implemented Cloudflare Gatekeeper merely because it has a policy file.
+## 13. Conditions that strengthen the case for ADP-native enforcement
 
-**Do claim:** Cloudflare OS provides a credible reference architecture showing how AI agents can be treated as first-class principals with restricted capabilities, audited service access, human approval for side effects, and sandboxed application execution.
+An ADP-native layer becomes more attractive if the PoC shows that:
 
-The next implementation milestone should therefore be a small, fail-closed Policy Checker PoC. Its purpose is to validate the separation of work instructions from execution authority. It is not to recreate Cloudflare OS.
+1. Most approval stalls are actually solved by Claude/MCP permission configuration.
+2. Only a small number of reversible Notion/GitHub actions need common policy enforcement.
+3. Cloudflare OS introduces materially more platform complexity without corresponding autonomy gains.
+4. Existing connectors already provide sufficient credential isolation and resource scoping.
+5. Deferred simulation is not required for normal ADP throughput.
+
+## 14. Decision status
+
+**Final decision: pending comparative practical PoC.**
+
+The previous recommendation for selective adoption should be read as an architectural hypothesis, not an approved implementation decision.
+
+The next required milestone is the Cloudflare OS practical PoC focused on the real Claude→Notion approval-stall problem, followed by the same-axis ADP Policy Checker comparison. Only then should ADP choose full adoption, partial adoption, or native implementation.
 
 ## Primary sources
 
