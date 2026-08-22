@@ -1,0 +1,142 @@
+diff --git a/packages/gatekeeper-notion/src/notion-actions.ts b/packages/gatekeeper-notion/src/notion-actions.ts
+--- a/packages/gatekeeper-notion/src/notion-actions.ts
++++ b/packages/gatekeeper-notion/src/notion-actions.ts
+@@
+-import type { ActionDescription, ApprovalQueue, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
++import type {
++  ActionDescription,
++  ActionKind,
++  ApprovalQueue,
++  ObservationDescription,
++} from "@gadgets/workshop-shared/gatekeeper";
+@@
+ export type StoredActionRecord = {
+@@
+ };
++
++// ADP-045-B PoC only.
++//
++// This intentionally exposes one narrowly-scoped auto-approval kind. It is safe only when the
++// Gatekeeper binding itself is attached to a dedicated test/task database. Production policy must
++// not infer safety from the generic setProperties operation alone.
++export const NOTION_TASK_SAFE_PROPERTIES_ACTION: ActionKind = {
++  tag: "notion.task.safe-properties",
++  label: "Update safe task properties",
++};
++
++export const NOTION_AUTO_APPROVABLE_ACTIONS: ActionKind[] = [
++  NOTION_TASK_SAFE_PROPERTIES_ACTION,
++];
++
++const SAFE_TASK_PROPERTY_TYPES = new Map<string, NotionPropertyInput["type"]>([
++  ["Status", "status"],
++  ["Result", "rich_text"],
++]);
++
++export function isSafeTaskPropertyUpdate(action: NotionAction): boolean {
++  if (action.type !== "setProperties") return false;
++  const entries = Object.entries(action.properties);
++  if (entries.length === 0) return false;
++  return entries.every(([name, value]) => SAFE_TASK_PROPERTY_TYPES.get(name) === value.type);
++}
+@@
+-    case "setProperties":
+-      return {
++    case "setProperties": {
++      const autoApprovable = isSafeTaskPropertyUpdate(action);
++      return {
+         title: "Update Notion page properties",
+         description: `Update properties: ${Object.keys(action.properties).join(", ") || "(none)"}.`,
+         implementsRevert: true,
++        ...(autoApprovable ? {
++          actionKind: NOTION_TASK_SAFE_PROPERTIES_ACTION,
++          autoApprovable: true,
++        } : {}),
+       };
++    }
+*** End Patch
+
+diff --git a/packages/gatekeeper-notion/src/notion.ts b/packages/gatekeeper-notion/src/notion.ts
+--- a/packages/gatekeeper-notion/src/notion.ts
++++ b/packages/gatekeeper-notion/src/notion.ts
+@@
+   NotionStore,
++  NOTION_AUTO_APPROVABLE_ACTIONS,
+   applyStoredAction,
+@@
+   async getAutoApprovableActions() {
+-    return [];
++    return NOTION_AUTO_APPROVABLE_ACTIONS;
+   }
+@@
+   async getAutoApprovableActions() {
+-    return [];
++    return NOTION_AUTO_APPROVABLE_ACTIONS;
+   }
+*** End Patch
+
+diff --git a/packages/gatekeeper-notion/__tests__/notion-auto-approval.test.ts b/packages/gatekeeper-notion/__tests__/notion-auto-approval.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/gatekeeper-notion/__tests__/notion-auto-approval.test.ts
+@@
++import { describe, expect, it } from "vitest";
++import {
++  describeAction,
++  isSafeTaskPropertyUpdate,
++  NOTION_TASK_SAFE_PROPERTIES_ACTION,
++  type NotionAction,
++} from "../src/notion-actions";
++
++function setProperties(
++  properties: Extract<NotionAction, { type: "setProperties" }>["properties"],
++): Extract<NotionAction, { type: "setProperties" }> {
++  return {
++    type: "setProperties",
++    pageId: "test-page",
++    properties,
++    previousProperties: {},
++  };
++}
++
++describe("Notion task-safe auto approval", () => {
++  it("allows Status updates", () => {
++    const action = setProperties({ Status: { type: "status", status: "In Progress" } });
++    expect(isSafeTaskPropertyUpdate(action)).toBe(true);
++    expect(describeAction(action)).toMatchObject({
++      actionKind: NOTION_TASK_SAFE_PROPERTIES_ACTION,
++      autoApprovable: true,
++    });
++  });
++
++  it("allows Result updates", () => {
++    const action = setProperties({ Result: { type: "rich_text", text: "PoC result" } });
++    expect(isSafeTaskPropertyUpdate(action)).toBe(true);
++  });
++
++  it("allows Status and Result together", () => {
++    const action = setProperties({
++      Status: { type: "status", status: "Done" },
++      Result: { type: "rich_text", text: "Completed" },
++    });
++    expect(isSafeTaskPropertyUpdate(action)).toBe(true);
++  });
++
++  it("does not allow unrelated properties", () => {
++    const action = setProperties({ Priority: { type: "select", option: "P1" } });
++    expect(isSafeTaskPropertyUpdate(action)).toBe(false);
++    expect(describeAction(action).autoApprovable).not.toBe(true);
++  });
++
++  it("does not allow a safe-name property with an unexpected type", () => {
++    const action = setProperties({ Status: { type: "rich_text", text: "In Progress" } });
++    expect(isSafeTaskPropertyUpdate(action)).toBe(false);
++  });
++
++  it("keeps archive manual", () => {
++    const action: NotionAction = { type: "archive", pageId: "test-page" };
++    expect(isSafeTaskPropertyUpdate(action)).toBe(false);
++    expect(describeAction(action).autoApprovable).not.toBe(true);
++  });
++});
+*** End Patch
