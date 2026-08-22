@@ -4,6 +4,12 @@
 
 This repository is the system of record for durable ADP artifacts and intellectual assets. Notion remains the system of record for operational work state. `cloud42-labo/brain` remains the organizational-memory store.
 
+## Mandatory lifecycle gate
+
+For every managed task, **do not rely on conversational memory**. At task start and again immediately before completion, read and execute `governance/ai-execution-constraints.md`. This is mandatory for Chris/ChatGPT and Claude alike.
+
+A managed Task may not be considered complete merely because an artifact is produced or a PR is merged. `Status = Done` is permitted only after acceptance criteria, Result evidence, the applicable Task Time Event, and `Completed At` are complete. If a Human Time Event lacks an exact observable timestamp, ask rather than estimate it.
+
 ## Before starting work
 
 1. Read the relevant Notion Product / Epic / Story / Task.
@@ -31,11 +37,13 @@ This repository is the system of record for durable ADP artifacts and intellectu
 
 ## Completion
 
-Before marking a Notion task Done, execute the completion post-flight in `governance/ai-execution-constraints.md`:
+Immediately before marking a Notion task Done, **re-read** and execute the completion post-flight in `governance/ai-execution-constraints.md`:
 
 - directly verify acceptance criteria and intended artifact/result;
 - record material evidence and commit/PR URLs in `Result` or the relevant reference property;
-- close the current Task Time Event with `Ended At` (JST);
+- verify the applicable Task Time Event exists and close it with `Ended At` (JST);
 - record `Completed At` (JST);
 - route residual Human/other-agent work instead of falsely marking the task Done;
 - transition `Status = Done` only after the supporting evidence/time records exist.
+
+If the Time Event is absent or still open, stop: the Task is not Done.
