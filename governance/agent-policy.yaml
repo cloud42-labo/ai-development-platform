@@ -1,0 +1,78 @@
+version: 0
+policy_model: capability-based
+default_decision: approve
+
+principles:
+  - skills_define_how
+  - notion_defines_work
+  - policy_defines_authority
+  - service_permissions_are_final_boundary
+  - agents_must_not_expand_their_own_authority
+
+rules:
+  - id: read-connected-resources
+    service: "*"
+    action: read
+    resource: scoped
+    decision: allow
+    audit: true
+
+  - id: notion-managed-task-update
+    service: notion
+    action: [update_task_status, update_task_result, create_task]
+    resource: stories_and_tasks
+    conditions:
+      - execution_constraints_passed
+      - placement_evidence_required_for_create
+    decision: allow
+    audit: true
+
+  - id: github-working-branch
+    service: github
+    action: [create_branch, commit, push, create_pr, update_pr]
+    resource: allowed_repositories
+    conditions:
+      - non_protected_branch
+      - managed_task_exists
+    decision: allow
+    audit: true
+
+  - id: github-protected-merge
+    service: github
+    action: merge
+    resource: protected_branch
+    decision: approve
+    audit: true
+
+  - id: production-change
+    service: "*"
+    action: [production_deploy, publish, production_config_change]
+    resource: production
+    decision: approve
+    audit: true
+
+  - id: destructive-delete
+    service: "*"
+    action: [delete, purge, destroy]
+    resource: durable
+    decision: approve
+    audit: true
+
+  - id: credential-or-authority-change
+    service: "*"
+    action: [change_secret, change_credential, change_permission, change_policy]
+    resource: security_control
+    decision: approve
+    audit: true
+
+  - id: self-authority-escalation
+    service: policy
+    action: expand_own_authority
+    resource: agent_policy
+    decision: deny
+    audit: true
+
+future:
+  approval_queue: planned
+  action_simulation: evaluate_after_phase_1
+  gatekeeper_worker_adapters: evaluate_after_policy_checker
