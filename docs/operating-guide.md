@@ -209,7 +209,7 @@ Borderline guidance:
 
 - **All criteria AI-verifiable or already satisfied by Human evidence** — do not create a Human Request and do not transition to `Blocked`. Verify the criteria directly, record the evidence and its links in `Result`, and complete the task through the normal completion post-flight.
 - **Some criteria Human-only** — first complete and record every AI-verifiable criterion. Then create a Human Request covering only the Human-only remainder, written as a concrete action with explicit completion evidence. Never hand a whole task to a person because part of it needs one.
-- `Blocked` is permitted only while a genuinely Human-only criterion is outstanding, and the Blocker text must name that criterion and the request carrying it rather than the task as a whole.
+- A `Blocked` transition **for a Human reason** is permitted only while a genuinely Human-only criterion is outstanding, and the Blocker text must name that criterion and the request carrying it rather than the task as a whole. This section governs Human-reason blocks only; a task blocked on an unavailable AI dependency, an infrastructure outage, or another non-Human cause follows the ordinary `Blocked` rules in 11.1 and is untouched by this gate.
 - Record the classification and the sources searched in `Result` or `Approach Decision`, so the next agent can re-evaluate the gate instead of repeating the search.
 
 ### 11.6 Standing re-evaluation of existing Human gates

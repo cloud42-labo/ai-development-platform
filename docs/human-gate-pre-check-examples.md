@@ -2,116 +2,59 @@
 
 > **Artifact status:** durable reference for applying the Human Gate Pre-check defined in [`operating-guide.md`](operating-guide.md) section 11 and [`../governance/ai-execution-constraints.md`](../governance/ai-execution-constraints.md).
 >
-> The task states quoted below are the evidence as it stood on **2026-08-24 (JST)**, captured to show how the classification was reached. Notion remains the system of record for current state; do not read these examples as current status.
+> These examples are **anonymized patterns**, not a snapshot of any task's current status. Notion is the system of record for what state a given task is actually in today; this file exists so the reasoning pattern survives after the concrete tasks it was drawn from are archived or their state has moved on. For the dated, linkable evidence behind each pattern (the actual task IDs, PR numbers, run IDs, and timestamps), see the `Result` field of `ADP-043-H` in Notion Stories & Tasks — that is where operational history belongs, not here.
 
-The pre-check exists because a Human gate is a claim about the present ("no record exists yet that satisfies this criterion") written in the past. The three examples below are the three outcomes the classification can produce, applied to real work.
+The pre-check exists because a Human gate is a claim about the present ("no record exists yet that satisfies this criterion") written in the past. The three patterns below are the three outcomes the classification can produce.
 
-## Case 1 — False Human gate
+## Pattern 1 — False Human gate
 
-**Subject:** [HPM-02-S05｜経営コックピットで事業目標・人財・予算・KPI・時間軸を同時に判断できる](https://app.notion.com/3b8fbd826f3b81529628cb1fc7f5e272) — Status `Blocked`.
+**Shape:** a parent Story is `Blocked` because a child task is recorded as incomplete, but the child was actually completed some time ago and the parent's Blocker text was never revisited.
 
-**Blocker as written:** HPM-02-S05-5 (Human verification of decision-making clarity through actual screen operation) is incomplete, therefore the parent Story cannot complete.
+**How it's found:** the Blocker names a specific child task or request. Checking whether that child is still incomplete is a single lookup — this is what makes the daily sweep affordable. A Blocker written as an open-ended "Human confirmation needed" without naming what would satisfy it is the kind that rots silently, because there is nothing concrete to re-check.
 
-**Sources searched:** Notion Stories & Tasks (all HPM-02-S05 children), the feedback record attached to HPM-02-S05-6, and GitHub `cloud42-labo/experimental` PR #83.
+**Classification approach:** walk each Acceptance Criterion of the child separately.
+- Design/behavior criteria already implemented and verified (a merged PR, a passing headless run, a rendered screen) → `AI-verifiable`, already satisfied.
+- Criteria requiring a person's judgement (readability, usefulness, "did this make sense to a real user") → check whether an actual user session, survey, or feedback record already exists with a date. If it does and it covers the criterion, classify as `Human evidence already exists` rather than re-requesting it.
 
-**Classification:**
+**Outcome:** once every criterion is covered by one of the two "already satisfied" classes, no `Human-only` criterion remains — clear the Blocker and complete the task, with the evidence links recorded in `Result`.
 
-| Acceptance Criterion | Class | Evidence |
-|---|---|---|
-| Five viewpoints (goal, departmental talent portfolio, investment budget, KPI impact, five-year timeline) comparable without screen transitions | Human evidence already exists / AI-verifiable | [PR #83](https://github.com/cloud42-labo/experimental/pull/83) merged 2026-08-11, single-screen cockpit; design fixed in S05-1/S05-2/S05-4, all `Done` |
-| Not too many controls; KPI, budget and future impact traceable when a measure changes | Human evidence already exists | HPM-02-S05-3 `Done` (realtime preview, PR #83); HPM-02-S05-X `Done` with a Chromium headless run confirming four simultaneous targets are reachable |
-| Human confirmation that the screen is readable as a management decision | Human evidence already exists | 取締役Labo 6th session survey, **2026-08-23**, recorded on [HPM-02-S05-6](https://app.notion.com/p/3c5fbd826f3b81109339c4440c7ba55c): real users reported learning how to prioritise placement and reskilling under limited resources. Three improvement points were extracted and already backlogged as HPM-02-S04-4, HPM-02-S02-8 and HPM-02-S00-6 |
+### Pattern 1b — the same failure produced by a tool limitation, not a Human gap
 
-**Result:** no `Human-only` criterion. Every child (S05-1 … S05-6, S05-X) was already `Done`, including S05-5, which was itself corrected on 2026-08-24 06:41 JST using the same survey evidence. The Blocker text was simply never revisited after the child completed, so a satisfied gate kept the parent Story stopped.
+**Shape:** an agent tries to verify something (typically a CI result) through one connector, that connector's API surface doesn't expose the record it needs (e.g. it only lists runs triggered by a specific event type), and the agent concludes a Human must check it instead of trying a different path to the same evidence.
 
-**Action taken:** no Human Request created. Blocker cleared and the Story completed with the evidence links recorded in `Result`.
+**Rule this produces:** *one tool failing is not evidence that a Human is required.* Before classifying a criterion `Human-only` because a lookup failed, try another tool, another agent's connector, or the underlying API directly — and record which paths were tried and which one worked, so the next agent neither repeats the dead end nor inherits a wrong conclusion.
 
-**What made it detectable:** the gate named a *specific child task*. Checking whether that child was still incomplete took one query. Gates written as "Human confirmation needed" without naming what would satisfy them are the ones that rot silently.
+## Pattern 2 — Genuine Human gate, correctly maintained
 
-### Case 1b — the same failure produced by a tool limitation
+**Shape:** every criterion genuinely requires a person and no adequate record exists — account creation with identity verification and payment, filling in a third-party console form with no API path (even when the *content* was already AI-drafted — data entry into someone else's UI is still a Human action), or a decision that is inside the Owner's authority (positioning, category, irreversible commitments).
 
-**Subject:** [HUMAN-SPOT-06-S01-T02-1｜release署名CIの実行結果を確認する](https://app.notion.com/3c6fbd826f3b8165bae6ddf4f3f1377b) (`Type = Human Request`, `Ready`) and its parent [SPOT-06-S01-T02](https://app.notion.com/3c5fbd826f3b81309adee7e7fa5930c6) (`Blocked`).
+**What distinguishes this from Pattern 1:** in Pattern 1 the Human act had already happened and had a dated record somewhere. Here it demonstrably has not — for instance, a sibling gate in the same Story is already `Done`, which confirms the Owner is actively working the Story and makes the continued absence of any record for this gate meaningful rather than merely unsearched.
 
-**Request as written:** open GitHub Actions, find the run triggered by the PR #25 merge to `main`, and report whether `Build release APK` and `Verify release APK signer` passed.
+**Action:** leave the Human Request as-is. The pre-check is not a bias toward closing gates — it is a requirement to look before opening or keeping one, in both directions.
 
-**Why it was created:** the acting agent's GitHub connector exposed only pull-request-triggered runs, so the merge-commit run appeared to have zero runs. Rather than guess, the agent delegated the lookup to a person — the right instinct, applied one step too early.
+## Pattern 3 — Partial Human gate
 
-**Classification:** the single criterion is `AI-verifiable`. Reading a CI result is not Human work; only that agent's connector could not reach it.
+**Shape:** a Blocked task bundles several checkpoints or questions under one Human confirmation requirement, but when split apart, some checkpoints are already AI-verifiable or already covered by existing Human evidence, and only a genuine remainder needs a person.
 
-**Evidence found through a different tool path** (workflow-run listing filtered by `branch=main`, then job listing):
+**Classification approach:** decompose the gate into its individual checkpoints/questions rather than treating it as one all-or-nothing Human confirmation. Score each one independently against the three classes.
 
-- Run [32623341668](https://github.com/cloud42-labo/serendipity-spot/actions/runs/32623341668), workflow `serendipity-spot-android build`, event `push`, head `3627d056fe1977de41329137854ad42165afe35c` (the PR #25 merge commit), conclusion **success**.
-- Step 13 `Build release APK` — success. Step 14 `Verify release APK signer` — success. Job environment shows `HAS_RELEASE_KEY: true`, so the release path executed rather than being skipped.
-- The verification step is not decorative: it compares the keystore SHA-1 against the APK signer certificate and exits non-zero on mismatch, so its success establishes that the release APK was signed with the CI release key.
-
-**Action taken:** the Human Request was completed from the CI evidence without Owner involvement, and the parent task unblocked.
-
-**Rule this produced:** *one tool failing is not evidence that a Human is required.* Before declaring a criterion Human-only because a lookup failed, try another tool, another agent's connector, or the underlying API — and record which paths were tried, so the next agent neither repeats the dead end nor inherits its conclusion.
-
-## Case 2 — Genuine Human gate, correctly maintained
-
-**Subject:** [SPOT-06-S01-H03｜Play Consoleアカウントセットアップ・Data Safetyフォーム入力・カテゴリ確定](https://app.notion.com/3c5fbd826f3b81d7938ac0e8564bec3a) (`Type = Human Request`, `Ready`).
-
-**Sources searched:** Notion Stories & Tasks under SPOT-06-S01, the `android/google-play-release-checklist.md` artifact referenced by the request, GitHub PR #25 and the repository's Actions history.
-
-**Classification:**
-
-| Acceptance Criterion | Class | Why |
-|---|---|---|
-| A usable Google Play developer account exists | Human-only | Account creation with identity verification and a US$25 registration payment. Account creation, identity proof and payment are Owner authority; no connected source can perform or substitute for them |
-| Privacy policy URL and Data Safety form submitted in Play Console | Human-only | Form submission inside a third-party console with no available API path. The *content* was already drafted by AI in the release checklist, so the Human action is data entry against the live option wording, not authorship |
-| Store category finalised | Human-only | A product positioning decision inside the Owner's authority (「地図とナビ」 vs 「ツール」). AI may recommend; it may not decide |
-
-**Result:** all criteria `Human-only`. No adjacent evidence exists — the sibling gate H01 (release key generation and Secrets registration) is `Done`, which confirms the Owner is acting on this Story and makes the absence of any Play Console record meaningful rather than merely unsearched.
-
-**Action taken:** the Human Request was left as-is. The gate is doing its job.
-
-**What separates this from Case 1:** in Case 1 the Human act had already happened and had a dated record. Here it demonstrably has not. The pre-check is not a bias toward closing gates — it is a requirement to look before opening or keeping one.
-
-## Case 3 — Partial Human gate
-
-**Subject:** [HPM-02-S04-3｜4チェックポイントで振り返り、研修で分かりやすさを検証する](https://app.notion.com/3b8fbd826f3b816aa49cc0ea177362fd) (`Blocked`, Human), which also blocks its parent Story [HPM-02-S04](https://app.notion.com/3b8fbd826f3b81ae8b66e6ad74b444ac).
-
-**Blocker as written:** verification of comprehensibility by actual training participants is required; the AI will not judge "was it understandable" on its own.
-
-**Sources searched:** the reflection design recorded on the task itself, HPM-02-S04's `Result` (headless verification, 2026-08-12 17:50 JST), and the 取締役Labo 6th session survey on HPM-02-S05-6.
-
-**Classification, per reflection checkpoint** (the task fixes four questions and requires 3 of 4 to be answered unaided):
-
-| Checkpoint | Class | Evidence or reason |
-|---|---|---|
-| The four-question reflection UI and the 予定 vs 実績 causal trace actually render | AI-verifiable | Already verified: HPM-02-S04 `Result` records a Chromium headless run through five years showing the four-indicator delta, per-department causal trace and all four reflection prompts, with no console errors |
-| Q2 配分 — can the player explain how they prioritised limited talent budget, and why? | Human evidence already exists | 取締役Labo survey, 2026-08-23: participants reported obtaining the learning of prioritising placement and reskilling under limited resources |
-| Q1 目標, Q3 時間差, Q4 結果 | Human-only | The survey collected general impressions and improvement requests; it did not put these three questions to participants. Human evidence covers what was actually observed, and no more |
-
-**Result:** the gate is real but far narrower than it was written. One of four checkpoints is already evidenced, and the AI-verifiable portion was complete twelve days before the gate was last touched.
-
-**Action taken:** the task stays `Blocked`, but the Blocker was rewritten to name only the residual — confirm Q1/Q3/Q4 with participants at the next training session — with the satisfied portions and their evidence recorded in `Result`. The Owner is asked for three questions rather than an open-ended "verify the game is understandable".
-
-**Why narrowing matters even when the gate survives:** an unscoped gate is unschedulable. "Verify comprehensibility in a training session" has no defined completion, so it drifts; "ask participants these three questions and record the answers" fits into a session that is happening anyway. Narrowing converts a stalled dependency into a scheduled one.
+**Action:** the task can stay `Blocked`, but the Blocker text is rewritten to name only the residual — the specific checkpoints still needing a person — with the satisfied portions and their evidence recorded in `Result`. An unscoped gate ("verify this is understandable") has no defined completion and drifts; a narrowed one ("confirm these two specific points at the next session that's happening anyway") fits into work already scheduled. Narrowing converts a stalled dependency into a scheduled one, even when the gate itself survives.
 
 ## What the first inventory pass found
 
-The pre-check was applied on 2026-08-24 to every open `Type = Human Request` and every task `Blocked` for a Human reason — 28 records in total. Four were false gates; the rest were correct and left alone.
+The pre-check was first applied across every open `Type = Human Request` and every task `Blocked` for a Human reason in one pass (28 records). A small minority were false gates (Pattern 1/1b); the large majority were correct and left alone (Pattern 2, or legitimate pending dependencies). See `ADP-043-H`'s `Result` in Notion for the exact count and the specific tasks corrected on that pass.
 
-Every false gate had the same shape: **a Human act completed, and the record that pointed at it was never updated.** None of them were caused by a Human failing to act.
+Every false gate found in that pass had the same shape: **a Human act had completed, and the record pointing at it was never updated.** None were caused by a Human failing to act. Two consequences follow, and both are now rules (see [`operating-guide.md`](operating-guide.md) section 11.6):
 
-| Pattern | Count | Signature |
-|---|---|---|
-| Parent stalled on a child that had already completed | 3 | The Blocker names a specific task; that task is `Done` |
-| Gate opened because one agent's connector could not reach the evidence | 1 | The `Approach Decision` says the AI "could not retrieve" something, rather than that a person is required |
+- **Check the named dependency first.** A Blocker that names a task or request is verified with one lookup. This is what makes clearing stale gates cheap enough to do daily.
+- **A satisfied Human gate does not mean the task is Done.** Where the Human portion is complete but AI work remains, the correct move is to return the task to `Ready` with the residual AI work named — not to close it, and not to leave it `Blocked`. `Blocked` and `Done` are both wrong answers for "the person finished; the machine has not started".
 
-Two consequences follow, and both are now rules:
+## Reading the three patterns together
 
-- **Check the named dependency first.** A Blocker that names a task or request is verified with one lookup. This makes clearing stale gates cheap enough to do daily, which is the only reason the standing re-evaluation is affordable.
-- **A satisfied Human gate does not mean the task is Done.** In two of the four cases the Human portion was complete but AI work remained, so the correct move was to return the task to `Ready` with the residual AI work named — not to close it, and not to leave it Blocked. Blocked and Done are both wrong answers for "the person finished; the machine has not started".
-
-## Reading the three cases together
-
-| | Case 1 | Case 2 | Case 3 |
+| | Pattern 1 | Pattern 2 | Pattern 3 |
 |---|---|---|---|
 | Human act already performed and recorded? | Yes | No | Partly |
-| AI-verifiable portion completed before asking? | N/A — nothing left | Yes, the form content was pre-drafted | Yes, twelve days earlier |
-| Outcome | Gate removed, task completed | Gate kept unchanged | Gate kept, scope reduced to the residual |
+| AI-verifiable portion completed before asking? | N/A — nothing left | Often, e.g. content pre-drafted | Often, ahead of time |
+| Outcome | Gate removed, task completed | Gate kept unchanged | Gate kept, scope narrowed to the residual |
 
-The pre-check does not decide in advance that Humans are unnecessary. It decides that a Human gate must be justified by the absence of evidence, and that the absence must be established by searching rather than assumed by inheritance.
+The pre-check does not decide in advance that Humans are unnecessary. It decides that a Human gate must be justified by the current absence of evidence, and that the absence must be established by searching rather than assumed by inheritance from an earlier, possibly stale, gate.
