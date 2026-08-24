@@ -15,8 +15,9 @@ A managed Task may not be considered complete merely because an artifact is prod
 1. Read the relevant Notion Product / Epic / Story / Task.
 2. Confirm acceptance criteria and the authoritative artifact path in this repository.
 3. Execute the managed-work pre-flight in `governance/ai-execution-constraints.md`: exact Task exists, executable state/Blocker is valid, `Status = In Progress` + `Started At` (JST) are recorded, Task Time Event is opened, and actor authority is valid. Do not perform the substantive write/work until this gate passes.
-4. Verify current primary documentation when the work depends on an external SDK, library, service, standard, or API.
-5. Before external retrieval, communication, or use of a metered service, execute the pre-flight gate in `governance/research-security-policy.md`. If data classification, secret handling, extraction budget, billing, or write authority is unclear, stop before the external action.
+4. If the task is already `Blocked` for a Human reason, or already carries an open Human Request, re-run the Human gate pre-flight in `governance/ai-execution-constraints.md` before accepting that the gate still holds. A gate written earlier is not evidence about the present.
+5. Verify current primary documentation when the work depends on an external SDK, library, service, standard, or API.
+6. Before external retrieval, communication, or use of a metered service, execute the pre-flight gate in `governance/research-security-policy.md`. If data classification, secret handling, extraction budget, billing, or write authority is unclear, stop before the external action.
 
 ## Source-of-truth rules
 
@@ -43,7 +44,7 @@ Immediately before marking a Notion task Done, **re-read** and execute the compl
 - record material evidence and commit/PR URLs in `Result` or the relevant reference property;
 - verify the applicable Task Time Event exists and close it with `Ended At` (JST);
 - record `Completed At` (JST);
-- route residual Human/other-agent work instead of falsely marking the task Done;
+- execute the Human gate pre-flight before creating a Human Request or moving to `Blocked` for a Human reason, and route only the genuinely Human-only remainder instead of falsely marking the task Done;
 - transition `Status = Done` only after the supporting evidence/time records exist.
 
 If the Time Event is absent or still open, stop: the Task is not Done.

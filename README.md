@@ -17,6 +17,7 @@ In short: **State = Notion / Artifact = GitHub / Memory = brain**.
 ## Start here
 
 - [Operating Guide](docs/operating-guide.md)
+- [Human Gate Pre-check — worked examples](docs/human-gate-pre-check-examples.md)
 - [Organization Digital Twin Capability Map](docs/capability-map.md)
 - [Source-of-Truth Policy](governance/source-of-truth.md)
 - [Knowledge Asset Model: State / Artifact / Memory](decisions/0001-knowledge-asset-model.md)
