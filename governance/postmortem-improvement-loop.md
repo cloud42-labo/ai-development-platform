@@ -27,6 +27,7 @@ A rule violation is not closed by documenting it. Follow this loop:
 - **Rule not read / precondition skipped** → execution pre-flight, AGENTS/Skill entry point, or automated gate.
 - **Ambiguous rule** → Operating Guide/policy wording plus testable acceptance criteria.
 - **Authority error** → Human/AI authority gate and explicit transfer path.
+- **False Human gate** (work stalled on a Human Request or Human-reason `Blocked` whose criteria were already satisfiable from existing evidence) → Human gate pre-flight and its standing re-evaluation.
 - **Source-of-truth / traceability gap** → required Notion/GitHub relation/evidence before transition.
 - **Time/evidence recording gap** → managed-work completion post-flight.
 - **External data / secret / billing risk** → `governance/research-security-policy.md`.

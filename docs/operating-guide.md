@@ -13,7 +13,7 @@
 - Immediately before starting a Task, record `Status = In Progress` and `Started At` in JST.
 - At completion, record `Result`, `Completed At` in JST and `Status = Done`.
 - Before implementation that depends on an external SDK, library or service, verify the latest primary documentation.
-- Do not create a Human Request for information or actions an AI agent can directly verify through Notion, GitHub or another connected source.
+- Do not create a Human Request for information or actions an AI agent can directly verify through Notion, GitHub or another connected source. Before asking a person for anything, run the Human Gate Pre-check in section 11.
 - Do not fill unknowns by assumption. Record the exact blocker and next action.
 
 ## 2. AI roles
@@ -146,7 +146,9 @@ The weekly close occurs on Monday, in this order:
 - `Result`, `Completed At` and `Status` are updated in Notion.
 - Related Story, Decision, Sprint or other operational state is updated as needed.
 
-## 11. Human Request rules
+## 11. Human Request rules and the Human Gate Pre-check
+
+### 11.1 When a Human Request is legitimate
 
 Create Human Requests in Stories & Tasks with `Type = Human Request` only for actions that genuinely require a person, such as:
 
@@ -162,6 +164,68 @@ Rules:
 - When a person starts, record `Status = In Progress` and `Started At` (JST).
 - On completion, record `Result`, `Completed At` (JST), and `Status = Done`.
 - Always present Notion ticket names as clickable links when asking the Owner to act.
+
+### 11.2 Human Gate Pre-check
+
+Run the Human Gate Pre-check immediately before either of the following, and complete it **before** the action rather than correcting afterwards:
+
+- creating a Stories & Tasks record with `Type = Human Request`;
+- setting any task to `Blocked` where the stated Blocker is Human action or Human confirmation.
+
+This is a gate, not a reminder. If the pre-check has not been run, the Human Request must not be created and the Blocked transition must not be made. The executable form of the gate is in [`../governance/ai-execution-constraints.md`](../governance/ai-execution-constraints.md).
+
+The reason the gate exists is that the expensive failure is rarely a missing Human. It is a Human gate that was correct when it was written and was never re-evaluated once the evidence arrived. Work then stops on a note the AI wrote to itself, while the person it names is waiting for nothing. Because a Human gate blocks an entire dependency chain upward, a single stale gate can hold a Story or Epic still for days.
+
+### 11.3 Sources to search before declaring a Human gate
+
+Search every source below that could plausibly hold the evidence, and record which were searched:
+
+| Source | What to look for |
+|---|---|
+| Notion Stories & Tasks | An existing Task/Subtask covering the same check; its `Result`, `Completed At` and Blocker text; sibling tasks that already consumed the same evidence |
+| Notion Decisions, daily reports, Sprint Reviews, feedback pages | Human action already taken — sessions run, surveys received, approvals given, purchases made |
+| GitHub | PR state and merge commit, review threads and their resolution, commits, released artifacts |
+| CI and tests | Workflow runs on the relevant branch or merge commit, individual job and step conclusions, job logs |
+| Existing user feedback | Survey responses, training or lab session feedback, reports already collected and analysed |
+| Past Human behaviour | What the Owner already did for equivalent work, and whether the requested action has effectively already happened under a different name |
+
+One tool failing is not evidence that a Human is required. When a connector cannot retrieve the record — a GitHub integration that only exposes pull-request-triggered runs, a search that returns nothing — try another tool, another agent's connector, or the underlying API before concluding the check is Human-only. Record which paths were tried, so the next agent does not repeat a dead end or inherit its conclusion.
+
+### 11.4 Classify each Acceptance Criterion
+
+Classify **each Acceptance Criterion separately**, never the task as a whole. A task is Human-only only for the specific criteria that are.
+
+- **AI-verifiable** — the AI can establish the answer now through a connected source. Whether a CI job or step passed, whether a PR merged, whether a file contains a required disclosure, whether a test covers a case, whether a headless run renders the required elements.
+- **Human evidence already exists** — the criterion requires a Human act, and that act has already happened and is recorded: a survey already answered by real users, a training session already run, an approval already given, a payment already made, an account already created. The evidence must be a specific linkable record with a date, not an inference that the Owner probably did it.
+- **Human-only** — the criterion requires a person and no adequate record exists yet. This is the correct classification for real-device operation and physical-world observation; granting permissions or credentials; account creation, identity verification, contracts, purchases and payment; approvals carrying legal or financial responsibility; business decisions inside the Owner's authority; irreversible changes; and anything needing access only the Owner holds.
+
+Borderline guidance:
+
+- "Someone should look at this and report the result" is AI-verifiable whenever the thing to be looked at is reachable from a connected source. Reading a dashboard is not Human work.
+- Subjective judgement by real users — is this understandable, would you pay for this — is Human-only, and an AI's own assessment never substitutes for it.
+- Human evidence is scoped to what was actually observed. A survey that answered two of four questions satisfies two criteria, not four.
+
+### 11.5 Act on the classification
+
+- **All criteria AI-verifiable or already satisfied by Human evidence** — do not create a Human Request and do not transition to `Blocked`. Verify the criteria directly, record the evidence and its links in `Result`, and complete the task through the normal completion post-flight.
+- **Some criteria Human-only** — first complete and record every AI-verifiable criterion. Then create a Human Request covering only the Human-only remainder, written as a concrete action with explicit completion evidence. Never hand a whole task to a person because part of it needs one.
+- A `Blocked` transition **for a Human reason** is permitted only while a genuinely Human-only criterion is outstanding, and the Blocker text must name that criterion and the request carrying it rather than the task as a whole. This section governs Human-reason blocks only; a task blocked on an unavailable AI dependency, an infrastructure outage, or another non-Human cause follows the ordinary `Blocked` rules in 11.1 and is untouched by this gate.
+- Record the classification and the sources searched in `Result` or `Approach Decision`, so the next agent can re-evaluate the gate instead of repeating the search.
+
+### 11.6 Standing re-evaluation of existing Human gates
+
+Human gates decay, so they are re-checked rather than trusted. During daily autonomous execution, re-run the pre-check over every open `Type = Human Request` and every task `Blocked` for a Human reason:
+
+1. Re-evaluate each Acceptance Criterion against the current state of Notion, GitHub, CI and collected feedback.
+2. Where evidence has arrived since the gate was written, correct the record: verify the criteria the evidence satisfies, write the correcting reason and the evidence links into `Result`, and move the task out of the gate.
+3. Where a parent Story or Task is Blocked on a child that has since completed, clear the parent's stale Blocker too. Stale blockers propagate upward and stall whole Epics. A Blocker that names a specific task or request is verified with a single lookup, which is what makes this sweep affordable daily — so write Blockers that way.
+4. A satisfied Human gate does not by itself complete the task. Where AI work remains once the Human portion is evidenced, return the task to `Ready` with the residual work named. `Blocked` and `Done` are both wrong for "the person finished; the machine has not started".
+5. Correct only what located evidence supports. Where the evidence cannot be found, leave the state unchanged and record why the gate remains open.
+6. Where a gate stalled work that was already satisfied, execute [`../governance/postmortem-improvement-loop.md`](../governance/postmortem-improvement-loop.md).
+
+No new service, scheduled job or classification engine is introduced for this. The pre-check is run by the agent already doing the work, using sources it is already connected to.
+
+Worked examples of the classification, including a false gate, a genuine gate and a partial gate, are in [`human-gate-pre-check-examples.md`](human-gate-pre-check-examples.md).
 
 ## 12. Chris → Claude handoff
 
