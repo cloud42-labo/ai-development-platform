@@ -38,6 +38,18 @@ Trigger: immediately before creating a Stories & Tasks record with `Type = Human
 5. **Request minimised** — where `Human-only` criteria remain, the Human Request covers only that remainder, stated as a concrete action with explicit completion evidence. A Blocker must name the specific outstanding criterion and the request carrying it, not the whole task.
 6. **Classification recorded** — the classification and the sources searched are written to `Result` or `Approach Decision`, so the next agent can re-evaluate the gate instead of repeating the search or inheriting a dead end.
 
+## Human Queue WIP constraint
+
+The Actionable Human Queue is every task with `Assigned Agent = Human` and `Status` in `Ready`, `In Progress`, or `Review` (Notion Stories & Tasks view `Human Queue｜Actionable`). Initial WIP limit: **5**, `P0` exempt. Policy detail is in Operating Guide section 11.7.
+
+Before creating a new Human Request or moving a non-urgent Human item into the Actionable Queue, check the current Actionable count:
+
+1. **Under the limit** — proceed normally through the Human gate pre-flight above.
+2. **At or over the limit and the new item is not P0** — do not add it to the Actionable Queue. First: re-run the Human gate pre-flight over existing queued items (evidence may have arrived since they were gated), split out any AI-doable preparation from bundled Human-only items and complete that preparation now, and consolidate/close duplicates. Only after that, place the new item in `Backlog` with a Blocker naming the WIP limit.
+3. **At or over the limit and the new item is P0** — it still enters the Actionable Queue; the exemption does not require the same triage, but still record the resulting queue size.
+
+During each daily/hourly autonomous execution, prefer AI work that shrinks the Actionable Queue (substitution, consolidation, pre-processing of existing Human tasks) over starting new work that would add to it, whenever the queue is at or over its limit.
+
 ## Standing re-evaluation of Human gates
 
 During each daily autonomous execution, re-run the Human gate pre-flight over every open `Type = Human Request` and every task whose `Status = Blocked` for a Human reason.
