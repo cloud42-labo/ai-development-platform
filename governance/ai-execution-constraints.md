@@ -27,6 +27,43 @@ If any required check fails, do not start the substantive work. Repair the track
 
 A chat instruction, branch, commit, draft artifact, or external action performed before this gate does not count as compliant merely because Notion is corrected afterward.
 
+## AI-to-AI stop gate pre-flight
+
+Trigger: immediately before an AI performs any action that would cause another AI or an autonomous workflow to stop, wait, lose previously granted execution authority, or require a new approval. This gate applies to ChatGPT/Chris, Claude, and any other acting AI equally.
+
+The trigger includes, at minimum:
+
+- setting a task or workflow to `Blocked` because another AI must wait;
+- adding a new Human/Chris/AI approval or re-review requirement that was not already an authoritative gate;
+- instructing another AI to stop at a PR, review, task, or handoff boundary;
+- changing merge responsibility, including adding or removing self-merge permission;
+- withholding an otherwise-Ready downstream handoff because of a newly inferred governance condition.
+
+Before issuing the stop/wait condition, the acting AI MUST complete all of the following:
+
+1. **Name the proposed stop** — state exactly what actor or workflow would stop, what action would be withheld, and which authority supposedly requires the stop. A vague sense that “review is safer” or “approval is probably needed” is not authority.
+2. **Check authority and source-of-truth evidence** — inspect every relevant source before changing execution authority:
+   - the Owner's latest explicit instruction for the exact issue, repository, workflow, or responsibility;
+   - the target repository's local governance (`CLAUDE.md`, `AGENTS.md`, repository-specific operating notes or equivalent);
+   - ADP durable governance (`docs/operating-guide.md`, this file, and other applicable governance artifacts);
+   - the latest applicable accepted Brain Decision/organizational memory;
+   - the current Notion Task's `Approach Decision`, `Refinement Decision`, Acceptance Criteria, and Blocker.
+3. **Apply precedence without inventing authority** — the latest explicit Owner instruction for the matter takes precedence over older AI-authored artifacts. A repository-specific rule takes precedence over a conflicting generic rule for that repository unless the Owner has explicitly changed it. A Task or Decision written by an AI does not, by itself, create new authority to remove another agent's existing execution permission.
+4. **Treat conflict as a governance defect, not as an automatic stop condition** — if sources conflict, do not make the workflow safer by silently adding a stricter approval gate. If the Owner's current instruction resolves the conflict, follow it and correct the stale source. If the conflict remains unresolved, continue reversible work whose authority is clear and pause only the specific irreversible/high-impact action whose authority cannot be established. Record the conflict for correction; do not freeze the whole chain by default.
+5. **Preserve existing authorised flow until a change is evidenced** — an AI may not revoke self-merge, downstream handoff, autonomous execution, or another granted responsibility merely because it interprets a generic rule differently. Authority changes require explicit evidence from the sources above.
+6. **Record the pre-check when a stop is actually created** — write the checked sources, the controlling rule, and the reason the stop is unavoidable into `Result`, `Approach Decision`, the PR discussion, or another durable execution record. A stop with no cited authority is invalid.
+
+### Representative regression case: `experimental` PR #89
+
+Given the 2026-08-26 OEK-DEMO-RUN case, the pre-flight must resolve the governance as follows:
+
+- current explicit Owner instruction: `cloud42-labo/experimental` is an experimental/PoC exception where the working agent may self-merge;
+- repository-local policy: `experimental/CLAUDE.md` permits self-merge after required fixes/CI/mergeability checks;
+- result: ChatGPT/Chris MUST NOT add “Chris re-review/re-judgment required before merge” as a new gate, and MUST NOT tell Claude to stop solely for that approval;
+- if a stale Brain/Notion/common rule says otherwise, correct that stale record without blocking reversible OEK work.
+
+If a false AI-to-AI stop gate is later discovered to have stalled execution, execute `governance/postmortem-improvement-loop.md` and add/maintain the representative regression test before closing the preventive task.
+
 ## Human gate pre-flight
 
 Trigger: immediately before creating a Stories & Tasks record with `Type = Human Request`, and immediately before setting any task to `Blocked` for a reason that is Human action or Human confirmation. The gate must pass before that write, not after it. Policy detail and classification guidance are in Operating Guide section 11.
@@ -93,7 +130,7 @@ Documentation of the violation is not closure. Closure requires the preventive w
 
 ## Enforcement rule
 
-Any AI workflow or Skill that creates a Stories & Tasks record MUST execute the placement pre-flight check first. Any AI workflow that performs managed work MUST execute the managed-work execution pre-flight and completion post-flight.
+Any AI workflow or Skill that creates a Stories & Tasks record MUST execute the placement pre-flight check first. Any AI workflow that performs managed work MUST execute the managed-work execution pre-flight and completion post-flight. Any AI workflow that would stop, block, de-authorize, add approval/re-review waiting, alter merge responsibility, or withhold an otherwise-Ready handoff from another AI MUST execute the AI-to-AI stop gate pre-flight first.
 
 A prompt such as “this looks like ADP/AOD/etc.” is not placement evidence. Only explicit Owner placement or explicit derivation from an already placed Task/Story is sufficient.
 
@@ -103,4 +140,5 @@ If placement evidence is ambiguous, default to MISC / Backlog. Weekly Backlog Re
 
 - Respect Product/Epic dependency order unless an explicit dependency reason or Owner decision permits otherwise.
 - Respect Human/AI authority boundaries; create a Human Request only when human authority or physical/account action is genuinely required, and only after the Human gate pre-flight above has passed.
+- Do not create a new AI-to-AI stop/wait gate from memory, generic caution, or a conflicting AI-authored artifact; execute the AI-to-AI stop gate pre-flight and preserve clearly authorised reversible work while conflicts are corrected.
 - For external retrieval, communication, secrets, or metered services, also execute `governance/research-security-policy.md`.
