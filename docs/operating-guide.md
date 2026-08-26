@@ -227,6 +227,21 @@ No new service, scheduled job or classification engine is introduced for this. T
 
 Worked examples of the classification, including a false gate, a genuine gate and a partial gate, are in [`human-gate-pre-check-examples.md`](human-gate-pre-check-examples.md).
 
+### 11.7 Human Queue WIP limit
+
+Even after the Human Gate Pre-check removes false gates, genuinely Human-only work can still arrive faster than the Owner can process it. The Human Queue itself needs a work-in-progress limit, the same way any other queue does.
+
+- **Actionable Human Queue** is defined as every Task with `Assigned Agent = Human` and `Status` in `Ready`, `In Progress`, or `Review`. The Notion view `Human Queue｜Actionable` in Stories & Tasks shows this live; do not hand-copy its count elsewhere (section 13).
+- **Initial WIP limit is 5**, set as a PoC baseline on 2026-08-25. `P0` items are an exception and do not count against the limit — a P0 always enters the Actionable Queue.
+- **Priority order inside the queue is P0 → P1 → P2.** When the Owner works through the queue, or when deciding what stays Actionable under the limit, always clear higher priority first.
+- **When the Actionable Queue is at or over the WIP limit**, do not create a new non-urgent Human Request to grow it further. Instead, before adding anything new:
+  1. Re-run the Human Gate Pre-check (section 11.2–11.5) over the existing queue — a Task may no longer need a Human once fresh evidence exists.
+  2. Look for AI-substitutable Human Tasks — work that reads as Human-only mainly because AI-doable preparation (research, drafting, asset generation, evidence collection) was bundled in with the genuinely Human-only remainder. Split those: complete the AI-doable part now and shrink the Human Request to the remainder only.
+  3. Consolidate or close duplicate/unneeded Human Tasks.
+  4. Only after 1–3 are exhausted, move a non-urgent new Human item to `Backlog` with a Blocker naming the WIP limit, rather than adding it to the Actionable Queue.
+- **This changes AI task selection too.** When the Actionable Human Queue is over its limit, an autonomous AI run (Claude daily execution, Chris hourly execution) should prefer work that reduces the queue — the substitution/consolidation/pre-processing above — over starting new work that would create additional Human gates.
+- Record queue size before/after and the reclassification results in the initiating Task's `Result` (see ADP-043-I for the initial application). Track the Actionable Queue count and its trend as a Human-bottleneck indicator in Sprint Review.
+
 ## 12. Chris → Claude handoff
 
 Treat the transition from Epic design to executable implementation design as a formal AI-to-AI baton pass.
