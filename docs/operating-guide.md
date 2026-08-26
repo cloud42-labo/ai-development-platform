@@ -95,6 +95,50 @@ For the ADP knowledge model, see [`../governance/source-of-truth.md`](../governa
 - At the end of each execution phase, record current phase, completed work, PR/commit reference, unresolved items, stopping reason and next action in Notion.
 - The Notion ticket is the execution instruction. External prompts should remain short and should not become a second detailed instruction source.
 
+### Approach Review — simplest valid approach
+
+Every executable Task must prefer the **simplest valid approach that satisfies the purpose and Done condition**. A method written in a Task is a working hypothesis, not an immutable requirement; the method may be simplified without changing the Task purpose or Acceptance Criteria.
+
+Run Approach Review at three points:
+
+1. **Task creation — initial review.** Chris checks the purpose and Done condition and first tests whether existing functionality, configuration, or an existing service can satisfy them. Executable Tasks should normally start with `Approach Review = Pending` until the approach is assessed.
+2. **Immediately before execution — start review.** Before substantive implementation or research, the acting AI re-evaluates the approach. Record the selected approach and rationale in `Approach Decision`; use `Approved` when valid and `Revise` when the Task must be changed before execution.
+3. **Weekly Backlog Refinement — portfolio re-evaluation.** Revisit unstarted Tasks for changed assumptions, duplication, overengineering, new evidence, and simpler alternatives.
+
+Evaluate options in this order unless evidence justifies moving further down the list:
+
+**existing functionality / configuration → existing SaaS or service → small automation → custom implementation → new platform / infrastructure**
+
+When selecting a later option, record why earlier and simpler options cannot satisfy the purpose.
+
+Role split:
+
+- **Chris / ChatGPT** evaluates purpose, business value, Done condition, scope and overengineering risk.
+- **Claude** evaluates technical feasibility, complexity, dependencies, maintainability, operations and security risk.
+- New platforms, infrastructure or LLM environments that materially increase complexity should normally be assessed from both perspectives before adoption.
+
+Approach Review is a Definition of Ready gate for executable work:
+
+- `Approved` or `N/A` may proceed to `Ready`.
+- `Pending`, `Revise` or unset must not start substantive execution.
+- `Revise` means update the Task, Acceptance Criteria and dependencies as needed, then review again.
+- A Task already in valid execution is not stopped merely because this control was introduced later; apply the review before the next substantive step.
+
+### Review and Refinement control map
+
+Reviews answer different questions at different stages. Do not collapse them into one generic approval step.
+
+| Control | Primary question | Timing | Typical output |
+|---|---|---|---|
+| **Approach Review** | Are we using the simplest valid way to achieve the purpose? | Task creation, immediately before execution, weekly re-evaluation | `Approach Decision`, `Approved / Revise / N/A` |
+| **Backlog Refinement** | Are we doing the right work, in the right place and order? | After Sprint Review / Retrospective and when backlog assumptions materially change | placement, priority, dependency and scope corrections |
+| **PR / Artifact Review** | Is the produced implementation or artifact correct and safe enough for its stage? | After implementation and before the applicable merge/release gate | findings, fixes, independent quality judgment |
+| **Sprint Review** | What outcome was actually produced and what remains incomplete or blocked? | Sprint close | evidence-backed outcome and residual work |
+| **Retrospective** | What should the operating process keep, change or try next? | After Sprint Review | Keep / Problem / Try and improvement work |
+| **Postmortem Review** | Is the incident analysis and preventive control itself correct? | After incident analysis and before closure under the Postmortem process | reviewed facts, root cause and preventive action; detailed closure rules live in [`../governance/postmortem-improvement-loop.md`](../governance/postmortem-improvement-loop.md) |
+
+A review is not automatically a stop gate. Only a control explicitly defined as a Gate or Definition-of-Ready/Done condition may block progression. Advisory review must not silently create a new approval or waiting state.
+
 ### PR / review / merge
 
 - The implementation agent normally stops after completing required implementation/fixes and creating the PR.
@@ -106,13 +150,16 @@ For the ADP knowledge model, see [`../governance/source-of-truth.md`](../governa
 
 ## 7. Backlog Refinement
 
-Run Backlog Refinement for every Product after Sprint Review. Verify:
+Run Backlog Refinement for every Product after Sprint Review and Retrospective. Verify:
 
 - Epic purpose, dependencies and execution order;
 - correct Story/Task placement;
 - duplicates, stale items and unnecessary work;
 - Priority and Blocker;
-- candidates for the next Sprint.
+- candidates for the next Sprint;
+- the `Approach Review` of every unstarted Task whose assumptions, scope, dependencies or available alternatives have changed.
+
+Backlog Refinement owns **what / where / when**. Approach Review owns **how**. Refinement may trigger a new Approach Review, but should not prescribe implementation details merely to make a Task look more complete.
 
 Epics should normally converge in dependency/number order. A later Epic may move ahead only when needed to satisfy a dependency of the preceding work.
 
@@ -121,10 +168,10 @@ Epics should normally converge in dependency/number order. A later Epic may move
 The weekly close occurs on Monday, in this order:
 
 1. **Sprint Review** — review outcomes, incomplete work and blockers.
-2. **Backlog Refinement** — revisit Epic/Story/Task placement and priority.
-3. **Sprint Planning** — define Sprint Goal and include only Ready work.
-4. **Execution** — run the role-separated loop and record handoffs in Notion.
-5. **Retrospective** — record Keep / Problem / Try and feed improvements into the next Sprint.
+2. **Retrospective** — record Keep / Problem / Try and identify operating improvements.
+3. **Backlog Refinement + Approach Review re-evaluation** — revisit Epic/Story/Task placement, priority, dependencies and the approach of unstarted Tasks.
+4. **Sprint Planning** — define Sprint Goal and include only Ready work.
+5. **Execution** — run the role-separated loop and record handoffs in Notion.
 6. **Update weekly focus** — refresh the Portfolio top-page focus area.
 
 ## 9. Definition of Ready
@@ -135,6 +182,7 @@ The weekly close occurs on Monday, in this order:
 - Dependencies and target GitHub repository are clear.
 - Assigned AI and the role within the primary development line, or ChatGPT failover condition, are defined.
 - Required current primary-reference checks are known before execution.
+- For executable Tasks, `Approach Review = Approved` or `N/A`; `Pending`, `Revise` and unset are not Ready.
 
 ## 10. Definition of Done
 
