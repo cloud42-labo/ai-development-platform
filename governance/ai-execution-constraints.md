@@ -42,24 +42,26 @@ The trigger includes, at minimum:
 Before issuing the stop/wait condition, the acting AI MUST complete all of the following:
 
 1. **Name the proposed stop** — state exactly what actor or workflow would stop, what action would be withheld, and which authority supposedly requires the stop. A vague sense that “review is safer” or “approval is probably needed” is not authority.
-2. **Check authority and source-of-truth evidence** — inspect every relevant source before changing execution authority:
+2. **Check authority and source-of-truth evidence** — inspect every relevant source that is accessible before changing execution authority:
    - the Owner's latest explicit instruction for the exact issue, repository, workflow, or responsibility;
    - the target repository's local governance (`CLAUDE.md`, `AGENTS.md`, repository-specific operating notes or equivalent);
    - ADP durable governance (`docs/operating-guide.md`, this file, and other applicable governance artifacts);
    - the latest applicable accepted Brain Decision/organizational memory;
    - the current Notion Task's `Approach Decision`, `Refinement Decision`, Acceptance Criteria, and Blocker.
+   If a relevant source is temporarily unavailable, record that fact. Missing evidence prevents inventing, expanding, or revoking authority, but it does **not** suspend an already-authoritative applicable gate established by an accessible higher/equal-priority source.
 3. **Apply precedence without inventing authority** — the latest explicit Owner instruction for the matter takes precedence over older AI-authored artifacts. A repository-specific rule takes precedence over a conflicting generic rule for that repository unless the Owner has explicitly changed it. A Task or Decision written by an AI does not, by itself, create new authority to remove another agent's existing execution permission.
-4. **Treat conflict as a governance defect, not as an automatic stop condition** — if sources conflict, do not make the workflow safer by silently adding a stricter approval gate. If the Owner's current instruction resolves the conflict, follow it and correct the stale source. If the conflict remains unresolved, continue reversible work whose authority is clear and pause only the specific irreversible/high-impact action whose authority cannot be established. Record the conflict for correction; do not freeze the whole chain by default.
-5. **Preserve existing authorised flow until a change is evidenced** — an AI may not revoke self-merge, downstream handoff, autonomous execution, or another granted responsibility merely because it interprets a generic rule differently. Authority changes require explicit evidence from the sources above.
-6. **Record the pre-check when a stop is actually created** — write the checked sources, the controlling rule, and the reason the stop is unavoidable into `Result`, `Approach Decision`, the PR discussion, or another durable execution record. A stop with no cited authority is invalid.
+4. **Treat conflict as a governance defect, not as an automatic stop condition** — if sources conflict, do not make the workflow safer by silently adding a stricter approval gate. If the Owner's current instruction resolves the conflict, follow it and correct the stale source. If the conflict remains unresolved, continue reversible work whose authority is clear and pause only the specific irreversible/high-impact action whose authority cannot be established. Record the conflict for correction; do not freeze the whole chain by default. An inaccessible source is not itself a conflicting source and does not invalidate an existing authoritative gate.
+5. **Preserve existing authorised flow and existing authoritative gates until a change is evidenced** — an AI may not revoke self-merge, downstream handoff, autonomous execution, or another granted responsibility merely because it interprets a generic rule differently. Equally, an AI may not remove an existing required review, validation, merge-responsibility, or safety gate merely because another relevant source cannot be retrieved. Authority changes require explicit evidence from the sources above.
+6. **Record the pre-check when a stop is actually created** — write the checked sources, any unavailable source, the controlling rule, and the reason the stop is unavoidable into `Result`, `Approach Decision`, the PR discussion, or another durable execution record. A newly invented stop with no cited authority is invalid; an already-authoritative applicable gate remains valid even when a supplemental source is unavailable.
 
 ### Representative regression case: `experimental` PR #89
 
 Given the 2026-08-26 OEK-DEMO-RUN case, the pre-flight must resolve the governance as follows:
 
 - current explicit Owner instruction: `cloud42-labo/experimental` is an experimental/PoC exception where the working agent may self-merge;
-- repository-local policy: `experimental/CLAUDE.md` permits self-merge after required fixes/CI/mergeability checks;
+- repository-local policy: `experimental/CLAUDE.md` permits self-merge only after all applicable required gates pass, including required fixes, Codex review where required, CI, mergeability, and real-device validation where required;
 - result: ChatGPT/Chris MUST NOT add “Chris re-review/re-judgment required before merge” as a new gate, and MUST NOT tell Claude to stop solely for that approval;
+- existing repository-required review/validation gates MUST remain in force; the self-merge exception changes merge responsibility, not those prerequisites;
 - if a stale Brain/Notion/common rule says otherwise, correct that stale record without blocking reversible OEK work.
 
 If a false AI-to-AI stop gate is later discovered to have stalled execution, execute `governance/postmortem-improvement-loop.md` and add/maintain the representative regression test before closing the preventive task.
@@ -140,5 +142,5 @@ If placement evidence is ambiguous, default to MISC / Backlog. Weekly Backlog Re
 
 - Respect Product/Epic dependency order unless an explicit dependency reason or Owner decision permits otherwise.
 - Respect Human/AI authority boundaries; create a Human Request only when human authority or physical/account action is genuinely required, and only after the Human gate pre-flight above has passed.
-- Do not create a new AI-to-AI stop/wait gate from memory, generic caution, or a conflicting AI-authored artifact; execute the AI-to-AI stop gate pre-flight and preserve clearly authorised reversible work while conflicts are corrected.
+- Do not create a new AI-to-AI stop/wait gate from memory, generic caution, or a conflicting AI-authored artifact; execute the AI-to-AI stop gate pre-flight and preserve clearly authorised reversible work while conflicts are corrected. Missing supplemental evidence does not cancel an already-authoritative applicable gate.
 - For external retrieval, communication, secrets, or metered services, also execute `governance/research-security-policy.md`.
