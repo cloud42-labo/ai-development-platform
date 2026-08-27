@@ -182,7 +182,7 @@ The weekly close occurs on Monday, in this order:
 - Dependencies and target GitHub repository are clear.
 - Assigned AI and the role within the primary development line, or ChatGPT failover condition, are defined.
 - Required current primary-reference checks are known before execution.
-- For executable Tasks that have not yet begun, `Approach Review = Approved` or `N/A`; `Pending`, `Revise` and unset are not Ready. Grandfathered already-In-Progress work follows the migration rule in section 6 and is not retroactively made non-executable by this field alone.
+- For executable Tasks, `Approach Review = Approved` or `N/A` is required before entering or re-entering `Ready`. The only exception is a **grandfathered continuation** that was already validly `In Progress` before this control was introduced and still has `Approach Review` unset/Pending; that work may continue under the section 6 migration rule until its next natural checkpoint. A Task returning from `Blocked` to `Ready`, or a Task whose checkpoint review is `Revise`, is not grandfathered and must satisfy `Approved`/`N/A` before resuming.
 
 ## 10. Definition of Done
 
