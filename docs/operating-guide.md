@@ -103,7 +103,7 @@ Run Approach Review at three points:
 
 1. **Task creation — initial review.** Chris checks the purpose and Done condition and first tests whether existing functionality, configuration, or an existing service can satisfy them. Executable Tasks should normally start with `Approach Review = Pending` until the approach is assessed.
 2. **Immediately before execution — start review.** Before substantive implementation or research, the acting AI re-evaluates the approach. Record the selected approach and rationale in `Approach Decision`; use `Approved` when valid and `Revise` when the Task must be changed before execution.
-3. **Weekly Backlog Refinement — portfolio re-evaluation.** Revisit unstarted Tasks for changed assumptions, duplication, overengineering, new evidence, and simpler alternatives.
+3. **Weekly Backlog Refinement — portfolio re-evaluation.** Revisit unstarted Tasks whose assumptions, scope, dependencies or available alternatives changed, looking for duplication, overengineering, new evidence and simpler alternatives.
 
 Evaluate options in this order unless evidence justifies moving further down the list:
 
@@ -120,9 +120,9 @@ Role split:
 Approach Review is a Definition of Ready gate for executable work:
 
 - `Approved` or `N/A` may proceed to `Ready`.
-- `Pending`, `Revise` or unset must not start substantive execution.
-- `Revise` means update the Task, Acceptance Criteria and dependencies as needed, then review again.
-- A Task already in valid execution is not stopped merely because this control was introduced later; apply the review before the next substantive step.
+- `Pending`, `Revise` or unset must not start substantive execution for a Task that has not yet begun.
+- `Revise` means the selected **how** is not acceptable. If only the method changes, update `Approach Decision` and the implementation plan, then review again. If the correction would change Acceptance Criteria, scope, placement, priority or dependencies, route that change through Backlog Refinement first, then re-run Approach Review against the refined Task.
+- **Grandfathered in-progress Tasks:** a Task that was already validly `In Progress` before this control was introduced is not blocked solely because `Approach Review` is unset/Pending under the new schema. The missing field alone must not create a Blocker or stop already-authorised reversible work. Perform and record the review at the next natural checkpoint; stop or revise only if the review finds a substantive approach/safety/dependency issue that independently requires it.
 
 ### Review and Refinement control map
 
@@ -130,7 +130,7 @@ Reviews answer different questions at different stages. Do not collapse them int
 
 | Control | Primary question | Timing | Typical output |
 |---|---|---|---|
-| **Approach Review** | Are we using the simplest valid way to achieve the purpose? | Task creation, immediately before execution, weekly re-evaluation | `Approach Decision`, `Approved / Revise / N/A` |
+| **Approach Review** | Are we using the simplest valid way to achieve the purpose? | Task creation, immediately before execution, weekly re-evaluation when assumptions changed | `Approach Decision`, `Approved / Revise / N/A` |
 | **Backlog Refinement** | Are we doing the right work, in the right place and order? | After Sprint Review / Retrospective and when backlog assumptions materially change | placement, priority, dependency and scope corrections |
 | **PR / Artifact Review** | Is the produced implementation or artifact correct and safe enough for its stage? | After implementation and before the applicable merge/release gate | findings, fixes, independent quality judgment |
 | **Sprint Review** | What outcome was actually produced and what remains incomplete or blocked? | Sprint close | evidence-backed outcome and residual work |
@@ -169,7 +169,7 @@ The weekly close occurs on Monday, in this order:
 
 1. **Sprint Review** — review outcomes, incomplete work and blockers.
 2. **Retrospective** — record Keep / Problem / Try and identify operating improvements.
-3. **Backlog Refinement + Approach Review re-evaluation** — revisit Epic/Story/Task placement, priority, dependencies and the approach of unstarted Tasks.
+3. **Backlog Refinement + Approach Review re-evaluation** — revisit Epic/Story/Task placement, priority and dependencies; re-evaluate the approach only for unstarted Tasks whose assumptions, scope, dependencies or available alternatives changed.
 4. **Sprint Planning** — define Sprint Goal and include only Ready work.
 5. **Execution** — run the role-separated loop and record handoffs in Notion.
 6. **Update weekly focus** — refresh the Portfolio top-page focus area.
@@ -182,7 +182,7 @@ The weekly close occurs on Monday, in this order:
 - Dependencies and target GitHub repository are clear.
 - Assigned AI and the role within the primary development line, or ChatGPT failover condition, are defined.
 - Required current primary-reference checks are known before execution.
-- For executable Tasks, `Approach Review = Approved` or `N/A`; `Pending`, `Revise` and unset are not Ready.
+- For executable Tasks that have not yet begun, `Approach Review = Approved` or `N/A`; `Pending`, `Revise` and unset are not Ready. Grandfathered already-In-Progress work follows the migration rule in section 6 and is not retroactively made non-executable by this field alone.
 
 ## 10. Definition of Done
 
