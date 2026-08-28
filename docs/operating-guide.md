@@ -35,21 +35,21 @@ graph TD
 A["Stage 1: Idea<br>Owner + Gemini"] --> G1{"Gate 1<br>Worth validating as an interface?"}
 G1 -- "Hold" --> X1["Keep as an idea"]
 G1 -- "Go" --> B["Stage 2: Vibe<br>Working demo in Google AI Studio"]
-B --> G2{"Gate 2<br>Does the demo work and cover core interactions?"}
+B --> G2{"Gate 2<br>Does the demo work and cover core interactions?"]
 G2 -- "Return" --> B
 G2 -- "Pass" --> C["Stage 3: Experimental<br>Register HTML / initial code in GitHub"]
-C --> G3{"Gate 3<br>Continue as a formal development project?"}
+C --> G3{"Gate 3<br>Continue as a formal development project?"]
 G3 -- "Hold / Close" --> X2["Hold or close in Experimental"]
 G3 -- "Go" --> D["Stage 4: Project<br>Register project in Notion"]
 D --> E["Vision / Roadmap / Epic<br>Story / Sprint / Acceptance Criteria"]
-E --> G4{"Gate 4<br>Ready to start development?"}
+E --> G4{"Gate 4<br>Ready to start development?"]
 G4 -- "Return" --> E
 G4 -- "Pass" --> F["Stage 5: Development<br>Design / implementation / test"]
 F --> H["Developer creates PR and stops<br>Codex review → fixes → Chris merge judgment"]
-H --> G5{"Gate 5<br>Acceptance / test / review passed?"}
+H --> G5{"Gate 5<br>Acceptance / test / review passed?"]
 G5 -- "Return" --> F
 G5 -- "Pass" --> I["Stage 6: Release Candidate<br>Device / usage / operational quality"]
-I --> G6{"Gate 6<br>Promote to continuously operated Product?"}
+I --> G6{"Gate 6<br>Promote to continuously operated Product?"]
 G6 -- "Return / End" --> D
 G6 -- "Go" --> J["Stage 7: Product<br>Operate and improve in product repository"]
 ```
@@ -118,14 +118,19 @@ Epics should normally converge in dependency/number order. A later Epic may move
 
 ## 8. Weekly Sprint operation
 
+**The system of record is the weekly Product Sprint.** Each active Product has one Sprint for the week containing that Product's Sprint Goal and committed Stories / Tasks.
+
+**Portfolio is not a separate Sprint.** Portfolio is a live View / Rollup over the Product Sprints for the same week. Use it to compare cross-product priority, dependencies, Human bottlenecks, schedule risk and progress. Historical Portfolio Sprint pages are retained only as experiment / decision history and must not be used to assign current work.
+
 The weekly close occurs on Monday, in this order:
 
-1. **Sprint Review** — review outcomes, incomplete work and blockers.
-2. **Backlog Refinement** — revisit Epic/Story/Task placement and priority.
-3. **Sprint Planning** — define Sprint Goal and include only Ready work.
-4. **Execution** — run the role-separated loop and record handoffs in Notion.
-5. **Retrospective** — record Keep / Problem / Try and feed improvements into the next Sprint.
-6. **Update weekly focus** — refresh the Portfolio top-page focus area.
+1. **Product Sprint Review** — review each Product's outcomes, incomplete work and blockers.
+2. **Backlog Refinement** — revisit Epic/Story/Task placement and priority for each Product.
+3. **Product Sprint Planning** — create the next weekly Product Sprint, define its Sprint Goal and include only Ready work.
+4. **Portfolio review** — inspect the aggregated Product Sprint view to make cross-product priority and dependency decisions.
+5. **Execution** — run the role-separated loop and record handoffs in Notion.
+6. **Retrospective** — record Keep / Problem / Try and feed improvements into the next Sprint.
+7. **Update weekly focus** — refresh the Portfolio top-page focus area from the Product Sprint aggregate.
 
 ## 9. Definition of Ready
 
