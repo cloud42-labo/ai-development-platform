@@ -87,17 +87,10 @@ function doPost(e) {
       return json_({ ok: true, ignored: 'data_source' });
     }
 
-    const statusPropertyId = decodeURIComponent(
-      PropertiesService.getScriptProperties().getProperty('STATUS_PROPERTY_ID') || DEFAULTS.STATUS_PROPERTY_ID
-    );
-    const updated = ((payload.data && payload.data.updated_properties) || []).map(function (id) {
-      try { return decodeURIComponent(id); } catch (_) { return id; }
-    });
-    if (updated.indexOf(statusPropertyId) === -1) {
-      logWebhook_(payload.id, payload.type, payload.entity && payload.entity.id, '', parseTimestamp_(payload.timestamp), 'ignored_non_status_change');
-      return json_({ ok: true, ignored: 'non_status_change' });
-    }
-
+    // Do not trust payload.data.updated_properties to identify Status changes.
+    // Notion can return encoded/aggregated property identifiers that differ from
+    // the configured schema ID. Instead, retrieve the current Task and make the
+    // operation idempotent from its current Status + existing open Time Event.
     const pageId = payload.entity.id;
     const page = retrieveNotionPage_(pageId);
     const currentStatus = propertyText_(page.properties.Status);
