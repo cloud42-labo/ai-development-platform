@@ -1,0 +1,33 @@
+name: Notion Time Events Worker
+
+on:
+  pull_request:
+    paths:
+      - 'integrations/notion-time-events/worker/**'
+      - '.github/workflows/notion-time-events-worker.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'integrations/notion-time-events/worker/**'
+      - '.github/workflows/notion-time-events-worker.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: integrations/notion-time-events/worker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Run tests
+        run: npm test
