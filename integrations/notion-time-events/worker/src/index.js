@@ -25,12 +25,10 @@ export default {
 
     const payloadToken = typeof payload.verification_token === 'string' ? payload.verification_token : '';
 
-    // Enrollment is intentionally NOT trusted automatically. The verification
-    // request proves reachability, not Notion identity, because the request body
-    // itself contains the future HMAC secret. Store it only as a pending
-    // candidate. An authenticated operator must paste it into Notion, observe
-    // Notion accepting it, and then promote the same value into the Worker
-    // secret NOTION_WEBHOOK_VERIFICATION_TOKEN and Apps Script Script Properties.
+    // The verification request establishes endpoint reachability but does not
+    // authenticate the token carried in its own body. Keep it pending only. An
+    // authenticated operator must prove it in Notion's verification UI before
+    // promoting the same value to the active Worker secret.
     if (payloadToken) {
       await env.WEBHOOK_STATE.put(PENDING_TOKEN_KEY, payloadToken);
       return response(200, { ok: true, verificationPending: true });
@@ -47,10 +45,23 @@ export default {
       return response(401, { ok: false, error: 'invalid_notion_signature' });
     }
 
+    if (payload.type !== 'page.properties_updated') {
+      return response(200, { ok: true, ignored: 'event_type' });
+    }
+
+    const pageId = payload.entity && payload.entity.id;
+    if (!isUuidLike(pageId)) {
+      return response(400, { ok: false, error: 'missing_or_invalid_page_id' });
+    }
+
+    // The relay carries no operational claims and no shared secret. Apps Script
+    // treats pageId only as an untrusted reconciliation trigger, re-fetches the
+    // page from Notion, validates its parent data source, and derives status,
+    // assignment, actor and timing from the authoritative page itself.
     const upstream = await fetch(env.APPS_SCRIPT_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ rawBody, notionSignature: signature }),
+      body: JSON.stringify({ pageId }),
       redirect: 'follow',
     });
 
@@ -94,6 +105,10 @@ async function notionSignature(body, verificationToken) {
   );
   const signed = await crypto.subtle.sign('HMAC', key, encoder.encode(body));
   return 'sha256=' + toHex(new Uint8Array(signed));
+}
+
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(String(value || ''));
 }
 
 function toHex(bytes) {
