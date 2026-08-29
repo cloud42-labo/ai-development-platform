@@ -60,7 +60,21 @@ export default {
       });
     }
 
-    return new Response(upstreamText || JSON.stringify({ ok: true }), {
+    let upstreamJson = null;
+    try {
+      upstreamJson = upstreamText ? JSON.parse(upstreamText) : null;
+    } catch {
+      // Treat a non-JSON Apps Script response as an upstream failure so Notion can retry.
+    }
+    if (!upstreamJson || upstreamJson.ok !== true) {
+      return response(502, {
+        ok: false,
+        error: 'apps_script_rejected_delivery',
+        upstreamError: upstreamJson && upstreamJson.error ? upstreamJson.error : 'invalid_response',
+      });
+    }
+
+    return new Response(upstreamText, {
       status: 200,
       headers: { 'content-type': 'application/json; charset=utf-8' },
     });
