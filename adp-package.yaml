@@ -1,0 +1,79 @@
+# ADP package manifest
+#
+# Machine-readable entry point for this repository as a versioned package.
+# Not a package-manager config for a build tool — a plain, hand-maintained
+# YAML file an adopting agent or script can parse to know what this
+# repository currently is, what it depends on, and how it is versioned.
+#
+# See docs/versioning-policy.md for what changes MAJOR/MINOR/PATCH on each
+# version field below, and for why Rules/Schemas/Workflows/Templates version
+# independently rather than sharing one number.
+
+package: ai-development-platform
+description: >-
+  ADP — the operating system for Cloud42 Labo's AI-native product
+  development organization. System of record for durable operating
+  models, governance, capability maps, architecture, and reusable
+  templates.
+
+# Overall package version. NOT yet 1.0.0: the ADP-049 packaging chain that
+# introduced this manifest (A: inventory, B: this manifest, C–H: normalize
+# distribution structure, migration/upgrade, doctor/licensing, clean-install
+# E2E) is still in progress. ADP-049-H is the task that fixes the actual
+# 1.0.0 release. Bump this file's `version` there, not before.
+version: 0.1.0
+
+# Version of the Schemas asset class (currently: governance/agent-policy.yaml
+# only). Kept separate from `version` because a schema/policy-format change
+# can be breaking for an adopter even when no other asset changed.
+# Pre-release because agent-policy.yaml is explicitly marked non-authoritative
+# — see docs/v1-asset-inventory.md's "Freeze-scope exception".
+schema_version: 0.1.0-experimental
+
+# Version of the Rules asset class (README.md, AGENTS.md,
+# governance/ai-execution-constraints.md, governance/source-of-truth.md,
+# governance/research-security-policy.md,
+# governance/authority-stop-gate-regression-cases.md,
+# docs/human-gate-pre-check-examples.md).
+rules_version: 0.1.0
+
+# Version of the Workflows asset class (docs/operating-guide.md,
+# governance/postmortem-improvement-loop.md,
+# governance/monthly-risk-management-review.md).
+workflow_version: 0.1.0
+
+# Version of the Templates asset class (templates/README.md,
+# templates/monthly-risk-review.md).
+templates_version: 0.1.0
+
+# What an adopting agent/environment must have to operate this package as
+# intended. Not enforced by tooling here (no custom package manager) —
+# documentary, for an adopter or a future Bootstrap Skill (ADP-049-D) to
+# check against.
+required_capabilities:
+  - notion_stories_and_tasks_write   # Status/Started At/Completed At/Result on managed Tasks
+  - notion_postmortems_write         # Postmortems DB, incl. Reviewer/Review Status/Review Notes (ADP-043-K)
+  - github_pr_workflow               # branch, commit, push, create/update PR on allowed repositories
+  - jst_time_source                  # governance timestamps are recorded in JST
+
+# Adapters this package can optionally integrate with. None exist yet.
+# docs/cloudflare-os-evaluation.md places a policy-enforcement adapter at
+# Phase 2/3 — intentionally out of v1.0.0 scope, not a gap in this manifest.
+optional_adapters: []
+
+# How to move between manifest states. This is the first manifest this
+# repository has had, so there is no prior version to migrate from — the
+# only entry today documents adopting the manifest itself. Add an entry
+# here whenever a future version bump requires an adopter to change
+# something (see docs/versioning-policy.md's "when to add a migration_path
+# entry").
+migration_path:
+  - from: null
+    to: "0.1.0"
+    date: "2026-08-29"
+    change: >-
+      Initial manifest. No prior versioned state existed; this entry
+      documents that the manifest itself is new, not a behavior change
+      to the underlying Rules/Workflows/Templates (those were classified,
+      not modified, by ADP-049-A).
+    action_required: none

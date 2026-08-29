@@ -22,6 +22,8 @@ In short: **State = Notion / Artifact = GitHub / Memory = brain**.
 - [Source-of-Truth Policy](governance/source-of-truth.md)
 - [Knowledge Asset Model: State / Artifact / Memory](decisions/0001-knowledge-asset-model.md)
 - [AI agent working rules](AGENTS.md)
+- [Package manifest](adp-package.yaml) and [Versioning Policy](docs/versioning-policy.md)
+- [v1.0.0 Asset Inventory & Freeze Scope](docs/v1-asset-inventory.md)
 - [Notion Operating Guide](https://app.notion.com/p/3bdfbd826f3b8119b7b4e623c9cdc94e)
 
 ## Repository map
