@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import worker from '../src/index.js';
 
 const encoder = new TextEncoder();
+const TASK_ID = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
 
 class MemoryKV {
   constructor(initial = {}) {
@@ -82,7 +83,11 @@ test('a forged pending token cannot become an active signing credential', { conc
       APPS_SCRIPT_URL: 'https://script.example/exec',
     });
 
-    const event = { type: 'page.properties_updated', id: 'evt-forged' };
+    const event = {
+      type: 'page.properties_updated',
+      id: 'evt-forged',
+      entity: { id: TASK_ID },
+    };
     const res = await worker.fetch(await requestFor(event, attackerToken), {
       WEBHOOK_STATE: kv,
       APPS_SCRIPT_URL: 'https://script.example/exec',
@@ -105,7 +110,11 @@ test('invalid Notion signature is rejected before relay', { concurrency: false }
   };
 
   try {
-    const body = JSON.stringify({ type: 'page.properties_updated', id: 'evt-1' });
+    const body = JSON.stringify({
+      type: 'page.properties_updated',
+      id: 'evt-1',
+      entity: { id: TASK_ID },
+    });
     const req = new Request('https://worker.example/notion', {
       method: 'POST',
       headers: { 'X-Notion-Signature': 'sha256=bad' },
@@ -123,25 +132,60 @@ test('invalid Notion signature is rejected before relay', { concurrency: false }
   }
 });
 
-test('normal signed delivery uses only the operator-promoted active secret', { concurrency: false }, async () => {
+test('normal signed delivery relays only the page id', { concurrency: false }, async () => {
   const token = 'operator-promoted-token';
   const kv = new MemoryKV({ notion_webhook_pending_token: 'untrusted-other-token' });
   const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls++;
+  let relayBody = null;
+  globalThis.fetch = async (_url, init) => {
+    relayBody = JSON.parse(init.body);
     return new Response(JSON.stringify({ ok: true, outcome: 'opened' }), { status: 200 });
   };
 
   try {
-    const payload = { type: 'page.properties_updated', id: 'evt-2', entity: { id: 'task' } };
+    const payload = {
+      type: 'page.properties_updated',
+      id: 'evt-2',
+      timestamp: '2000-01-01T00:00:00.000Z',
+      authors: [{ id: 'untrusted-author' }],
+      entity: { id: TASK_ID },
+      data: { updated_properties: ['untrusted'] },
+    };
     const res = await worker.fetch(await requestFor(payload, token), {
       WEBHOOK_STATE: kv,
       APPS_SCRIPT_URL: 'https://script.example/exec',
       NOTION_WEBHOOK_VERIFICATION_TOKEN: token,
     });
     assert.equal(res.status, 200);
-    assert.equal(calls, 1);
+    assert.deepEqual(relayBody, { pageId: TASK_ID });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('signed delivery with invalid page id is not relayed', { concurrency: false }, async () => {
+  const token = 'operator-promoted-token';
+  const kv = new MemoryKV();
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response('{}');
+  };
+
+  try {
+    const payload = {
+      type: 'page.properties_updated',
+      id: 'evt-bad-page',
+      entity: { id: 'not-a-page-id' },
+    };
+    const res = await worker.fetch(await requestFor(payload, token), {
+      WEBHOOK_STATE: kv,
+      APPS_SCRIPT_URL: 'https://script.example/exec',
+      NOTION_WEBHOOK_VERIFICATION_TOKEN: token,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(calls, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -157,7 +201,11 @@ test('Apps Script logical rejection becomes retryable 502', { concurrency: false
   );
 
   try {
-    const payload = { type: 'page.properties_updated', id: 'evt-3' };
+    const payload = {
+      type: 'page.properties_updated',
+      id: 'evt-3',
+      entity: { id: TASK_ID },
+    };
     const res = await worker.fetch(await requestFor(payload, token), {
       WEBHOOK_STATE: kv,
       APPS_SCRIPT_URL: 'https://script.example/exec',
