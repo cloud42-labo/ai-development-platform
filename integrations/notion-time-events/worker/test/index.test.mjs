@@ -4,6 +4,7 @@ import worker from '../src/index.js';
 
 const encoder = new TextEncoder();
 const TASK_ID = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
+const RELAY_SECRET = 'relay-secret-test';
 
 class MemoryKV {
   constructor(initial = {}) {
@@ -32,6 +33,11 @@ async function sign(body, token) {
   return 'sha256=' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
 
+async function rawSign(body, token) {
+  const signed = await sign(body, token);
+  return signed.replace(/^sha256=/, '');
+}
+
 async function requestFor(payload, token) {
   const body = JSON.stringify(payload);
   const headers = { 'content-type': 'application/json' };
@@ -41,6 +47,15 @@ async function requestFor(payload, token) {
     headers,
     body,
   });
+}
+
+function envFor(kv, token) {
+  return {
+    WEBHOOK_STATE: kv,
+    APPS_SCRIPT_URL: 'https://script.example/exec',
+    APPS_SCRIPT_RELAY_SECRET: RELAY_SECRET,
+    ...(token ? { NOTION_WEBHOOK_VERIFICATION_TOKEN: token } : {}),
+  };
 }
 
 test('verification handshake is only stored as pending and is not relayed', { concurrency: false }, async () => {
@@ -54,10 +69,7 @@ test('verification handshake is only stored as pending and is not relayed', { co
   };
 
   try {
-    const res = await worker.fetch(await requestFor({ verification_token: token }, token), {
-      WEBHOOK_STATE: kv,
-      APPS_SCRIPT_URL: 'https://script.example/exec',
-    });
+    const res = await worker.fetch(await requestFor({ verification_token: token }, token), envFor(kv));
     assert.equal(res.status, 200);
     assert.equal((await res.json()).verificationPending, true);
     assert.equal(await kv.get('notion_webhook_pending_token'), token);
@@ -78,26 +90,30 @@ test('a forged pending token cannot become an active signing credential', { conc
   };
 
   try {
-    await worker.fetch(await requestFor({ verification_token: attackerToken }, attackerToken), {
-      WEBHOOK_STATE: kv,
-      APPS_SCRIPT_URL: 'https://script.example/exec',
-    });
+    await worker.fetch(await requestFor({ verification_token: attackerToken }, attackerToken), envFor(kv));
 
     const event = {
       type: 'page.properties_updated',
       id: 'evt-forged',
       entity: { id: TASK_ID },
     };
-    const res = await worker.fetch(await requestFor(event, attackerToken), {
-      WEBHOOK_STATE: kv,
-      APPS_SCRIPT_URL: 'https://script.example/exec',
-    });
+    const res = await worker.fetch(await requestFor(event, attackerToken), envFor(kv));
     assert.equal(res.status, 503);
     assert.equal((await res.json()).error, 'active_verification_token_not_configured');
     assert.equal(calls, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('missing relay secret fails before processing webhook', { concurrency: false }, async () => {
+  const kv = new MemoryKV();
+  const res = await worker.fetch(await requestFor({ verification_token: 'token' }, 'token'), {
+    WEBHOOK_STATE: kv,
+    APPS_SCRIPT_URL: 'https://script.example/exec',
+  });
+  assert.equal(res.status, 500);
+  assert.equal((await res.json()).error, 'missing_apps_script_relay_secret');
 });
 
 test('invalid Notion signature is rejected before relay', { concurrency: false }, async () => {
@@ -120,11 +136,7 @@ test('invalid Notion signature is rejected before relay', { concurrency: false }
       headers: { 'X-Notion-Signature': 'sha256=bad' },
       body,
     });
-    const res = await worker.fetch(req, {
-      WEBHOOK_STATE: kv,
-      APPS_SCRIPT_URL: 'https://script.example/exec',
-      NOTION_WEBHOOK_VERIFICATION_TOKEN: 'real-token',
-    });
+    const res = await worker.fetch(req, envFor(kv, 'real-token'));
     assert.equal(res.status, 401);
     assert.equal(calls, 0);
   } finally {
@@ -132,7 +144,7 @@ test('invalid Notion signature is rejected before relay', { concurrency: false }
   }
 });
 
-test('normal signed delivery relays only the page id', { concurrency: false }, async () => {
+test('normal signed delivery relays authenticated page-id envelope', { concurrency: false }, async () => {
   const token = 'operator-promoted-token';
   const kv = new MemoryKV({ notion_webhook_pending_token: 'untrusted-other-token' });
   const originalFetch = globalThis.fetch;
@@ -151,13 +163,14 @@ test('normal signed delivery relays only the page id', { concurrency: false }, a
       entity: { id: TASK_ID },
       data: { updated_properties: ['untrusted'] },
     };
-    const res = await worker.fetch(await requestFor(payload, token), {
-      WEBHOOK_STATE: kv,
-      APPS_SCRIPT_URL: 'https://script.example/exec',
-      NOTION_WEBHOOK_VERIFICATION_TOKEN: token,
-    });
+    const res = await worker.fetch(await requestFor(payload, token), envFor(kv, token));
     assert.equal(res.status, 200);
-    assert.deepEqual(relayBody, { pageId: TASK_ID });
+    assert.equal(relayBody.pageId, TASK_ID);
+    assert.match(relayBody.relayTimestamp, /^\d+$/);
+    assert.equal(
+      relayBody.relaySignature,
+      await rawSign(TASK_ID + '|' + relayBody.relayTimestamp, RELAY_SECRET)
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -179,11 +192,7 @@ test('signed delivery with invalid page id is not relayed', { concurrency: false
       id: 'evt-bad-page',
       entity: { id: 'not-a-page-id' },
     };
-    const res = await worker.fetch(await requestFor(payload, token), {
-      WEBHOOK_STATE: kv,
-      APPS_SCRIPT_URL: 'https://script.example/exec',
-      NOTION_WEBHOOK_VERIFICATION_TOKEN: token,
-    });
+    const res = await worker.fetch(await requestFor(payload, token), envFor(kv, token));
     assert.equal(res.status, 400);
     assert.equal(calls, 0);
   } finally {
@@ -206,11 +215,7 @@ test('Apps Script logical rejection becomes retryable 502', { concurrency: false
       id: 'evt-3',
       entity: { id: TASK_ID },
     };
-    const res = await worker.fetch(await requestFor(payload, token), {
-      WEBHOOK_STATE: kv,
-      APPS_SCRIPT_URL: 'https://script.example/exec',
-      NOTION_WEBHOOK_VERIFICATION_TOKEN: token,
-    });
+    const res = await worker.fetch(await requestFor(payload, token), envFor(kv, token));
     assert.equal(res.status, 502);
     assert.equal((await res.json()).error, 'apps_script_rejected_delivery');
   } finally {
