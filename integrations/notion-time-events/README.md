@@ -1,25 +1,49 @@
-# Notion Status → Google Sheets Time Events PoC
+# Notion Status → Task Time Events → Google Sheets projection
 
 ## Purpose
 
-Keep Notion as the system of record for Product / Epic / Story / Task and store only effort/time events in Google Sheets.
+Automate Task-level effort recording without creating a second operational source of truth.
+
+**Authoritative operational records remain in Notion:**
+
+- `Stories & Tasks` is authoritative for Task state and assignment.
+- `Task Time Events` is authoritative for Actor start/end intervals.
+- Google Sheets is a **derived projection for aggregation and analysis only**. It is never a completion gate or an authoritative effort ledger.
 
 Flow:
 
-`Notion Stories & Tasks Status change` → `Notion page.properties_updated webhook` → `Apps Script web app` → `Google Sheets Time Events`
+`Notion Stories & Tasks change` → `Notion webhook` → `Cloudflare Worker (signature validation)` → `Apps Script` → `Notion Task Time Events (authoritative write)` → `Google Sheets projection`
 
-## PoC behavior
+## Behavior
 
-- `Status = In Progress` opens one Time Event for the Task's `Assigned Agent`.
-- `Status = Review / Done / Blocked` closes the matching open Time Event.
-- Actor mapping:
-  - `ChatGPT` → `Chris`
-  - `Claude Opus / Sonnet / Haiku` → `Claude`
-  - `Codex` → `Codex`
-  - `Human` → `Human`
-- Other task property changes are ignored.
-- Webhook event IDs are deduplicated in a hidden `Webhook Log` sheet.
-- A Task + Actor cannot have two simultaneous open events.
+- `Status = In Progress` ensures exactly one authoritative open Task Time Event for the currently mapped `Assigned Agent`.
+- Leaving `In Progress` closes every authoritative open event for the Task, regardless of the Task's current assignee.
+- Changing or clearing `Assigned Agent` while the Task remains `In Progress` closes the old Actor event and opens the new Actor event when the new assignment maps to a supported Actor.
+- Duplicate open events for the same Task/Actor are reconciled to one open event.
+- Webhook retries are idempotent: authoritative Notion state is queried before writes, and webhook IDs are additionally deduplicated in the projection log.
+- After each authoritative reconciliation, the Task's Notion Time Events are projected into Google Sheets. The Sheet can therefore be rebuilt from Notion records.
+
+Actor mapping:
+
+- `ChatGPT` → `Chris`
+- `Claude Opus / Sonnet / Haiku` → `Claude`
+- `Codex` → `Codex`
+- `Human` → `Human`
+
+Normal conversation and non-Task activity are outside this integration because no managed Task Status/assignment event is involved.
+
+## Security model
+
+The Notion subscription URL contains **no bearer key or credential**.
+
+Notion signs webhook deliveries with `X-Notion-Signature` using HMAC-SHA256 and the subscription verification token. The Cloudflare Worker validates the signature over the exact raw body before forwarding anything. The Worker stores the verification token in a `WEBHOOK_STATE` KV binding after the initial verification handshake.
+
+Apps Script independently verifies the original Notion signature again. The Worker forwards only:
+
+- the exact raw Notion request body; and
+- the original `X-Notion-Signature` value.
+
+No relay secret is required, and no credential is placed in a URL. Replayed deliveries remain safe because webhook IDs and authoritative Notion Time Event state are idempotent.
 
 ## Google Sheet
 
@@ -29,93 +53,95 @@ https://docs.google.com/spreadsheets/d/1tjzjNqHEnPkzQGqB_ydxdWSKsdth27IUJaRrm_5x
 
 Tabs:
 
-- `Time Events` — authoritative effort log for the PoC.
-- `Summary` — Actor totals and open-event counts.
+- `Time Events` — derived projection of Notion Task Time Events.
+- `Summary` — Actor totals and open-event counts derived from the projection.
 - `Config` — non-secret configuration reference.
-- `Webhook Log` — hidden delivery/idempotency log.
+- `Webhook Log` — hidden delivery/idempotency diagnostics.
 
 Spreadsheet timezone must remain `Asia/Tokyo`.
 
-## One-time setup
+The `Event ID` in projected rows is the authoritative Notion Task Time Event page ID, so the projection can be reconciled deterministically.
 
-### 1. Create the Apps Script project
+## Notion connection requirements
 
-Open the PoC Google Sheet → **Extensions → Apps Script**.
+The Notion connection used by Apps Script must have access to both `Stories & Tasks` and `Task Time Events`, with capabilities sufficient to:
 
-Copy `Code.gs` from this directory into the bound Apps Script project.
+- read Task state and assignment;
+- query Task Time Events;
+- create Task Time Events; and
+- update `Ended At` / `Note` on Task Time Events.
 
-### 2. Configure the Notion token
+Creating Task Time Events through the Notion API requires **Insert Content** capability. Do not continue to production E2E if the connection is read/update-only.
 
-In Apps Script **Project Settings → Script Properties**, add:
+`NOTION_TOKEN` remains in Apps Script Script Properties; never put it in source code, GitHub, the Sheet, a URL, or logs.
 
-- `NOTION_TOKEN` = the token for the Notion connection that can read Stories & Tasks.
+## Apps Script setup
 
-Do not put the token in GitHub or the spreadsheet.
+1. Open the PoC Google Sheet → **Extensions → Apps Script**.
+2. Replace `Code.gs` with the current version from this directory.
+3. Run `setup()` once. Existing `NOTION_TOKEN` is preserved.
+4. Before registering a replacement Notion subscription, run `resetVerificationToken()` once. This prevents a previous subscription token from being accepted for a new subscription.
+5. Redeploy the Web App as a new version. Execute as yourself and allow the Cloudflare Worker to POST without Google sign-in.
+6. Keep the `/exec` URL private from documentation. It is not an authentication credential, but it is only an internal relay target.
 
-### 3. Initialize
+The Apps Script endpoint is **not** registered directly with Notion.
 
-Run `setup()` once from the Apps Script editor and approve the requested permissions.
+## Cloudflare Worker setup
 
-Then run `showSetupInfo()` and read the execution log. It prints the generated `webhookKey` plus the configured data source/property IDs.
+Worker source is under `worker/`.
 
-Current defaults:
+1. Create/bind a Workers KV namespace named `WEBHOOK_STATE`. With current Wrangler, `npx wrangler kv namespace create WEBHOOK_STATE --update-config` can add the binding to `wrangler.jsonc`.
+2. Configure `APPS_SCRIPT_URL` in Cloudflare's secret/environment storage with the Apps Script `/exec` URL. Do not commit the value.
+3. Deploy the Worker.
+4. If replacing a prior Notion subscription, clear the KV key `notion_webhook_verification_token` before registering the new subscription.
+5. Use only the Worker's public HTTPS URL as the Notion webhook URL. Do not append authentication query parameters.
 
-- Stories & Tasks data source: `fc5e770f-c68e-4799-afe7-ec4bff0dab59`
-- Status property ID: `RWN3TQ`
+The Worker requires no Notion API token. It receives the subscription verification token from Notion's handshake and stores it in KV for validating later deliveries.
 
-### 4. Deploy as a Web App
+## Create the Notion webhook subscription
 
-Apps Script → **Deploy → New deployment → Web app**.
+1. Keep the old direct-to-Apps-Script subscription paused while migrating.
+2. Create a new subscription whose URL is the Cloudflare Worker URL.
+3. Subscribe to `page.properties_updated`.
+4. The Worker validates and forwards the initial verification request; Apps Script stores the same verification token after independently validating the signature.
+5. Run `showVerificationToken()` in Apps Script and paste that value into Notion's verification UI.
+6. After the Worker-based subscription is active and E2E has passed, delete the old direct subscription.
 
-- Execute as: **Me**
-- Who has access: select the option that allows Notion's servers to POST without Google sign-in.
+If a subscription is recreated/rotated, clear both the Worker's KV token and Apps Script's stored verification token first; a mismatched new verification token is intentionally rejected.
 
-Copy the deployment `/exec` URL.
+## E2E tests
 
-The Notion webhook URL is:
+Use non-production test Tasks.
 
-`<WEB_APP_EXEC_URL>?hookKey=<WEBHOOK_KEY>`
+### Status start/stop
 
-The random query key is a PoC guard because Apps Script web-app event objects do not expose incoming HTTP headers, so this implementation cannot validate Notion's `X-Notion-Signature` HMAC header.
+1. `Ready → In Progress`.
+2. Confirm an authoritative Notion `Task Time Events` row is created with Task, Actor, and `Started At`.
+3. Confirm the same Event ID appears in the Sheet projection.
+4. `In Progress → Review`.
+5. Confirm the Notion Time Event receives `Ended At` first, then the Sheet row reflects the same end time.
 
-### 5. Create the Notion webhook subscription
+### Reassignment
 
-In the Notion connection settings, create a webhook subscription with:
+1. Start a Task with one mapped Actor.
+2. While it remains `In Progress`, change `Assigned Agent` to another mapped Actor.
+3. Confirm the original Actor's Notion Time Event closes and the new Actor receives a new open Time Event.
+4. Clear the assignment while still `In Progress`; confirm any remaining open event closes rather than becoming orphaned.
 
-- URL: the URL above
-- Event: `page.properties_updated`
+### Retry/idempotency
 
-Notion sends a one-time `verification_token` to the endpoint.
+Replay or cause a webhook retry and confirm no duplicate authoritative Task Time Event is created.
 
-After that POST arrives, run `showVerificationToken()` in Apps Script (or visit `<WEB_APP_EXEC_URL>?hookKey=<WEBHOOK_KEY>&action=verification-token`) and paste the returned token into Notion's verification UI.
+## Known limitation: aggregated delivery
 
-### 6. Test
-
-Use a non-production test Task whose `Assigned Agent` is one of the mapped actors.
-
-1. Change `Ready → In Progress` in Notion.
-2. Confirm a row appears in `Time Events` with `Started At` and no `Ended At`.
-3. Change `In Progress → Review`.
-4. Confirm the same row receives `Ended At`, `End Status = Review`, and a calculated duration.
-5. Repeat once for an AI-driven status change to confirm human UI edits and API edits use the same webhook path.
-
-## Known PoC limitations
-
-### Aggregated webhook delivery
-
-Notion documents `page.properties_updated` as an aggregated event. Very fast status transitions may be collapsed before delivery. The PoC must test whether this matters for real Cloud42 task durations.
-
-### Signature validation
-
-Notion recommends validating `X-Notion-Signature`. Apps Script web-app `doPost(e)` exposes query parameters and post body but not the incoming request headers needed for that validation. This PoC therefore uses a high-entropy `hookKey` query parameter.
-
-If the PoC becomes production infrastructure, move the public webhook receiver to an endpoint that can validate headers (for example a small Cloudflare Worker) and forward validated events to the same Sheet-writing logic.
+Notion may aggregate `page.properties_updated` deliveries. The reconciler uses the Task's current authoritative state, which prevents orphan events and duplicate events, but extremely rapid intermediate Status/Actor transitions may be collapsed before delivery. The PoC must therefore evaluate whether those intermediate transitions matter at real Cloud42 task timescales.
 
 ## Success criteria
 
-- Human Notion Status edits create/close Time Events without pressing a separate button.
-- Chris / Claude / Codex Status edits through Notion API create/close Time Events through the same path.
-- Duplicate webhook retries do not duplicate Time Events.
-- Normal conversation and non-Task activity produce no Time Event.
-- Actor totals in `Summary` reconcile with Time Events.
-- No material status-change events are lost during the PoC window.
+- Notion remains authoritative for Task state and Task Time Events.
+- Sheet rows are reproducible projections of Notion events.
+- Notion webhook signatures are validated before processing; no bearer credential appears in the webhook URL.
+- Human / Chris / Claude / Codex Task activity uses the same state-driven mechanism.
+- In-progress reassignment/clearing cannot leave the original Actor event open indefinitely.
+- Duplicate webhook retries do not duplicate authoritative events.
+- Normal conversation and non-Task activity create no event.
