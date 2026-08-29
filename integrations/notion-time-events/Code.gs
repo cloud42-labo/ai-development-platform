@@ -4,6 +4,8 @@ const DEFAULTS = {
   TASKS_DATA_SOURCE_ID: 'fc5e770f-c68e-4799-afe7-ec4bff0dab59',
   TIME_EVENTS_DATA_SOURCE_ID: '544b9a17-2653-47aa-b62c-bb52425b3bf2',
   START_STATUS: 'In Progress',
+  REVIEW_STATUS: 'Review',
+  DONE_STATUS: 'Done',
   NOTION_VERSION: '2026-03-11',
 };
 
@@ -35,16 +37,6 @@ function showSetupInfo() {
   }, null, 2));
 }
 
-function showVerificationToken() {
-  const token = PropertiesService.getScriptProperties().getProperty('NOTION_WEBHOOK_VERIFICATION_TOKEN');
-  Logger.log(token || 'No verification token received yet.');
-}
-
-function resetVerificationToken() {
-  PropertiesService.getScriptProperties().deleteProperty('NOTION_WEBHOOK_VERIFICATION_TOKEN');
-  Logger.log('Stored Notion webhook verification token cleared.');
-}
-
 function doGet() {
   return json_({ ok: true, service: 'cloud42-notion-time-events-projection' });
 }
@@ -71,23 +63,19 @@ function doPost(e) {
     return json_({ ok: false, error: 'invalid_notion_json' });
   }
 
-  const props = PropertiesService.getScriptProperties();
-  const storedVerificationToken = props.getProperty('NOTION_WEBHOOK_VERIFICATION_TOKEN') || '';
-  const payloadVerificationToken = typeof payload.verification_token === 'string' ? payload.verification_token : '';
-  const verificationToken = storedVerificationToken || payloadVerificationToken;
-
-  if (!verificationToken) return json_({ ok: false, error: 'verification_token_missing' });
-  if (!verifyNotionSignature_(envelope.rawBody, envelope.notionSignature, verificationToken)) {
-    return json_({ ok: false, error: 'invalid_notion_signature' });
+  // The Cloudflare Worker never relays the verification handshake. Enrollment
+  // must be promoted out-of-band by an authenticated operator after Notion has
+  // accepted the pending token. Apps Script receives only normal signed events.
+  if (payload && payload.verification_token) {
+    return json_({ ok: false, error: 'verification_handshake_must_not_reach_apps_script' });
   }
 
-  if (payloadVerificationToken) {
-    if (storedVerificationToken && storedVerificationToken !== payloadVerificationToken) {
-      return json_({ ok: false, error: 'verification_token_rotation_requires_reset' });
-    }
-    props.setProperty('NOTION_WEBHOOK_VERIFICATION_TOKEN', payloadVerificationToken);
-    logWebhook_('', 'verification', '', '', new Date(), 'verification_token_stored');
-    return json_({ ok: true, verification: true });
+  const props = PropertiesService.getScriptProperties();
+  const verificationToken = props.getProperty('NOTION_WEBHOOK_VERIFICATION_TOKEN') || '';
+  if (!verificationToken) return json_({ ok: false, error: 'verification_token_not_configured' });
+
+  if (!verifyNotionSignature_(envelope.rawBody, envelope.notionSignature, verificationToken)) {
+    return json_({ ok: false, error: 'invalid_notion_signature' });
   }
 
   if (payload.type !== 'page.properties_updated') {
@@ -135,6 +123,14 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
   const openEvents = queryNotionTimeEventsForTask_(taskId, true);
   const actions = [];
 
+  // Done is a gate, not a stop trigger. A task may persist as Done only after
+  // its Task Time Events are already closed and completion evidence exists.
+  // If a caller jumps directly to Done, repair the state instead of using the
+  // Done webhook to close the interval after completion.
+  if (currentStatus === DEFAULTS.DONE_STATUS) {
+    return enforceDoneGate_(task, openEvents);
+  }
+
   if (currentStatus === DEFAULTS.START_STATUS) {
     const sameActor = [];
     const otherActor = [];
@@ -169,6 +165,9 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       actions.push('opened:' + created.id);
     }
   } else {
+    // Review / Blocked / Ready / Backlog are non-active task states. They may
+    // close an existing interval. Done is intentionally handled above and is
+    // never used as the close trigger.
     openEvents.forEach(function (eventPage) {
       closeNotionTimeEvent_(eventPage, currentStatus, changedBy, webhookId, when, 'left_in_progress');
       actions.push('closed:' + eventPage.id);
@@ -176,6 +175,35 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
   }
 
   return actions.length ? actions.join(',') : 'no_change:' + currentStatus;
+}
+
+function enforceDoneGate_(task, openEvents) {
+  const failures = [];
+  const result = propertyText_(task.properties.Result).trim();
+  const completedAt = propertyDate_(task.properties['Completed At']);
+
+  if (openEvents && openEvents.length) failures.push('open_time_event');
+  if (!result) failures.push('missing_result');
+  if (!completedAt) failures.push('missing_completed_at');
+
+  if (!failures.length) return 'done_gate_passed';
+
+  // If work is still timed, restore In Progress and leave the event open so the
+  // normal In Progress → Review transition can close it. If timing is already
+  // closed but completion evidence is missing, return to Review.
+  const rollbackStatus = openEvents && openEvents.length
+    ? DEFAULTS.START_STATUS
+    : DEFAULTS.REVIEW_STATUS;
+  updateTaskStatus_(task.id, rollbackStatus);
+  return 'done_gate_rejected:' + failures.join('+') + ':rollback=' + rollbackStatus;
+}
+
+function updateTaskStatus_(taskId, statusName) {
+  notionRequest_('patch', '/v1/pages/' + encodeURIComponent(taskId), {
+    properties: {
+      Status: { status: { name: statusName } },
+    },
+  });
 }
 
 function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, webhookId, when) {
