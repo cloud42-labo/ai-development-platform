@@ -12,6 +12,9 @@ export default {
     if (!env.APPS_SCRIPT_URL) {
       return response(500, { ok: false, error: 'missing_apps_script_url' });
     }
+    if (!env.APPS_SCRIPT_RELAY_SECRET) {
+      return response(500, { ok: false, error: 'missing_apps_script_relay_secret' });
+    }
 
     const rawBody = await request.text();
     if (!rawBody) return response(400, { ok: false, error: 'empty_body' });
@@ -54,14 +57,19 @@ export default {
       return response(400, { ok: false, error: 'missing_or_invalid_page_id' });
     }
 
-    // The relay carries no operational claims and no shared secret. Apps Script
-    // treats pageId only as an untrusted reconciliation trigger, re-fetches the
-    // page from Notion, validates its parent data source, and derives status,
-    // assignment, actor and timing from the authoritative page itself.
+    // Authenticate the Worker -> Apps Script hop separately from the Notion
+    // webhook token. The shared relay secret is configured only in Cloudflare
+    // and Apps Script Script Properties. Apps Script must verify this HMAC before
+    // any privileged Notion reconciliation.
+    const relayTimestamp = Date.now().toString();
+    const relayMessage = pageId + '|' + relayTimestamp;
+    const relaySignature = await rawHmac(relayMessage, env.APPS_SCRIPT_RELAY_SECRET);
+    const relayBody = { pageId, relayTimestamp, relaySignature };
+
     const upstream = await fetch(env.APPS_SCRIPT_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ pageId }),
+      body: JSON.stringify(relayBody),
       redirect: 'follow',
     });
 
@@ -96,15 +104,19 @@ export default {
 };
 
 async function notionSignature(body, verificationToken) {
+  return 'sha256=' + await rawHmac(body, verificationToken);
+}
+
+async function rawHmac(body, secret) {
   const key = await crypto.subtle.importKey(
     'raw',
-    encoder.encode(verificationToken),
+    encoder.encode(secret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign']
   );
   const signed = await crypto.subtle.sign('HMAC', key, encoder.encode(body));
-  return 'sha256=' + toHex(new Uint8Array(signed));
+  return toHex(new Uint8Array(signed));
 }
 
 function isUuidLike(value) {
