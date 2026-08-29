@@ -10,6 +10,25 @@ Do not classify a legitimate exception or required Human escalation as a violati
 
 A recurrence of the same rule failure MUST be linked to the earlier case and marked as recurrence instead of being treated as an unrelated incident.
 
+## Independent review (author ≠ reviewer)
+
+A Postmortem's first analysis is written by the AI closest to the incident, which is also the AI most exposed to the incident's own framing and self-justification. Treat that first analysis as a draft, not as ground truth, until a different AI has independently re-checked it.
+
+- **Author ≠ reviewer is mandatory.** The AI (or Human) who wrote the first analysis of a Postmortem MUST NOT also be its reviewer.
+- **An AI-caused Postmortem MUST NOT move to `Closed` before a different AI has completed its review.** This applies in addition to, not instead of, the other closure criteria below.
+- **Basic review pairing:**
+  - Chris/ChatGPT-caused incident → Claude reviews.
+  - Claude-caused incident → Chris/ChatGPT reviews.
+  - A technical code/PR incident MAY add a Codex review as a third-party technical check, on top of the AI pairing above.
+- **Human review is scoped to Human-only judgment.** Route a Postmortem to a Human reviewer only when the review question is itself Human-only (legal exposure, cost/billing decisions, authority the AI does not hold) — not as a general substitute for the AI pairing above.
+- **Minimum review criteria.** The reviewer MUST check, at minimum:
+  1. **Facts** — do the described event and evidence match what actually happened (commits, PRs, Task/Time records, logs)?
+  2. **Cause-and-effect** — does the causal chain from trigger to impact actually hold, or does it skip steps / assume a link that isn't shown?
+  3. **Root Cause classification** — is the Root Cause Category correct, or does the author's framing (e.g. blaming an actor instead of a missing gate) misclassify it?
+  4. **Preventive Action fit** — does the Preventive Action actually address the recorded root cause, or does it treat a symptom / a different cause?
+  5. **No new false gate** — does the Preventive Action introduce a new Human/Stop Gate that isn't actually required, echoing the false-gate failure mode this loop exists to reduce?
+- **Record the review**, not just its outcome: which criteria were checked, what (if anything) the reviewer changed, and the reviewer's identity. This is tracked on the Postmortem record (`Reviewer`, `Review Status`, `Review Notes`) alongside the existing fields.
+
 ## Required loop
 
 A rule violation is not closed by documenting it. Follow this loop:
@@ -47,7 +66,10 @@ A Postmortem can be closed only when all are true:
 - a representative retest passed;
 - evidence of the retest is recorded;
 - recurrence status is correct;
-- no unresolved corrective action remains.
+- no unresolved corrective action remains;
+- **an AI-caused Postmortem has completed independent review by a different AI** (see "Independent review" above), with `Reviewer` ≠ `Owner` and `Review Status = Approved`.
+
+A `Review Status` of `Revise Requested` blocks `Closed` until the author addresses the reviewer's findings and the reviewer re-approves. The reviewer re-approving is not optional busywork: if the reviewer finds the causal chain, Root Cause classification, or Preventive Action fit does not hold up, that finding overrides the author's own closure request.
 
 If the same rule fails again before these criteria are met, the earlier Postmortem remains an active risk and the new event is a recurrence signal, not evidence that the process has completed.
 
