@@ -22,8 +22,9 @@ function setup() {
     TIME_EVENTS_DATA_SOURCE_ID: props.getProperty('TIME_EVENTS_DATA_SOURCE_ID') || DEFAULTS.TIME_EVENTS_DATA_SOURCE_ID,
   }, false);
 
+  ensureProjectionHeaders_();
   ensureWebhookLogSheet_();
-  Logger.log('Setup complete.');
+  Logger.log('Setup complete. No webhook signing secret is stored in Apps Script.');
 }
 
 function showSetupInfo() {
@@ -33,102 +34,79 @@ function showSetupInfo() {
     tasksDataSourceId: props.getProperty('TASKS_DATA_SOURCE_ID'),
     timeEventsDataSourceId: props.getProperty('TIME_EVENTS_DATA_SOURCE_ID'),
     notionTokenConfigured: Boolean(props.getProperty('NOTION_TOKEN')),
-    webhookVerificationTokenConfigured: Boolean(props.getProperty('NOTION_WEBHOOK_VERIFICATION_TOKEN')),
   }, null, 2));
 }
 
 function doGet() {
-  return json_({ ok: true, service: 'cloud42-notion-time-events-projection' });
+  return json_({ ok: true, service: 'cloud42-notion-time-events-reconciler' });
 }
 
 function doPost(e) {
-  const rawEnvelope = e && e.postData ? e.postData.contents : '';
-  if (!rawEnvelope) return json_({ ok: false, error: 'empty_body' });
+  const raw = e && e.postData ? e.postData.contents : '';
+  if (!raw) return json_({ ok: false, error: 'empty_body' });
 
-  let envelope;
+  let request;
   try {
-    envelope = JSON.parse(rawEnvelope);
+    request = JSON.parse(raw);
   } catch (err) {
-    return json_({ ok: false, error: 'invalid_envelope_json' });
+    return json_({ ok: false, error: 'invalid_json' });
   }
 
-  if (!envelope || typeof envelope.rawBody !== 'string' || typeof envelope.notionSignature !== 'string') {
-    return json_({ ok: false, error: 'invalid_relay_envelope' });
-  }
+  const pageId = normalizeUuid_(request && request.pageId);
+  if (!pageId) return json_({ ok: false, error: 'missing_or_invalid_page_id' });
 
-  let payload;
-  try {
-    payload = JSON.parse(envelope.rawBody);
-  } catch (err) {
-    return json_({ ok: false, error: 'invalid_notion_json' });
-  }
-
-  // The Cloudflare Worker never relays the verification handshake. Enrollment
-  // must be promoted out-of-band by an authenticated operator after Notion has
-  // accepted the pending token. Apps Script receives only normal signed events.
-  if (payload && payload.verification_token) {
-    return json_({ ok: false, error: 'verification_handshake_must_not_reach_apps_script' });
-  }
-
-  const props = PropertiesService.getScriptProperties();
-  const verificationToken = props.getProperty('NOTION_WEBHOOK_VERIFICATION_TOKEN') || '';
-  if (!verificationToken) return json_({ ok: false, error: 'verification_token_not_configured' });
-
-  if (!verifyNotionSignature_(envelope.rawBody, envelope.notionSignature, verificationToken)) {
-    return json_({ ok: false, error: 'invalid_notion_signature' });
-  }
-
-  if (payload.type !== 'page.properties_updated') {
-    return json_({ ok: true, ignored: 'event_type' });
-  }
-
+  // pageId is deliberately treated as untrusted input. No status, actor,
+  // timestamp, author, completion evidence or event fields are accepted from
+  // the caller. The endpoint re-fetches the page using the private Notion token,
+  // validates the authoritative parent data source, and derives every mutation
+  // from that Notion state. A direct caller can therefore only request an
+  // idempotent reconciliation of a Task that already exists in Notion.
   return withLock_(function () {
-    if (hasProcessedWebhook_(payload.id)) return json_({ ok: true, duplicate: true });
-
-    const configuredDs = normalizeId_(props.getProperty('TASKS_DATA_SOURCE_ID') || DEFAULTS.TASKS_DATA_SOURCE_ID);
-    const eventDs = normalizeId_(payload.data && payload.data.parent && payload.data.parent.data_source_id);
-    const pageId = payload.entity && payload.entity.id;
-    const when = parseTimestamp_(payload.timestamp);
-
-    if (!pageId || !eventDs || eventDs !== configuredDs) {
-      logWebhook_(payload.id, payload.type, pageId || '', '', when, 'ignored_data_source');
-      return json_({ ok: true, ignored: 'data_source' });
+    const task = retrieveNotionPage_(pageId);
+    if (!isConfiguredTask_(task)) {
+      return json_({ ok: true, ignored: 'not_configured_task' });
     }
 
-    const task = retrieveNotionPage_(pageId);
     const currentStatus = propertyText_(task.properties.Status);
     const assignedAgent = propertyText_(task.properties['Assigned Agent']);
     const desiredActor = mapActor_(assignedAgent);
     const title = propertyText_(task.properties.Title) || pageId;
-    const changedBy = authorLabel_(payload.authors);
+    const when = authoritativeEditTime_(task);
+    const changedBy = editorLabel_(task.last_edited_by);
+    const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent);
+
+    if (hasProcessedSnapshot_(snapshotId)) {
+      return json_({ ok: true, duplicate: true });
+    }
 
     const outcome = reconcileAuthoritativeTimeEvents_(
       task,
       currentStatus,
       desiredActor,
       changedBy,
-      payload.id || '',
+      snapshotId,
       when
     );
 
-    syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, payload.id || '');
-    logWebhook_(payload.id, payload.type, pageId, currentStatus, when, outcome);
+    syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
+    logSnapshot_(snapshotId, 'notion_reconcile', pageId, currentStatus, when, outcome);
     return json_({ ok: true, outcome: outcome });
   });
 }
 
-function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, webhookId, when) {
+function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
   const taskId = task.id;
   const taskTitle = propertyText_(task.properties.Title) || taskId;
-  const openEvents = queryNotionTimeEventsForTask_(taskId, true);
+  const allEvents = queryNotionTimeEventsForTask_(taskId);
+  const openEvents = allEvents.filter(function (eventPage) {
+    return !propertyDate_(eventPage.properties['Ended At']);
+  });
   const actions = [];
 
-  // Done is a gate, not a stop trigger. A task may persist as Done only after
-  // its Task Time Events are already closed and completion evidence exists.
-  // If a caller jumps directly to Done, repair the state instead of using the
-  // Done webhook to close the interval after completion.
+  // Done is a completion gate, not a stop trigger. The Time Event and required
+  // completion evidence must already exist before Done is allowed to persist.
   if (currentStatus === DEFAULTS.DONE_STATUS) {
-    return enforceDoneGate_(task, openEvents);
+    return enforceDoneGate_(task, allEvents, openEvents);
   }
 
   if (currentStatus === DEFAULTS.START_STATUS) {
@@ -142,7 +120,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
     });
 
     otherActor.forEach(function (eventPage) {
-      closeNotionTimeEvent_(eventPage, currentStatus, changedBy, webhookId, when, 'reassignment');
+      closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'reassignment');
       actions.push('closed_reassigned:' + eventPage.id);
     });
 
@@ -156,20 +134,23 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
 
     if (sameActor.length) {
       for (let i = 1; i < sameActor.length; i++) {
-        closeNotionTimeEvent_(sameActor[i], currentStatus, changedBy, webhookId, when, 'duplicate_reconciliation');
+        closeNotionTimeEvent_(sameActor[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation');
         actions.push('closed_duplicate:' + sameActor[i].id);
       }
       actions.push('already_open:' + sameActor[0].id);
     } else {
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, webhookId, when);
+      const initialTaskStart = allEvents.length === 0
+        ? propertyDate_(task.properties['Started At'])
+        : null;
+      const startAt = initialTaskStart || when;
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt);
       actions.push('opened:' + created.id);
     }
   } else {
-    // Review / Blocked / Ready / Backlog are non-active task states. They may
-    // close an existing interval. Done is intentionally handled above and is
-    // never used as the close trigger.
+    // Review / Blocked / Ready / Backlog are non-active Task states and may close
+    // intervals. Done is intentionally handled above and never closes timing.
     openEvents.forEach(function (eventPage) {
-      closeNotionTimeEvent_(eventPage, currentStatus, changedBy, webhookId, when, 'left_in_progress');
+      closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'left_in_progress');
       actions.push('closed:' + eventPage.id);
     });
   }
@@ -177,20 +158,21 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
   return actions.length ? actions.join(',') : 'no_change:' + currentStatus;
 }
 
-function enforceDoneGate_(task, openEvents) {
+function enforceDoneGate_(task, allEvents, openEvents) {
   const failures = [];
   const result = propertyText_(task.properties.Result).trim();
   const completedAt = propertyDate_(task.properties['Completed At']);
 
+  if (!allEvents || !allEvents.length) failures.push('missing_time_event');
   if (openEvents && openEvents.length) failures.push('open_time_event');
   if (!result) failures.push('missing_result');
   if (!completedAt) failures.push('missing_completed_at');
 
   if (!failures.length) return 'done_gate_passed';
 
-  // If work is still timed, restore In Progress and leave the event open so the
-  // normal In Progress → Review transition can close it. If timing is already
-  // closed but completion evidence is missing, return to Review.
+  // If work is still timed, restore In Progress and deliberately leave the
+  // interval open so the normal In Progress → Review transition closes it.
+  // Otherwise return to Review to collect missing completion evidence.
   const rollbackStatus = openEvents && openEvents.length
     ? DEFAULTS.START_STATUS
     : DEFAULTS.REVIEW_STATUS;
@@ -206,10 +188,10 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, webhookId, when) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when) {
   const note = buildNote_({
-    source: 'notion_webhook',
-    webhookId: webhookId,
+    source: 'notion_reconcile',
+    snapshotId: snapshotId,
     changedBy: changedBy,
   });
 
@@ -233,12 +215,12 @@ function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, webhookId, 
   });
 }
 
-function closeNotionTimeEvent_(eventPage, endStatus, changedBy, webhookId, when, reason) {
+function closeNotionTimeEvent_(eventPage, endStatus, changedBy, snapshotId, when, reason) {
   const existingNote = propertyText_(eventPage.properties.Note);
   const closeMeta = buildNote_({
     endStatus: endStatus,
     reason: reason,
-    webhookId: webhookId,
+    snapshotId: snapshotId,
     changedBy: changedBy,
   });
   const note = existingNote ? existingNote + ' | ' + closeMeta : closeMeta;
@@ -253,12 +235,7 @@ function closeNotionTimeEvent_(eventPage, endStatus, changedBy, webhookId, when,
   });
 }
 
-function queryNotionTimeEventsForTask_(taskId, onlyOpen) {
-  const filters = [
-    { property: 'Task', relation: { contains: taskId } },
-  ];
-  if (onlyOpen) filters.push({ property: 'Ended At', date: { is_empty: true } });
-
+function queryNotionTimeEventsForTask_(taskId) {
   let cursor = null;
   let pageCount = 0;
   const results = [];
@@ -266,7 +243,7 @@ function queryNotionTimeEventsForTask_(taskId, onlyOpen) {
   do {
     const body = {
       page_size: 100,
-      filter: filters.length === 1 ? filters[0] : { and: filters },
+      filter: { property: 'Task', relation: { contains: taskId } },
       sorts: [{ property: 'Started At', direction: 'descending' }],
     };
     if (cursor) body.start_cursor = cursor;
@@ -288,14 +265,14 @@ function queryNotionTimeEventsForTask_(taskId, onlyOpen) {
   return results;
 }
 
-function syncTaskProjection_(taskId, taskTitle, taskUrl, currentStatus, fallbackChangedBy, fallbackWebhookId) {
-  const events = queryNotionTimeEventsForTask_(taskId, false);
+function syncTaskProjection_(taskId, taskTitle, taskUrl, currentStatus, fallbackChangedBy, fallbackSnapshotId) {
+  const events = queryNotionTimeEventsForTask_(taskId);
   events.slice().reverse().forEach(function (eventPage) {
-    upsertSheetProjection_(eventPage, taskId, taskTitle, taskUrl, currentStatus, fallbackChangedBy, fallbackWebhookId);
+    upsertSheetProjection_(eventPage, taskId, taskTitle, taskUrl, currentStatus, fallbackChangedBy, fallbackSnapshotId);
   });
 }
 
-function upsertSheetProjection_(eventPage, taskId, taskTitle, taskUrl, currentStatus, fallbackChangedBy, fallbackWebhookId) {
+function upsertSheetProjection_(eventPage, taskId, taskTitle, taskUrl, currentStatus, fallbackChangedBy, fallbackSnapshotId) {
   const sheet = sheet_(DEFAULTS.TIME_EVENTS_SHEET);
   const row = findSheetEventRowByEventId_(sheet, eventPage.id) || (sheet.getLastRow() + 1);
   const actor = propertyText_(eventPage.properties.Actor);
@@ -305,7 +282,7 @@ function upsertSheetProjection_(eventPage, taskId, taskTitle, taskUrl, currentSt
   const meta = parseNoteMeta_(note);
   const endStatus = endedAt ? (meta.endStatus || (currentStatus !== DEFAULTS.START_STATUS ? currentStatus : '')) : '';
   const changedBy = meta.changedBy || fallbackChangedBy || '';
-  const webhookId = meta.webhookId || fallbackWebhookId || '';
+  const sourceSnapshotId = meta.snapshotId || fallbackSnapshotId || '';
 
   sheet.getRange(row, 1, 1, 13).setValues([[
     eventPage.id,
@@ -319,7 +296,7 @@ function upsertSheetProjection_(eventPage, taskId, taskTitle, taskUrl, currentSt
     endStatus,
     changedBy,
     taskUrl || ('https://www.notion.so/' + taskId.replace(/-/g, '')),
-    webhookId,
+    sourceSnapshotId,
     new Date(),
   ]]);
   sheet.getRange(row, 7).setFormula('=IF(OR(E' + row + '="",F' + row + '=""),"",24*(F' + row + '-E' + row + '))');
@@ -366,8 +343,33 @@ function notionRequest_(method, path, body) {
   return text ? JSON.parse(text) : {};
 }
 
+function isConfiguredTask_(page) {
+  const configured = normalizeId_(PropertiesService.getScriptProperties().getProperty('TASKS_DATA_SOURCE_ID') || DEFAULTS.TASKS_DATA_SOURCE_ID);
+  const actual = normalizeId_(page && page.parent && page.parent.data_source_id);
+  return Boolean(actual && actual === configured);
+}
+
 function timeEventsDataSourceId_() {
   return PropertiesService.getScriptProperties().getProperty('TIME_EVENTS_DATA_SOURCE_ID') || DEFAULTS.TIME_EVENTS_DATA_SOURCE_ID;
+}
+
+function authoritativeEditTime_(task) {
+  return parseTimestamp_(task && task.last_edited_time);
+}
+
+function authoritativeSnapshotId_(task, status, assignedAgent) {
+  const seed = [
+    normalizeId_(task && task.id),
+    String(task && task.last_edited_time || ''),
+    String(status || ''),
+    String(assignedAgent || ''),
+  ].join('|');
+  const digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    seed,
+    Utilities.Charset.UTF_8
+  );
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/g, '');
 }
 
 function eventStartedAt_(eventPage) {
@@ -401,7 +403,7 @@ function buildNote_(fields) {
   if (fields.source) parts.push('Source=' + fields.source);
   if (fields.endStatus) parts.push('End Status=' + fields.endStatus);
   if (fields.reason) parts.push('Reason=' + fields.reason);
-  if (fields.webhookId) parts.push('Webhook=' + fields.webhookId);
+  if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
   if (fields.changedBy) parts.push('Changed By=' + fields.changedBy);
   return parts.join(' | ');
 }
@@ -409,7 +411,7 @@ function buildNote_(fields) {
 function parseNoteMeta_(note) {
   return {
     endStatus: noteField_(note, 'End Status'),
-    webhookId: noteField_(note, 'Webhook'),
+    snapshotId: noteField_(note, 'Snapshot'),
     changedBy: noteField_(note, 'Changed By'),
   };
 }
@@ -423,46 +425,32 @@ function noteField_(note, key) {
   return '';
 }
 
-function authorLabel_(authors) {
-  if (!authors || !authors.length) return '';
-  return authors.map(function (a) {
-    return (a.type || 'unknown') + ':' + (a.id || '');
-  }).join(',');
+function editorLabel_(user) {
+  if (!user || !user.id) return '';
+  return (user.object || user.type || 'user') + ':' + user.id;
 }
 
-function verifyNotionSignature_(rawBody, signature, verificationToken) {
-  const bytes = Utilities.computeHmacSha256Signature(
-    rawBody,
-    verificationToken,
-    Utilities.Charset.UTF_8
-  );
-  const hex = bytes.map(function (b) {
-    const n = b < 0 ? b + 256 : b;
-    return ('0' + n.toString(16)).slice(-2);
-  }).join('');
-  return constantTimeEqual_('sha256=' + hex, signature);
-}
-
-function constantTimeEqual_(a, b) {
-  a = String(a || '');
-  b = String(b || '');
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-function hasProcessedWebhook_(webhookId) {
-  if (!webhookId) return false;
+function hasProcessedSnapshot_(snapshotId) {
+  if (!snapshotId) return false;
   const sheet = ensureWebhookLogSheet_();
   if (sheet.getLastRow() < 2) return false;
   return Boolean(sheet.getRange(2, 1, sheet.getLastRow() - 1, 1)
-    .createTextFinder(webhookId).matchEntireCell(true).findNext());
+    .createTextFinder(snapshotId).matchEntireCell(true).findNext());
 }
 
-function logWebhook_(id, type, taskId, status, receivedAt, outcome) {
+function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
   const sheet = ensureWebhookLogSheet_();
   sheet.appendRow([id || '', type || '', taskId || '', status || '', receivedAt || new Date(), outcome || '']);
+}
+
+function ensureProjectionHeaders_() {
+  const sheet = sheet_(DEFAULTS.TIME_EVENTS_SHEET);
+  const headers = [
+    'Event ID', 'Task ID', 'Task Title', 'Actor', 'Started At', 'Ended At',
+    'Duration (h)', 'Start Status', 'End Status', 'Changed By', 'Notion URL',
+    'Source Snapshot ID', 'Recorded At'
+  ];
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
 }
 
 function ensureWebhookLogSheet_() {
@@ -470,9 +458,11 @@ function ensureWebhookLogSheet_() {
   let sheet = ss.getSheetByName(DEFAULTS.WEBHOOK_LOG_SHEET);
   if (!sheet) {
     sheet = ss.insertSheet(DEFAULTS.WEBHOOK_LOG_SHEET);
-    sheet.getRange(1, 1, 1, 6).setValues([['Webhook ID', 'Type', 'Task ID', 'Status', 'Received At', 'Outcome']]);
     sheet.hideSheet();
   }
+  sheet.getRange(1, 1, 1, 6).setValues([[
+    'Snapshot ID', 'Type', 'Task ID', 'Status', 'Received At', 'Outcome'
+  ]]);
   return sheet;
 }
 
@@ -486,6 +476,16 @@ function sheet_(name) {
   const sheet = spreadsheet_().getSheetByName(name);
   if (!sheet) throw new Error('Missing sheet: ' + name);
   return sheet;
+}
+
+function normalizeUuid_(value) {
+  const raw = String(value || '').trim();
+  if (!/^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(raw)) return '';
+  const hex = raw.replace(/-/g, '').toLowerCase();
+  return [
+    hex.substring(0, 8), hex.substring(8, 12), hex.substring(12, 16),
+    hex.substring(16, 20), hex.substring(20, 32)
+  ].join('-');
 }
 
 function parseTimestamp_(value) {
