@@ -1,4 +1,4 @@
-const TOKEN_KEY = 'notion_webhook_verification_token';
+const PENDING_TOKEN_KEY = 'notion_webhook_pending_token';
 const encoder = new TextEncoder();
 
 export default {
@@ -23,25 +23,28 @@ export default {
       return response(400, { ok: false, error: 'invalid_json' });
     }
 
-    const signature = request.headers.get('X-Notion-Signature') || '';
-    const storedToken = (await env.WEBHOOK_STATE.get(TOKEN_KEY)) || '';
     const payloadToken = typeof payload.verification_token === 'string' ? payload.verification_token : '';
-    const verificationToken = storedToken || payloadToken;
 
-    if (!verificationToken) {
-      return response(503, { ok: false, error: 'verification_token_missing' });
+    // Enrollment is intentionally NOT trusted automatically. The verification
+    // request proves reachability, not Notion identity, because the request body
+    // itself contains the future HMAC secret. Store it only as a pending
+    // candidate. An authenticated operator must paste it into Notion, observe
+    // Notion accepting it, and then promote the same value into the Worker
+    // secret NOTION_WEBHOOK_VERIFICATION_TOKEN and Apps Script Script Properties.
+    if (payloadToken) {
+      await env.WEBHOOK_STATE.put(PENDING_TOKEN_KEY, payloadToken);
+      return response(200, { ok: true, verificationPending: true });
     }
 
-    const expected = await notionSignature(rawBody, verificationToken);
+    const activeToken = env.NOTION_WEBHOOK_VERIFICATION_TOKEN || '';
+    if (!activeToken) {
+      return response(503, { ok: false, error: 'active_verification_token_not_configured' });
+    }
+
+    const signature = request.headers.get('X-Notion-Signature') || '';
+    const expected = await notionSignature(rawBody, activeToken);
     if (!signature || !constantTimeEqual(expected, signature)) {
       return response(401, { ok: false, error: 'invalid_notion_signature' });
-    }
-
-    if (payloadToken) {
-      if (storedToken && storedToken !== payloadToken) {
-        return response(409, { ok: false, error: 'verification_token_rotation_requires_reset' });
-      }
-      if (!storedToken) await env.WEBHOOK_STATE.put(TOKEN_KEY, payloadToken);
     }
 
     const upstream = await fetch(env.APPS_SCRIPT_URL, {
