@@ -27,7 +27,7 @@ A Postmortem's first analysis is written by the AI closest to the incident, whic
   3. **Root Cause classification** — is the Root Cause Category correct, or does the author's framing (e.g. blaming an actor instead of a missing gate) misclassify it?
   4. **Preventive Action fit** — does the Preventive Action actually address the recorded root cause, or does it treat a symptom / a different cause?
   5. **No new false gate** — does the Preventive Action introduce a new Human/Stop Gate that isn't actually required, echoing the false-gate failure mode this loop exists to reduce?
-- **Record the review**, not just its outcome: which criteria were checked, what (if anything) the reviewer changed, and the reviewer's identity. This is tracked on the Postmortem record (`Reviewer`, `Review Status`, `Review Notes`) alongside the existing fields.
+- **Record the review**, not just its outcome: which criteria were checked, what (if anything) the reviewer changed, and the reviewer's identity. This is tracked on the Postmortem record (`Author`, `Reviewer`, `Review Status`, `Review Notes`) alongside the existing fields. `Author` is who wrote the first analysis — set it explicitly rather than assuming it equals `Owner` (`Owner` is who is accountable for the incident/Postmortem, which is not always the same actor who drafted the analysis; comparing `Reviewer` against `Owner` instead of `Author` would let the actual drafter review their own text merely because someone else was recorded as `Owner`).
 
 ## Required loop
 
@@ -67,7 +67,7 @@ A Postmortem can be closed only when all are true:
 - evidence of the retest is recorded;
 - recurrence status is correct;
 - no unresolved corrective action remains;
-- **an AI-caused Postmortem has completed independent review by a different AI** (see "Independent review" above), with `Reviewer` ≠ `Owner` and `Review Status = Approved`.
+- **an AI-caused Postmortem has completed independent review by a different AI** (see "Independent review" above), with `Reviewer` ≠ `Author` (the actor who wrote the first analysis — not necessarily `Owner`) and `Review Status = Approved`.
 
 A `Review Status` of `Revise Requested` blocks `Closed` until the author addresses the reviewer's findings and the reviewer re-approves. The reviewer re-approving is not optional busywork: if the reviewer finds the causal chain, Root Cause classification, or Preventive Action fit does not hold up, that finding overrides the author's own closure request.
 
