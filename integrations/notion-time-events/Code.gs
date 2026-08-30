@@ -617,11 +617,24 @@ function enforceDoneGate_(task, allEvents, openEvents) {
       closedEvents.forEach(function (eventPage) {
         if (currentExecutionEventIds[eventPage.id]) return;
         const endedAt = propertyDate_(eventPage.properties['Ended At']);
-        if (endedAt && endedAt.getTime() === frontierStartedAt.getTime()) {
-          currentExecutionEventIds[eventPage.id] = true;
-          frontierStartedAt = eventStartedAt_(eventPage);
-          extended = true;
-        }
+        if (!endedAt || endedAt.getTime() !== frontierStartedAt.getTime()) return;
+        // Timestamp adjacency alone is not enough: a genuinely prior,
+        // already-completed execution's own closing event ('left_in_progress'
+        // — the Task actually left In Progress there) can coincidentally
+        // touch a LATER, separate execution's opening Started At — e.g. both
+        // land in the same Notion minute, or the Task was reopened at the
+        // exact observed edit time. Only extend the chain through a
+        // candidate whose OWN close reason marks it as still part of an
+        // unbroken execution (an in-progress reassignment or duplicate-open
+        // cleanup); 'left_in_progress' — or no reason at all, e.g. legacy
+        // data — is exactly the boundary a genuinely separate execution
+        // looks like, and must never be absorbed just because it happens to
+        // touch.
+        const candidateReason = parseNoteMeta_(propertyText_(eventPage.properties.Note)).reason;
+        if (candidateReason !== 'reassignment' && candidateReason !== 'duplicate_reconciliation') return;
+        currentExecutionEventIds[eventPage.id] = true;
+        frontierStartedAt = eventStartedAt_(eventPage);
+        extended = true;
       });
     }
   }
@@ -683,7 +696,11 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     const reusedFromEarlierExecution = (allEvents || []).some(function (eventPage) {
       if (eventPage.id === applicableClosedEvent.id) return false;
       const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
-      return Boolean(meta.resultFingerprint) && meta.resultFingerprint === currentFingerprint;
+      // Check every fingerprint that event ever validated, not just the
+      // most recent — Result can be edited more than once while a Task
+      // stays Done on the same applicable event, each edit adding its own
+      // stamp rather than replacing the last.
+      return meta.resultFingerprints.indexOf(currentFingerprint) >= 0;
     });
     if (reusedFromEarlierExecution) failures.push('stale_result');
   }
@@ -744,7 +761,10 @@ function resultFingerprint_(resultText) {
 function markResultValidated_(eventPage, result) {
   const fingerprint = resultFingerprint_(result);
   const existingNote = propertyText_(eventPage.properties.Note);
-  if (parseNoteMeta_(existingNote).resultFingerprint === fingerprint) return false;
+  // Already stamped with this exact fingerprint at some point in this
+  // event's history (not just as the most recent stamp) — e.g. Result was
+  // edited away and back while the Task stayed Done. No new write needed.
+  if (parseNoteMeta_(existingNote).resultFingerprints.indexOf(fingerprint) >= 0) return false;
   const marker = buildNote_({ resultFingerprint: fingerprint });
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
     properties: {
@@ -1036,7 +1056,21 @@ function parseNoteMeta_(note) {
     reason: noteField_(note, 'Reason'),
     snapshotId: noteField_(note, 'Snapshot'),
     changedBy: noteField_(note, 'Changed By'),
+    // The *last* recorded value only — fine for every other field (only the
+    // newest close/reassignment metadata ever matters), but NOT enough on
+    // its own for Result Fingerprint: see resultFingerprints below.
     resultFingerprint: noteField_(note, 'Result Fingerprint'),
+    // Every fingerprint ever stamped onto this event, oldest first. A single
+    // event can validate more than one distinct Result value over its
+    // lifetime — Done is always re-verified, and Result can be edited more
+    // than once while the Task remains Done, each edit adding its own
+    // 'Result Fingerprint=' segment rather than replacing the last. A later
+    // reopen's stale-Result check must catch reuse against ANY value this
+    // event once validated, not just the most recent — otherwise editing
+    // Result back to an earlier, already-validated value would leave a
+    // fingerprint match that noteField_'s last-occurrence-only view can't
+    // see, since it's no longer the last "Result Fingerprint=" segment.
+    resultFingerprints: noteFieldAll_(note, 'Result Fingerprint'),
   };
 }
 
@@ -1047,6 +1081,17 @@ function noteField_(note, key) {
     if (part.indexOf(key + '=') === 0) return part.substring(key.length + 1).trim();
   }
   return '';
+}
+
+// Like noteField_, but returns every occurrence of `key=`, oldest first,
+// instead of only the last — see resultFingerprints above.
+function noteFieldAll_(note, key) {
+  const values = [];
+  String(note || '').split('|').forEach(function (part) {
+    const trimmed = part.trim();
+    if (trimmed.indexOf(key + '=') === 0) values.push(trimmed.substring(key.length + 1).trim());
+  });
+  return values;
 }
 
 function editorLabel_(user) {

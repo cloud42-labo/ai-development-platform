@@ -116,6 +116,36 @@ test('Done is rejected when Result was never refreshed after a reopen (reused fr
   assert.match(outcome, /stale_result/);
 });
 
+test('Done is rejected on reopen even when the reused Result is not the LAST fingerprint the prior event recorded', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // The prior execution's Result was edited more than once while the Task
+  // stayed Done on that one event (each edit adds its own stamp rather than
+  // replacing the last) — 'shipped v1' first, then 'shipped v1.1'. A reopen
+  // that reuses the EARLIER of the two must still be caught, even though it
+  // is not the most recent stamp on that event's Note.
+  const v1Fingerprint = sandbox.resultFingerprint_('shipped v1');
+  const v1_1Fingerprint = sandbox.resultFingerprint_('shipped v1.1');
+  const task = taskPage({
+    startedAt: '2026-08-30T03:00:00.000Z',
+    result: 'shipped v1', // reused: identical to the prior execution's FIRST validated value, not its last
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const priorEvent = eventPage('evt-prior-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-28T11:00:00.000Z',
+    note: 'Result Fingerprint=' + v1Fingerprint + ' | Result Fingerprint=' + v1_1Fingerprint,
+  });
+  const currentEvent = eventPage('evt-current-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorEvent, currentEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_result/);
+});
+
 test('Done passes when Result was refreshed for the new execution', () => {
   const { sandbox } = harnessWithNotionStub();
   const priorFingerprint = sandbox.resultFingerprint_('shipped v1');
@@ -262,6 +292,7 @@ test('Done passes when the current execution produced two closed events via an i
   const actorAEvent = eventPage('evt-actor-a', {
     startedAt: '2026-08-29T03:00:00.000Z',
     endedAt: '2026-08-29T03:20:00.000Z', // closed by the reassignment
+    note: 'Reason=reassignment', // exactly what closeNotionTimeEvent_ stamps for this cleanup
   });
   const actorBEvent = eventPage('evt-actor-b', {
     startedAt: '2026-08-29T03:20:00.000Z', // opened at the exact moment A's closed
@@ -271,6 +302,38 @@ test('Done passes when the current execution produced two closed events via an i
   const outcome = sandbox.enforceDoneGate_(task, [actorAEvent, actorBEvent], []);
 
   assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
+test('Done is rejected when a genuinely prior execution\'s closing event coincidentally touches the new one\'s Started At', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // A real prior, separate execution closed via 'left_in_progress' (the
+  // Task actually left In Progress there) whose Ended At happens to
+  // coincide exactly with the new execution's Started At — e.g. both land
+  // in the same Notion minute. Timestamp adjacency alone must not treat
+  // this as a same-execution reassignment: 'left_in_progress' is exactly
+  // the boundary a genuinely separate execution looks like. The Task's own
+  // Started At was never actually refreshed for this "new" execution here
+  // (it's identical to the prior one's own start), so it must still be
+  // caught as stale.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: unchanged since the OLD execution
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const priorEvent = eventPage('evt-prior-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-30T03:00:00.000Z', // coincidentally touches newEvent's Started At below
+    note: 'Reason=left_in_progress',
+  });
+  const newEvent = eventPage('evt-new-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorEvent, newEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
 });
 
 test('Done is still rejected for a genuinely prior execution even when the current one has two chained events', () => {
@@ -291,6 +354,7 @@ test('Done is still rejected for a genuinely prior execution even when the curre
   const actorAEvent = eventPage('evt-actor-a', {
     startedAt: '2026-08-30T03:00:00.000Z',
     endedAt: '2026-08-30T03:20:00.000Z',
+    note: 'Reason=reassignment',
   });
   const actorBEvent = eventPage('evt-actor-b', {
     startedAt: '2026-08-30T03:20:00.000Z',
