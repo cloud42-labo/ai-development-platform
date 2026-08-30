@@ -25,6 +25,7 @@ In short: **State = Notion / Artifact = GitHub / Memory = brain**.
 - [Package manifest](adp-package.yaml) and [Versioning Policy](docs/versioning-policy.md)
 - [Distribution package index](package/README.md) — Rules/Schemas/Workflows/Templates by class
 - [Software Product design-document standard](docs/product-design-doc-standard.md)
+- [ADP's own Inception Deck](docs/inception-deck.md) and [PRD](docs/PRD.md)
 - [v1.0.0 Asset Inventory & Freeze Scope](docs/v1-asset-inventory.md)
 - [Notion Operating Guide](https://app.notion.com/p/3bdfbd826f3b8119b7b4e623c9cdc94e)
 
