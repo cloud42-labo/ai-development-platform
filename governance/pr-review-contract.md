@@ -65,11 +65,23 @@ The first three steps are model review. They happen for every PR; only the depth
 
 The PR body is machine-checked by the `Review Contract` GitHub Actions workflow. All required sections must contain substantive content.
 
-Immediately before merge, the merge actor must verify the exact latest head SHA:
+Immediately before merge, the merge actor must verify the exact latest head SHA **and** the exact latest PR body:
 
 - required CI for that SHA is green;
 - the latest Codex review for that exact SHA has completed;
+- **the latest Codex review's `submitted_at` is at or after the PR's own `updated_at`** — see "Binding review freshness to the contract revision" below;
 - there are no unresolved P0/P1 findings;
 - any required device/permission/security acceptance is complete.
 
-A pending latest-head review is not equivalent to a clean review.
+A pending latest-head review is not equivalent to a clean review. Neither is a review whose `submitted_at` predates the PR's `updated_at`: the head SHA alone does not identify what was reviewed, because the Review Contract itself lives in the PR body, not in a commit.
+
+### Binding review freshness to the contract revision
+
+The head SHA identifies which *code* was reviewed. It does not identify which *Review Contract* was reviewed, because editing the PR body — the Review Contract's only home — does not create a new commit and does not change the head SHA. A reviewer (Codex or a human) can review head `H` against contract revision `B1`; the author can then materially edit the body to `B2` without pushing anything; the existing review remains "the latest completed review for head `H`" under a SHA-only freshness check, even though it never saw `B2`.
+
+GitHub's PR `updated_at` timestamp already answers "when did this PR (including its body) last change?", natively and with no new service, secret, or stored digest: any edit to the PR — a body edit included — advances it. So the merge gate binds freshness to the *contract revision*, not just the code revision, using a comparison that is already free to make from data every review already has:
+
+- **A completed Codex (or human) review is fresh for the current contract only if `review.submitted_at >= pr.updated_at`.**
+- If the PR body was edited after the latest review (`pr.updated_at > review.submitted_at`), that review is stale for the contract even though it may still be current for the code (same head SHA) — request a fresh review before merge.
+- A body edit that only touches `## Summary`/`## References` prose still advances `updated_at` and is treated the same as a Review Contract edit by this check; a false negative here (an unnecessary re-review request) is preferred over a false positive (merging on a review that never saw a material contract edit) — this repository's connector does not expose a way to distinguish material from cosmetic body edits without adding an external service, which is out of scope (see Known Limitations in PR #11's Review Contract).
+- This rule requires no new external service, secret, or stored digest — `pr.updated_at` and `review.submitted_at` are both already read from the same GitHub API surface the "exact latest head SHA" check already uses.

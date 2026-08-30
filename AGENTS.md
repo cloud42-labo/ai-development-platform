@@ -52,7 +52,7 @@ The depth scales with the change, but the sections do not disappear. A trivial P
 
 The reviewer evaluates in this order: **contract/model → invariants → adversarial counterexamples → implementation details**. Do not begin with line-by-line bug finding when the model itself is unclear. If implementation changes the model, update the PR Review Contract before asking for another review.
 
-The `Review Contract` CI check must pass before merge. Immediately before merge, verify the **exact latest head SHA**: required CI is green and the latest Codex review for that exact SHA has completed with no unresolved P0/P1. A review still pending is not a clean review; do not merge while it is pending.
+The `Review Contract` CI check must pass before merge. Immediately before merge, verify the **exact latest head SHA and the exact latest PR body**: required CI is green, the latest Codex review for that exact SHA has completed with no unresolved P0/P1, and that review's `submitted_at` is at or after the PR's `updated_at` (the PR body — where the Review Contract lives — was not edited after the review that is being relied on). A review still pending, or one that predates the current PR body, is not a clean review; do not merge on either. See `governance/pr-review-contract.md` for the full freshness rule.
 
 ## Completion
 

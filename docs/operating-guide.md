@@ -122,6 +122,7 @@ Approach Review is a Definition of Ready gate for executable work:
 - `Approved` or `N/A` may proceed to `Ready`.
 - `Pending`, `Revise` or unset must not start substantive execution.
 - `Revise` means the selected **how** is not acceptable. If only the method changes, update `Approach Decision` and the implementation plan, then review again. If the correction would change Acceptance Criteria, scope, placement, priority or dependencies, route that change through Backlog Refinement first, then re-run Approach Review against the refined Task.
+- `N/A` is narrow: it is only for a Task with no `how` to review in the first place — a pure Human-only action with no implementation choice, a straightforward content/copy edit, or a Task that itself only records a decision rather than performing execution. It is not a shortcut past the review for a Task that has a genuine implementation approach; if there is a `how` to assess, use `Approved` or `Revise`, never `N/A`. `N/A` requires the same recorded rationale `Approved` does: `Approach Decision` must state why no approach exists to review. A Task moving to `Ready` on `N/A` with no such rationale has not actually satisfied this gate.
 
 ### Review and Refinement control map
 
