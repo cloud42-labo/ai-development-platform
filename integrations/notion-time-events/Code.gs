@@ -680,7 +680,30 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         ? taskStartedAt
         : null;
       const startAt = trustedTaskStart || when;
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt);
+      // The execution identifier must stay identical across every event
+      // belonging to one continuous execution — the first-ever event AND
+      // any reassignment replacement within it — so enforceDoneGate_ can
+      // recognize them as the same execution without inferring it from
+      // timestamp ties. The Task's raw Started At is NOT safe to use
+      // directly for this: if governance was violated and Started At was
+      // never actually refreshed at a genuine reopen, the newly (re)opened
+      // event would inherit the *stale* old value indistinguishably from
+      // the prior execution's own events, defeating the whole point. A
+      // reassignment replacement instead inherits the outgoing event's own
+      // Execution= marker directly (whatever it already was, correct or
+      // not) — reassigning never changes which execution is running. The
+      // first-ever event of a genuinely new execution gets `startAt` itself:
+      // exactly the value already computed above to correctly fall back to
+      // `when` instead of a stale Started At, so a governance violation
+      // still gets a fresh, distinguishing identity rather than reusing the
+      // old one.
+      const outgoingExecutionId = otherActor.length
+        ? (otherActor.map(function (eventPage) {
+            return parseNoteMeta_(propertyText_(eventPage.properties.Note)).execution;
+          }).find(Boolean) || '')
+        : '';
+      const executionId = outgoingExecutionId || startAt.toISOString();
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId);
       actions.push('opened:' + created.id);
     }
   } else if (openEvents.length) {
@@ -750,6 +773,7 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   // begins. A closed event only counts if it started at or after that
   // marker.
   const taskStartedAt = propertyDate_(task.properties['Started At']);
+  const taskStartedAtIso = taskStartedAt ? taskStartedAt.toISOString() : null;
 
   // Started At itself must look fresh before it can be trusted to identify
   // "the current execution" at all — otherwise the applicability check below
@@ -829,6 +853,32 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     const isExecutionBoundary = meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
     if (!isExecutionBoundary && (meta.reason === 'reassignment' || meta.reason === 'duplicate_reconciliation')) {
       currentExecutionEventIds[eventPage.id] = true;
+    }
+  });
+  // Everything above is a heuristic inferring membership from timestamp ties
+  // and Reason/Boundary markers — necessarily so for data that predates the
+  // Execution= field, but vulnerable to exactly the class of coincidental-tie
+  // ambiguity Codex kept finding new cases of: last_edited_time's minute
+  // granularity means two genuinely DIFFERENT executions' closes can land on
+  // the identical Ended At, and no combination of Reason/Boundary/tie rules
+  // can fully tell them apart without literally identifying which execution
+  // each one belongs to. An event stamped with an explicit Execution= marker
+  // (see createNotionTimeEvent_) doesn't need inference at all: it is
+  // current if and only if that marker exactly equals the Task's own
+  // current Started At (Started At does not change across a mid-execution
+  // reassignment, so every event opened during one continuous execution —
+  // the original open and any reassignment replacement within it — carries
+  // the identical value). This authoritatively overrides whatever the
+  // heuristic above concluded for such an event; only an event with no
+  // Execution= marker at all (created before this field existed) is left to
+  // that heuristic.
+  closedEvents.forEach(function (eventPage) {
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    if (!meta.execution) return;
+    if (taskStartedAtIso && meta.execution === taskStartedAtIso) {
+      currentExecutionEventIds[eventPage.id] = true;
+    } else {
+      delete currentExecutionEventIds[eventPage.id];
     }
   });
   const priorTimestamp = latestEventTimestamp_((allEvents || []).filter(function (eventPage) {
@@ -978,9 +1028,10 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId) {
   const note = buildNote_({
     source: 'notion_reconcile',
+    execution: executionId,
     snapshotId: snapshotId,
     changedBy: changedBy,
   });
@@ -1253,6 +1304,7 @@ function buildNote_(fields) {
   if (fields.endStatus) parts.push('End Status=' + fields.endStatus);
   if (fields.reason) parts.push('Reason=' + fields.reason);
   if (fields.boundary) parts.push('Boundary=' + fields.boundary);
+  if (fields.execution) parts.push('Execution=' + fields.execution);
   if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
   if (fields.changedBy) parts.push('Changed By=' + fields.changedBy);
   if (fields.resultFingerprint) parts.push('Result Fingerprint=' + fields.resultFingerprint);
@@ -1269,6 +1321,21 @@ function parseNoteMeta_(note) {
     // ended there even though the event's own Reason (e.g. 'reassignment')
     // never does. See enforceDoneGate_'s execution-membership check.
     boundary: noteField_(note, 'Boundary'),
+    // Stamped once, at creation — the execution this event belongs to,
+    // identified directly rather than inferred from timestamp ties or
+    // Reason markers. A reassignment replacement inherits the OUTGOING
+    // event's own Execution= marker unchanged (reassigning never starts a
+    // new execution); the first-ever event of a genuinely new execution
+    // gets the interval's own computed start (see reconcileAuthoritative
+    // TimeEvents_'s opening logic) rather than the Task's raw Started At
+    // directly — that already correctly falls back to the observed edit
+    // time instead of a stale, never-refreshed Started At, so a governance
+    // violation still gets a fresh, distinguishing identity instead of
+    // silently reusing the old one. See enforceDoneGate_'s execution-
+    // membership check, which prefers this direct equality test over the
+    // legacy Reason/Boundary/tie heuristic whenever it's present (absent
+    // only on data from before this field existed).
+    execution: noteField_(note, 'Execution'),
     snapshotId: noteField_(note, 'Snapshot'),
     changedBy: noteField_(note, 'Changed By'),
     // The *last* recorded value only — fine for every other field (only the

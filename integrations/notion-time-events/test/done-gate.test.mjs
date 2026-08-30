@@ -652,3 +652,77 @@ test('Done is rejected when a prior execution boundary event ties the current cl
   assert.match(outcome, /^done_gate_rejected:/);
   assert.match(outcome, /stale_task_started_at/);
 });
+
+test('Done is rejected when an ordinary prior close (no Reason/Boundary signal at all) ties the current close on Ended At', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Codex-reported gap in the boundary-scoping fix above: restricting the
+  // Boundary= stamp to reassignment/duplicate_reconciliation closes (so a
+  // plain left_in_progress close is never wrongly marked) reopened the
+  // ORIGINAL ambiguity for the plain-close case itself — a genuinely PRIOR
+  // execution's ordinary left_in_progress close and the CURRENT execution's
+  // own close can still coincidentally tie on Ended At (last_edited_time is
+  // minute-granular), and neither carries any Reason/Boundary signal to
+  // exclude the prior one. The legacy tie-seed heuristic sweeps BOTH into
+  // "current" in that case — leaving NO prior evidence at all once they're
+  // the only two closed events on the Task, so a genuinely stale, never-
+  // refreshed Task Started At is trusted vacuously and Done wrongly passes.
+  // The Execution= identifier (see createNotionTimeEvent_) sidesteps the
+  // whole tie/Reason inference: the prior event's Execution= (stamped for
+  // its OWN, older execution) does not match the Task's current Started At,
+  // so it correctly stays prior evidence regardless of the coincidental
+  // Ended At tie or its ordinary, unmarked Reason.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: unchanged since the OLD execution
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:05:00.000Z',
+  });
+  const tiedEndedAt = '2026-08-30T04:00:00.000Z';
+  const priorOrdinaryClose = eventPage('evt-prior-ordinary', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: tiedEndedAt, // coincidentally identical to the new event's own close
+    note: 'Reason=left_in_progress | Execution=2026-08-28T10:00:00.000Z',
+  });
+  const newOrdinaryClose = eventPage('evt-new-ordinary', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: tiedEndedAt,
+    note: 'Reason=left_in_progress | Execution=2026-08-30T03:00:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorOrdinaryClose, newOrdinaryClose], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
+
+test('Done is rejected when Execution= identifies a tied close as belonging to a stale prior execution', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Companion/sanity check for the previous test, from the opposite
+  // direction: when the Task's OWN Started At was never actually refreshed
+  // after a reopen (still pointing at the OLD execution), a tied close
+  // whose Execution= matches the (stale) current Started At is correctly
+  // still treated as applicable evidence, but that Started At itself must
+  // still fail the freshness check against the genuinely later prior close
+  // — Execution= replaces the ambiguous inference, not the freshness
+  // requirement itself.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: never refreshed for the reopen
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:05:00.000Z',
+  });
+  const tiedEndedAt = '2026-08-30T04:00:00.000Z';
+  const staleExecutionClose = eventPage('evt-stale-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: tiedEndedAt,
+    note: 'Reason=left_in_progress | Execution=2026-08-28T10:00:00.000Z',
+  });
+  const laterUnrelatedClose = eventPage('evt-later-unrelated', {
+    startedAt: '2026-08-29T09:00:00.000Z',
+    endedAt: tiedEndedAt, // ties with the stale execution's own close
+    note: 'Reason=left_in_progress | Execution=2026-08-29T09:00:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [staleExecutionClose, laterUnrelatedClose], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});

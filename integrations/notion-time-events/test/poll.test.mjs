@@ -961,6 +961,66 @@ test('a mid-execution reassignment opens the replacement actor at the reassignme
   assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:20:00.000Z');
 });
 
+test('a first-ever open event stamps Execution= with the interval\'s own computed start', () => {
+  // Codex-reported gap: enforceDoneGate_'s execution-membership check needs
+  // an explicit Execution= identifier (not inferred from timestamp ties or
+  // Reason markers) to correctly disambiguate a coincidental Ended At tie
+  // between two different executions' closes. reconcileAuthoritativeTime
+  // Events_ must actually stamp it on every newly opened event for that to
+  // work at all.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa02';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T05:10:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+    })],
+  });
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  const note = creates[0].properties.Note.rich_text[0].text.content;
+  assert.match(note, /Execution=2026-08-30T05:10:00\.000Z/);
+});
+
+test('a reassignment replacement inherits the outgoing event\'s own Execution= marker, not a fresh one', () => {
+  // The execution identifier must stay identical across every event
+  // belonging to one continuous execution: a reassignment never starts a
+  // new execution, only leaving In Progress does. If the replacement event
+  // got its OWN fresh Execution= (e.g. from the reassignment boundary
+  // instead of the outgoing event's original value), a later Done check
+  // would see two DIFFERENT Execution= values for what is actually one
+  // execution's two closed events, wrongly treating one of them as prior
+  // evidence against itself.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa03';
+  const outgoingOpenEvent = eventPage('evt-outgoing', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: null,
+    note: 'Execution=2026-08-30T05:00:00.000Z', // this execution's original identity
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Human', // reassigned away from Claude
+    lastEdited: '2026-08-30T05:20:00.000Z', // the reassignment moment
+    startedAt: '2026-08-30T05:00:00.000Z',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [outgoingOpenEvent] });
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  const note = creates[0].properties.Note.rich_text[0].text.content;
+  // Inherited from the outgoing event — NOT the reassignment boundary
+  // (05:20) that this same replacement event's own Started At correctly is.
+  assert.match(note, /Execution=2026-08-30T05:00:00\.000Z/);
+  assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:20:00.000Z');
+});
+
 test('a query that hits the pagination safety limit does not let the cursor advance past unretrieved data', () => {
   const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d1f01', {
     status: 'Ready',
