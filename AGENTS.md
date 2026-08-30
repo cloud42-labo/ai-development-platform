@@ -36,6 +36,24 @@ A managed Task may not be considered complete merely because an artifact is prod
 - If a change alters an operating policy, governance rule, control, or architecture, update the related Notion Decision or task result as well.
 - If the repository artifact is the authoritative original, Notion should link to it instead of duplicating the full text unless an operational view is intentionally maintained there.
 
+## PR Review Contract
+
+Every PR author must publish a **Review Contract in the PR body before requesting review**. This is the reviewer's model-level contract, not optional prose. Follow `governance/pr-review-contract.md` and the repository PR template.
+
+Required sections:
+
+1. **Purpose / Contract** — what must become true because of this PR.
+2. **Invariants** — conditions that must remain true across all relevant inputs and state transitions.
+3. **Adversarial Scenarios** — boundary cases, failure sequences, retries, concurrency, legacy state, or other counterexamples that could violate the invariants.
+4. **Validation** — tests or evidence mapped to the invariants/scenarios.
+5. **Known Limitations / Non-goals** — intentionally deferred behavior or scope boundaries.
+
+The depth scales with the change, but the sections do not disappear. A trivial PR may use one concise invariant and one adversarial scenario; a stateful or safety-sensitive PR should make the state model and execution boundaries explicit.
+
+The reviewer evaluates in this order: **contract/model → invariants → adversarial counterexamples → implementation details**. Do not begin with line-by-line bug finding when the model itself is unclear. If implementation changes the model, update the PR Review Contract before asking for another review.
+
+The `Review Contract` CI check must pass before merge. Immediately before merge, verify the **exact latest head SHA**: required CI is green and the latest Codex review for that exact SHA has completed with no unresolved P0/P1. A review still pending is not a clean review; do not merge while it is pending.
+
 ## Completion
 
 Immediately before marking a Notion task Done, **re-read** and execute the completion post-flight in `governance/ai-execution-constraints.md`:
