@@ -500,9 +500,13 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     // Stamp the applicable event with the Result fingerprint that just
     // validated it, so a *future* reopen can tell whether Result was ever
     // actually refreshed. Idempotent: a matching stamp already present (a
-    // routine Done re-verification) costs no extra write.
-    markResultValidated_(applicableClosedEvent, result);
-    return 'done_gate_passed';
+    // routine Done re-verification) costs no extra write. When this DOES
+    // perform a write (first-ever validation of this event, or a legacy
+    // event with no prior stamp), report a distinct outcome so the caller
+    // charges it against the reconciliation write budget like any other
+    // write — see isFreeOutcome_.
+    const stamped = markResultValidated_(applicableClosedEvent, result);
+    return stamped ? 'done_gate_passed:stamped' : 'done_gate_passed';
   }
 
   // If work is still timed, restore In Progress and deliberately leave the
@@ -524,10 +528,15 @@ function resultFingerprint_(resultText) {
   return Utilities.base64EncodeWebSafe(digest).replace(/=+$/g, '');
 }
 
+// Returns true if it made a Notion write (a new stamp), false if the event
+// was already correctly stamped (no write needed). The caller uses this to
+// report a distinct outcome for the write-producing case, so it is charged
+// against the reconciliation budget like any other write — see
+// enforceDoneGate_.
 function markResultValidated_(eventPage, result) {
   const fingerprint = resultFingerprint_(result);
   const existingNote = propertyText_(eventPage.properties.Note);
-  if (parseNoteMeta_(existingNote).resultFingerprint === fingerprint) return; // already stamped; no write needed
+  if (parseNoteMeta_(existingNote).resultFingerprint === fingerprint) return false;
   const marker = buildNote_({ resultFingerprint: fingerprint });
   const note = existingNote ? existingNote + ' | ' + marker : marker;
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
@@ -535,6 +544,7 @@ function markResultValidated_(eventPage, result) {
       Note: { rich_text: [{ type: 'text', text: { content: clip_(note, 1800) } }] },
     },
   });
+  return true;
 }
 
 function updateTaskStatus_(taskId, statusName) {

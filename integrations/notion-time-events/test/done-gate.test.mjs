@@ -83,7 +83,7 @@ test('Done passes with a closed Time Event that belongs to the current execution
 
   const outcome = sandbox.enforceDoneGate_(task, [currentEvent], []);
 
-  assert.equal(outcome, 'done_gate_passed');
+  assert.equal(outcome, 'done_gate_passed:stamped');
   // The only mutation on the passing path is stamping the applicable event
   // with a fingerprint of the validated Result, for future reopen detection.
   assert.equal(fetchLog.length, 1);
@@ -136,7 +136,7 @@ test('Done passes when Result was refreshed for the new execution', () => {
 
   const outcome = sandbox.enforceDoneGate_(task, [priorEvent, currentEvent], []);
 
-  assert.equal(outcome, 'done_gate_passed');
+  assert.equal(outcome, 'done_gate_passed:stamped');
 });
 
 test('re-verifying an already-validated, unchanged Done Task does not falsely flag stale Result or write again', () => {
@@ -152,7 +152,7 @@ test('re-verifying an already-validated, unchanged Done Task does not falsely fl
   });
 
   const first = sandbox.enforceDoneGate_(task, [currentEvent], []);
-  assert.equal(first, 'done_gate_passed');
+  assert.equal(first, 'done_gate_passed:stamped');
   assert.equal(fetchLog.length, 1); // the stamp write
 
   // Simulate the stamp having landed on the event (as the real PATCH would),
@@ -244,7 +244,7 @@ test('Done passes when Started At was properly refreshed for the new execution',
 
   const outcome = sandbox.enforceDoneGate_(task, [oldEvent, newEvent], []);
 
-  assert.equal(outcome, 'done_gate_passed');
+  assert.equal(outcome, 'done_gate_passed:stamped');
 });
 
 test('Done is rejected when Completed At predates the current execution entirely (stale from a prior completion)', () => {
@@ -301,5 +301,5 @@ test('Done passes when Completed At follows both Started At and the applicable e
 
   const outcome = sandbox.enforceDoneGate_(task, [currentEvent], []);
 
-  assert.equal(outcome, 'done_gate_passed');
+  assert.equal(outcome, 'done_gate_passed:stamped');
 });

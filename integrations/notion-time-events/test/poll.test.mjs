@@ -347,6 +347,16 @@ test('25+ already-valid Done Tasks inside the overlap do not exhaust the batch a
     events: [sharedEvent],
   });
 
+  // Pre-stamp the shared event as already validated for this exact Result, so
+  // every Done re-verification below is the free, no-write steady-state path
+  // (`done_gate_passed`) rather than a first-time stamp (`done_gate_passed:
+  // stamped`, which now correctly costs a write against the batch — that
+  // scenario is covered separately by the write-budget test below).
+  sharedEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped') }],
+  };
+
   const summary = sandbox.pollTaskChanges();
 
   const passingDoneOutcomes = summary.outcomes.filter((outcome) => outcome === 'done_gate_passed');
@@ -395,12 +405,73 @@ test('a Done cohort larger than the old scan cap does not stall reconciliation f
     scriptProperties: { LAST_SYNC_CURSOR: '2026-08-30T06:00:00.000Z' },
   });
 
+  // Pre-stamp, as above: this test is about the scan not stalling on a large
+  // steady-state Done cohort, not about first-time stamp writes.
+  sharedEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped') }],
+  };
+
   const summary = sandbox.pollTaskChanges();
 
   const passingDoneOutcomes = summary.outcomes.filter((outcome) => outcome === 'done_gate_passed');
   assert.equal(passingDoneOutcomes.length, 520); // the whole cohort was scanned, not just a fixed prefix
   assert.equal(summary.outcomes[summary.outcomes.length - 1], 'no_change:Ready');
   assert.equal(summary.capped, false);
+});
+
+test('a cohort of first-time Done stamp writes is bounded by the reconciliation write budget', () => {
+  // Regression for the Codex-reported gap: markResultValidated_ performs a
+  // real PATCH the first time an event is stamped, but until this fix
+  // enforceDoneGate_ always returned the bare `done_gate_passed` outcome, and
+  // isFreeOutcome_ treated that as free — so a cohort of MORE than
+  // MAX_TASKS_PER_RUN Tasks each passing Done for the very first time would
+  // never stop at the write budget, risking a runaway batch of real writes in
+  // a single execution. Each Done Task below shares one *unstamped* event, so
+  // every validation is a genuine first-time write (`done_gate_passed:
+  // stamped`), unlike the steady-state tests above which pre-stamp it.
+  const sharedEvent = eventPage('evt-shared-unstamped', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: '2026-08-30T05:05:00.000Z',
+  });
+
+  const doneTasks = [];
+  for (let i = 0; i < 30; i++) {
+    const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d7' + String(i).padStart(3, '0'), {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T05:20:' + String(i).padStart(2, '0') + '.000Z',
+      startedAt: '2026-08-30T05:00:00.000Z',
+    });
+    task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+    task.properties['Completed At'] = { type: 'date', date: { start: '2026-08-30T05:10:00.000Z' } };
+    doneTasks.push(task);
+  }
+
+  const laterChangedTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43d8999', {
+    status: 'Ready',
+    agent: 'Human',
+    lastEdited: '2026-08-30T06:00:00.000Z',
+  });
+
+  const { sandbox } = harness({
+    tasks: doneTasks.concat([laterChangedTask]),
+    events: [sharedEvent],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  const stampedOutcomes = summary.outcomes.filter((outcome) => outcome === 'done_gate_passed:stamped');
+  // Each first-time stamp write is charged against MAX_TASKS_PER_RUN (25), so
+  // the run stops there instead of writing all 30.
+  assert.equal(stampedOutcomes.length, 25);
+  assert.equal(summary.processed, 25);
+  assert.equal(summary.capped, true);
+  // The Task after the cohort was never reached in this run — it's left for
+  // the next poll, not silently starved forever (see the pre-stamped tests
+  // above proving the *steady-state* re-verification case does not stall).
+  assert.ok(!summary.outcomes.includes('no_change:Ready'));
 });
 
 test('a Done state is always re-verified by the gate, even if its snapshot hash collides with an already-processed one', () => {
