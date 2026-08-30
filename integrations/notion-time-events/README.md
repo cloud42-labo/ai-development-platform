@@ -25,6 +25,9 @@ There is **no webhook, no public endpoint, and no receiver credential** anywhere
 - Duplicate open events for the same Task/Actor are reconciled to one open event.
 - `Done` is a **completion gate, not a stop trigger**. Reconciling a Done Task never closes a Time Event after completion.
 - Done with an open Time Event is rejected by restoring `In Progress`; Done with closed timing but missing an applicable Time Event, `Result`, or `Completed At` is rejected by restoring `Review`. "Applicable" means a closed Time Event whose `Started At` is at or after the Task's current `Started At` — a closed event left over from a prior, already-completed execution does not, by itself, satisfy Done for a later reopen.
+- `Completed At` must not just be present: it must be at or after the Task's current `Started At` and at or after the applicable closed event's `Ended At`. A `Completed At` left over from a prior, already-finished execution (Notion does not clear it on reopen) does not satisfy Done for a later reopen either.
+- A Task observed as `Done` is **always** re-verified by the gate, even if its reconciliation snapshot happens to hash identically to one already processed (Notion reports `last_edited_time` at only minute granularity, so a same-minute rollback-and-retry can collide) — an invalid Done is never silently left in place because of a hash collision.
+- A newly opened Time Event starts from the Task's current `Started At` whenever that is at or after every timestamp already on file for the Task — covering both a first-ever event and a reopened Task — rather than from whatever moment the poll happened to observe the edit, so a later same-window edit (e.g. a reassignment moments after restart) cannot silently drop the time before it.
 - Valid completion order is: finish work → `Review` (time event closes) → record `Result` + `Completed At` → `Done`.
 - Reconciliation snapshots are derived from the authoritative Notion page (`last_edited_time`, Status, Assigned Agent). Recorded interval timestamps come from `last_edited_time` on the Task, **not** from when the poll happened, so a poll interval does not distort recorded effort.
 - Sheet rows are upserted by the authoritative Notion Task Time Event page ID.
@@ -143,6 +146,8 @@ Use non-production test Tasks. Allow up to one poll interval for each step, or c
 4. Set Done without a prior Time Event, `Result`, or `Completed At`; confirm the Task is restored to `Review`.
 5. Provide required evidence and then move to Done; confirm Done persists with an existing closed Time Event.
 6. **Reopen correlation**: complete a Task through Done once (closed Time Event, `Result`, `Completed At` all present). Reopen it (`Done → Backlog` or `Ready`), then move it back to `In Progress` and immediately to `Done` again within a single poll interval, so no new Time Event opens for this second execution. Confirm Done is rejected and the Task is restored to `Review`/`In Progress` — the old, pre-reopen closed event must not satisfy the gate for the new execution. Then run the normal start/stop flow for the new execution and confirm Done then persists.
+7. **Stale Completed At on reopen**: after step 6's reopen, leave the Task's old `Completed At` in place (do not clear it) and run the new execution's own start/stop flow so it gets its own closed, applicable Time Event and fresh `Result`. Attempt Done without updating `Completed At`. Confirm Done is rejected (the stale, pre-reopen `Completed At` does not satisfy the gate). Update `Completed At` to a time at or after the new event's `Ended At` and confirm Done then persists.
+8. **Same-minute retry**: set Done on a Task missing required evidence, confirm the rollback, then — within the same minute — set Done again, still missing evidence. Confirm the second attempt is also rejected (not silently accepted through a snapshot-hash collision).
 
 ### Reassignment
 
@@ -180,10 +185,12 @@ The Done gate is reactive: it observes a Status that has already been set. An in
 - Beyond the Notion API responses it fetches itself, the reconciler accepts no externally supplied operational claims.
 - Human / Chris / Claude / Codex Task activity uses the same state-driven mechanism.
 - In-progress reassignment/clearing cannot leave the original Actor event open indefinitely.
-- Done cannot persist without a closed Time Event **applicable to the current execution** (started at or after the Task's current `Started At`), `Result`, and `Completed At`. A closed event left over from a prior, already-completed execution does not satisfy a later reopen's Done gate.
+- Done cannot persist without a closed Time Event **applicable to the current execution** (started at or after the Task's current `Started At`), a `Completed At` that is itself no earlier than that Started At or the applicable event's own Ended At, `Result`, and `Completed At`. A closed event or a `Completed At` left over from a prior, already-completed execution does not satisfy a later reopen's Done gate.
+- An invalid Done cannot escape re-verification through a minute-granularity snapshot-hash collision; Done is always re-checked.
 - Repeated reconciliation of an unchanged Task does not duplicate authoritative events.
 - A Task already `In Progress` before the first-ever poll still receives an open Time Event, via the fresh-deploy bootstrap.
 - A dense cluster of already-reconciled Tasks inside the overlap window cannot permanently stall reconciliation of Tasks behind it.
+- A reopened Task's new interval starts from its current `Started At`, not from a later edit the poll happens to observe first.
 - Normal conversation and non-Task activity create no event.
 
 ## Tests

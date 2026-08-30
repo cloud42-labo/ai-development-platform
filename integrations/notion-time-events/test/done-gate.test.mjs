@@ -116,3 +116,60 @@ test('Done is rejected when the Task has never recorded a Started At', () => {
 
   assert.match(outcome, /missing_task_started_at/);
 });
+
+test('Done is rejected when Completed At predates the current execution entirely (stale from a prior completion)', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const task = taskPage({
+    startedAt: '2026-08-29T03:00:00.000Z',
+    result: 'shipped',
+    // Left over from the Task's previous, already-finished execution;
+    // Notion does not clear this on reopen.
+    completedAt: '2026-08-28T04:00:00.000Z',
+  });
+  const currentEvent = eventPage('evt-current-execution', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [currentEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_completed_at/);
+});
+
+test('Done is rejected when Completed At was recorded before the applicable interval actually closed', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const task = taskPage({
+    startedAt: '2026-08-29T03:00:00.000Z',
+    result: 'shipped',
+    // After Started At, but before the event's own Ended At (03:45) — the
+    // completion post-flight could not genuinely have happened yet.
+    completedAt: '2026-08-29T03:30:00.000Z',
+  });
+  const currentEvent = eventPage('evt-current-execution', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [currentEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_completed_at/);
+});
+
+test('Done passes when Completed At follows both Started At and the applicable event Ended At', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const task = taskPage({
+    startedAt: '2026-08-29T03:00:00.000Z',
+    result: 'shipped',
+    completedAt: '2026-08-29T03:50:00.000Z', // after Ended At (03:45)
+  });
+  const currentEvent = eventPage('evt-current-execution', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [currentEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed');
+});

@@ -272,6 +272,51 @@ test('overlap duplicates are skipped for free, so a dense duplicate cluster does
   assert.ok(new Date(scriptProps.get('LAST_SYNC_CURSOR')).getTime() >= new Date('2026-08-30T06:00:19.000Z').getTime());
 });
 
+test('a Done state is always re-verified by the gate, even if its snapshot hash collides with an already-processed one', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f77';
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:10:00.000Z', // identical on both calls: simulates a minute-granularity hash collision
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task] });
+
+  const firstOutcome = sandbox.reconcileTaskPage_(task);
+  assert.match(firstOutcome, /^done_gate_rejected:/);
+
+  // Same task object, same snapshot hash — must still re-run the Done gate
+  // rather than being treated as an already-processed duplicate, or an
+  // invalid Done retried within the same minute could persist forever.
+  const secondOutcome = sandbox.reconcileTaskPage_(task);
+  assert.match(secondOutcome, /^done_gate_rejected:/);
+
+  // Two genuine gate re-evaluations, each rolling the Task back.
+  const rollbacks = requestsTo(fetchLog, 'PATCH', '/v1/pages/' + taskId);
+  assert.equal(rollbacks.length, 2);
+});
+
+test('a reopened Task starts its new interval from the current Started At, not a later observed edit', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f77';
+  const historicalEvent = eventPage('evt-old', {
+    actor: 'Claude',
+    startedAt: '2026-08-20T00:00:00.000Z',
+    endedAt: '2026-08-20T01:00:00.000Z',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:15:00.000Z', // a later edit than Started At, e.g. a reassignment moments after restart
+    startedAt: '2026-08-30T05:10:00.000Z', // the true restart time
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [historicalEvent] });
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:10:00.000Z');
+});
+
 test('a poll that is already running is skipped without advancing the cursor', () => {
   const { sandbox, fetchLog, scriptProps } = harness({
     lockHeld: true,

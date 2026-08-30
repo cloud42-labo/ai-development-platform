@@ -199,7 +199,17 @@ function reconcileTaskPage_(task) {
   const changedBy = editorLabel_(task.last_edited_by);
   const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent);
 
-  if (hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
+  // Done is a completion gate that must be re-verified on every poll that
+  // observes it — never short-circuited by the snapshot hash. Notion reports
+  // last_edited_time at only minute granularity, so a Done that gets rolled
+  // back and retried within the same minute (still missing its required
+  // evidence) can hash identically to the first, already-processed attempt.
+  // Skipping re-verification on that collision would let an invalid Done
+  // persist indefinitely, since no further edit would ever change the hash.
+  // Every other status is fine to dedup: skipping a re-read there just means
+  // no new mutation was needed, not that an invalid state goes unchecked.
+  const mustReverify = currentStatus === DEFAULTS.DONE_STATUS;
+  if (!mustReverify && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
 
   const outcome = reconcileAuthoritativeTimeEvents_(
     task,
@@ -355,10 +365,23 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       }
       actions.push('already_open:' + sameActor[0].id);
     } else {
-      const initialTaskStart = allEvents.length === 0
-        ? propertyDate_(task.properties['Started At'])
+      // Prefer the Task's own current Started At over `when` (the observed
+      // edit time) whenever it looks like the true start of *this*
+      // execution rather than a stale leftover from history — i.e. it is at
+      // or after every timestamp already on file for this Task. This covers
+      // both the first-ever event (no history yet, so any Started At
+      // qualifies) and a reopened Task, where governance requires Started At
+      // to be freshly recorded for the new execution. Without this, a
+      // reopened Task whose next poll observes a *later* edit (e.g. an
+      // assignment change made moments after the restart, still within the
+      // same interval) would open its new event at that later edit instead
+      // of the execution's real start, silently dropping the time between.
+      const latestHistoricalTimestamp = latestEventTimestamp_(allEvents);
+      const taskStartedAt = propertyDate_(task.properties['Started At']);
+      const trustedTaskStart = taskStartedAt && (!latestHistoricalTimestamp || taskStartedAt.getTime() >= latestHistoricalTimestamp.getTime())
+        ? taskStartedAt
         : null;
-      const startAt = initialTaskStart || when;
+      const startAt = trustedTaskStart || when;
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt);
       actions.push('opened:' + created.id);
     }
@@ -392,21 +415,41 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   // begins. A closed event only counts if it started at or after that
   // marker.
   const taskStartedAt = propertyDate_(task.properties['Started At']);
+  let applicableClosedEvent = null;
   if (!taskStartedAt) {
     failures.push('missing_task_started_at');
   } else {
-    const closedEvents = (allEvents || []).filter(function (eventPage) {
-      return Boolean(propertyDate_(eventPage.properties['Ended At']));
+    (allEvents || []).forEach(function (eventPage) {
+      const endedAt = propertyDate_(eventPage.properties['Ended At']);
+      if (!endedAt) return;
+      if (eventStartedAt_(eventPage).getTime() < taskStartedAt.getTime()) return;
+      // Prefer the most-recently-closed applicable event, so a stale
+      // Completed At is checked against the freshest legitimate close below.
+      if (!applicableClosedEvent || endedAt.getTime() > propertyDate_(applicableClosedEvent.properties['Ended At']).getTime()) {
+        applicableClosedEvent = eventPage;
+      }
     });
-    const hasApplicableClosedEvent = closedEvents.some(function (eventPage) {
-      return eventStartedAt_(eventPage).getTime() >= taskStartedAt.getTime();
-    });
-    if (!hasApplicableClosedEvent) failures.push('missing_applicable_time_event');
+    if (!applicableClosedEvent) failures.push('missing_applicable_time_event');
   }
 
   if (openEvents && openEvents.length) failures.push('open_time_event');
   if (!result) failures.push('missing_result');
-  if (!completedAt) failures.push('missing_completed_at');
+
+  // Completed At must not just be *present* — a reopened Task can retain an
+  // old Completed At from its prior, already-finished execution, and Notion
+  // does not clear it on reopen. Presence alone would let that stale value
+  // wave through a new execution's Done without the current interval's own
+  // post-flight ever having actually happened. Require it to be no earlier
+  // than the current Started At, and no earlier than the applicable closed
+  // event's own Ended At when one was found above.
+  if (!completedAt) {
+    failures.push('missing_completed_at');
+  } else if (taskStartedAt && completedAt.getTime() < taskStartedAt.getTime()) {
+    failures.push('stale_completed_at');
+  } else if (applicableClosedEvent) {
+    const appliedEndedAt = propertyDate_(applicableClosedEvent.properties['Ended At']);
+    if (completedAt.getTime() < appliedEndedAt.getTime()) failures.push('stale_completed_at');
+  }
 
   if (!failures.length) return 'done_gate_passed';
 
@@ -618,6 +661,21 @@ function authoritativeSnapshotId_(task, status, assignedAgent) {
 
 function eventStartedAt_(eventPage) {
   return propertyDate_(eventPage && eventPage.properties && eventPage.properties['Started At']) || new Date(0);
+}
+
+// Latest Started At / Ended At timestamp across a list of Time Event pages,
+// or null if the list is empty or carries no dates at all.
+function latestEventTimestamp_(events) {
+  let latest = null;
+  (events || []).forEach(function (eventPage) {
+    [
+      propertyDate_(eventPage && eventPage.properties && eventPage.properties['Started At']),
+      propertyDate_(eventPage && eventPage.properties && eventPage.properties['Ended At']),
+    ].forEach(function (ts) {
+      if (ts && (!latest || ts.getTime() > latest.getTime())) latest = ts;
+    });
+  });
+  return latest;
 }
 
 function propertyDate_(property) {
