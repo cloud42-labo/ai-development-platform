@@ -451,7 +451,30 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   }
 
   if (openEvents && openEvents.length) failures.push('open_time_event');
-  if (!result) failures.push('missing_result');
+
+  // Result must not just be *present* either — Notion does not clear it on
+  // reopen, so a reopened Task can retain the Result text written for its
+  // prior, already-finished execution. Unlike Completed At, Result carries
+  // no timestamp of its own to check freshness against, so instead: mark
+  // each closed event with a fingerprint of the Result value that validated
+  // Done against it (markResultValidated_, below), and reject if that exact
+  // fingerprint is already recorded on a *different*, earlier closed event
+  // for this Task — i.e. this text already served as evidence for a prior
+  // execution and was never actually refreshed for this one. A match on the
+  // *current* applicable event's own fingerprint is fine and expected: Done
+  // is always re-verified (reconcileTaskPage_), so an unchanged, already-
+  // validated Result recurs on every re-check of a still-Done Task.
+  if (!result) {
+    failures.push('missing_result');
+  } else if (applicableClosedEvent) {
+    const currentFingerprint = resultFingerprint_(result);
+    const reusedFromEarlierExecution = (allEvents || []).some(function (eventPage) {
+      if (eventPage.id === applicableClosedEvent.id) return false;
+      const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+      return Boolean(meta.resultFingerprint) && meta.resultFingerprint === currentFingerprint;
+    });
+    if (reusedFromEarlierExecution) failures.push('stale_result');
+  }
 
   // Completed At must not just be *present* — a reopened Task can retain an
   // old Completed At from its prior, already-finished execution, and Notion
@@ -469,7 +492,14 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     if (completedAt.getTime() < appliedEndedAt.getTime()) failures.push('stale_completed_at');
   }
 
-  if (!failures.length) return 'done_gate_passed';
+  if (!failures.length) {
+    // Stamp the applicable event with the Result fingerprint that just
+    // validated it, so a *future* reopen can tell whether Result was ever
+    // actually refreshed. Idempotent: a matching stamp already present (a
+    // routine Done re-verification) costs no extra write.
+    markResultValidated_(applicableClosedEvent, result);
+    return 'done_gate_passed';
+  }
 
   // If work is still timed, restore In Progress and deliberately leave the
   // interval open so the normal In Progress → Review transition closes it.
@@ -479,6 +509,28 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     : DEFAULTS.REVIEW_STATUS;
   updateTaskStatus_(task.id, rollbackStatus);
   return 'done_gate_rejected:' + failures.join('+') + ':rollback=' + rollbackStatus;
+}
+
+function resultFingerprint_(resultText) {
+  const digest = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    String(resultText || ''),
+    Utilities.Charset.UTF_8
+  );
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/g, '');
+}
+
+function markResultValidated_(eventPage, result) {
+  const fingerprint = resultFingerprint_(result);
+  const existingNote = propertyText_(eventPage.properties.Note);
+  if (parseNoteMeta_(existingNote).resultFingerprint === fingerprint) return; // already stamped; no write needed
+  const marker = buildNote_({ resultFingerprint: fingerprint });
+  const note = existingNote ? existingNote + ' | ' + marker : marker;
+  notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
+    properties: {
+      Note: { rich_text: [{ type: 'text', text: { content: clip_(note, 1800) } }] },
+    },
+  });
 }
 
 function updateTaskStatus_(taskId, statusName) {
@@ -754,6 +806,7 @@ function buildNote_(fields) {
   if (fields.reason) parts.push('Reason=' + fields.reason);
   if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
   if (fields.changedBy) parts.push('Changed By=' + fields.changedBy);
+  if (fields.resultFingerprint) parts.push('Result Fingerprint=' + fields.resultFingerprint);
   return parts.join(' | ');
 }
 
@@ -762,6 +815,7 @@ function parseNoteMeta_(note) {
     endStatus: noteField_(note, 'End Status'),
     snapshotId: noteField_(note, 'Snapshot'),
     changedBy: noteField_(note, 'Changed By'),
+    resultFingerprint: noteField_(note, 'Result Fingerprint'),
   };
 }
 

@@ -12,12 +12,13 @@ function textProp(value) {
   return { type: 'rich_text', rich_text: value ? [{ plain_text: value }] : [] };
 }
 
-function eventPage(id, { startedAt, endedAt }) {
+function eventPage(id, { startedAt, endedAt, note = '' }) {
   return {
     id,
     properties: {
       'Started At': dateProp(startedAt),
       'Ended At': dateProp(endedAt),
+      Note: textProp(note),
     },
   };
 }
@@ -83,7 +84,85 @@ test('Done passes with a closed Time Event that belongs to the current execution
   const outcome = sandbox.enforceDoneGate_(task, [currentEvent], []);
 
   assert.equal(outcome, 'done_gate_passed');
-  assert.equal(fetchLog.length, 0); // no rollback mutation on the passing path
+  // The only mutation on the passing path is stamping the applicable event
+  // with a fingerprint of the validated Result, for future reopen detection.
+  assert.equal(fetchLog.length, 1);
+  const stampBody = JSON.parse(fetchLog[0].options.payload);
+  assert.match(stampBody.properties.Note.rich_text[0].text.content, /Result Fingerprint=/);
+});
+
+test('Done is rejected when Result was never refreshed after a reopen (reused from a prior execution)', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const resultText = 'shipped v1';
+  const priorFingerprint = sandbox.resultFingerprint_(resultText);
+  const task = taskPage({
+    startedAt: '2026-08-30T03:00:00.000Z',
+    result: resultText, // unchanged since the prior execution validated it
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const priorEvent = eventPage('evt-prior-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-28T11:00:00.000Z',
+    note: 'Result Fingerprint=' + priorFingerprint, // stamped when Done passed for the prior execution
+  });
+  const currentEvent = eventPage('evt-current-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorEvent, currentEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_result/);
+});
+
+test('Done passes when Result was refreshed for the new execution', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const priorFingerprint = sandbox.resultFingerprint_('shipped v1');
+  const task = taskPage({
+    startedAt: '2026-08-30T03:00:00.000Z',
+    result: 'shipped v2', // refreshed for this execution
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const priorEvent = eventPage('evt-prior-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-28T11:00:00.000Z',
+    note: 'Result Fingerprint=' + priorFingerprint,
+  });
+  const currentEvent = eventPage('evt-current-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorEvent, currentEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed');
+});
+
+test('re-verifying an already-validated, unchanged Done Task does not falsely flag stale Result or write again', () => {
+  const { sandbox, fetchLog } = harnessWithNotionStub();
+  const task = taskPage({
+    startedAt: '2026-08-30T03:00:00.000Z',
+    result: 'shipped',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const currentEvent = eventPage('evt-current-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const first = sandbox.enforceDoneGate_(task, [currentEvent], []);
+  assert.equal(first, 'done_gate_passed');
+  assert.equal(fetchLog.length, 1); // the stamp write
+
+  // Simulate the stamp having landed on the event (as the real PATCH would),
+  // then re-verify — Done is always re-verified (reconcileTaskPage_), so
+  // this must recur without incident on every subsequent poll.
+  currentEvent.properties.Note = textProp('Result Fingerprint=' + sandbox.resultFingerprint_('shipped'));
+  const second = sandbox.enforceDoneGate_(task, [currentEvent], []);
+
+  assert.equal(second, 'done_gate_passed');
+  assert.equal(fetchLog.length, 1); // no additional write: the stamp already matched
 });
 
 test('Done is rejected with an open Time Event even if a current-execution closed one also exists', () => {
