@@ -530,3 +530,91 @@ test('appendNote_ evicts non-fingerprint segments before ever touching an older 
   assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
   assert.equal(combined.indexOf('Snapshot='), -1, 'the non-fingerprint segment should have been dropped instead');
 });
+
+test('Done passes when multiple events close simultaneously on first observing the Task leaving In Progress', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // A Task with two open events (e.g. an unresolved duplicate) is first
+  // observed after leaving In Progress: reconcileAuthoritativeTimeEvents_
+  // closes ALL of them at the identical `when`, with Reason=left_in_progress.
+  // Both are equally "now" and must both count as current-execution
+  // evidence — picking only one arbitrarily would leave its identically
+  // recent sibling looking like a separate, prior execution.
+  const task = taskPage({
+    startedAt: '2026-08-29T03:00:00.000Z',
+    result: 'shipped',
+    completedAt: '2026-08-29T04:00:00.000Z',
+  });
+  const eventA = eventPage('evt-a', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:45:00.000Z',
+    note: 'Reason=left_in_progress',
+  });
+  const eventB = eventPage('evt-b', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:45:00.000Z', // identical Ended At — simultaneously closed
+    note: 'Reason=left_in_progress',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [eventA, eventB], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
+test('Done is rejected when a reassignment-only execution is retroactively marked as an execution boundary', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // A past execution's only recorded artifact is a reassignment close (the
+  // assignee was cleared, and the Task then left In Progress with nothing
+  // open — reconcileAuthoritativeTimeEvents_'s no-open-events branch
+  // retroactively stamps Boundary=left_in_progress onto it, since its own
+  // Reason=reassignment never signals an execution end on its own). A
+  // reopen whose Task-level Started At was never actually refreshed (still
+  // pointing at the old execution) must still be caught as stale, even
+  // though the historical event's Reason alone would normally count as
+  // current-execution evidence.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: unchanged since the OLD execution
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const priorEvent = eventPage('evt-prior-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-28T11:00:00.000Z',
+    note: 'Reason=reassignment | Boundary=left_in_progress',
+  });
+  const newEvent = eventPage('evt-new-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorEvent, newEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
+
+test('Done passes when a reassignment-only execution is NOT boundary-marked (still genuinely current)', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Sanity check for the previous test: without the retroactive Boundary
+  // marker (e.g. because the Task never actually left In Progress — an
+  // in-progress reassignment gap, not a real execution end), the same
+  // reassignment-reason event must still count as current-execution
+  // evidence, exactly as before this fix.
+  const task = taskPage({
+    startedAt: '2026-08-30T03:00:00.000Z', // correctly fresh
+    result: 'shipped',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const gappedEvent = eventPage('evt-gapped', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:20:00.000Z',
+    note: 'Reason=reassignment', // no Boundary marker
+  });
+  const seedEvent = eventPage('evt-seed', {
+    startedAt: '2026-08-30T03:40:00.000Z', // a real gap from gappedEvent's Ended At
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [gappedEvent, seedEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});

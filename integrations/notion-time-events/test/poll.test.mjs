@@ -26,7 +26,7 @@ function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T'
   };
 }
 
-function eventPage(id, { actor, startedAt, endedAt = null }) {
+function eventPage(id, { actor, startedAt, endedAt = null, note = '' }) {
   return {
     object: 'page',
     id,
@@ -34,17 +34,26 @@ function eventPage(id, { actor, startedAt, endedAt = null }) {
       Actor: { type: 'select', select: { name: actor } },
       'Started At': { type: 'date', date: { start: startedAt } },
       'Ended At': { type: 'date', date: endedAt ? { start: endedAt } : null },
-      Note: { type: 'rich_text', rich_text: [] },
+      Note: { type: 'rich_text', rich_text: note ? [{ plain_text: note }] : [] },
     },
   };
 }
 
 // A sandbox whose Notion stub answers with `tasks` for the Stories & Tasks
 // query and `events` for the Task Time Events query, and accepts writes.
-function harness({ tasks = [], events = [], scriptProperties = {}, lockHeld = false, now } = {}) {
+function harness({ tasks = [], events = [], scriptProperties = {}, lockHeld = false, now, noEventsForTaskIds = [] } = {}) {
   const routes = {
     [TASKS_QUERY]: () => ({ results: tasks, has_more: false }),
-    [EVENTS_QUERY]: () => ({ results: events, has_more: false }),
+    // The mock can't actually scope `events` per Task (there's no Task
+    // relation on the eventPage fixtures), so every task's query sees the
+    // same configured `events` by default — relied on throughout. A few
+    // tests need one specific Task to genuinely see no history (e.g. one
+    // that was never In Progress), which noEventsForTaskIds carves out.
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      if (requestedTaskId && noEventsForTaskIds.indexOf(requestedTaskId) >= 0) return { results: [], has_more: false };
+      return { results: events, has_more: false };
+    },
     'POST /v1/pages': () => ({ id: 'evt-created' }),
     'PATCH *': () => ({}),
     'GET *': () => ({}),
@@ -169,6 +178,39 @@ test('leaving In Progress closes every open event for the Task', () => {
   closes.forEach((entry) => {
     assert.ok(JSON.parse(entry.options.payload).properties['Ended At'].date.start);
   });
+});
+
+test('leaving In Progress with nothing open retroactively stamps the last closed event as the execution boundary', () => {
+  // The only event was already closed by an earlier reassignment (nothing
+  // left open to close here), but the Task's execution still genuinely
+  // ends at this moment — enforceDoneGate_ needs a marker to tell this
+  // apart from a still-current reassignment-only execution.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Review',
+      agent: 'Human',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+    })],
+    events: [
+      eventPage('evt-reassigned', {
+        actor: 'Claude',
+        startedAt: '2026-08-30T05:10:00.000Z',
+        endedAt: '2026-08-30T05:30:00.000Z',
+        note: 'Reason=reassignment',
+      }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /boundary:evt-reassigned/);
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-reassigned');
+  assert.equal(patches.length, 1);
+  const note = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.match(note, /Reason=reassignment/);
+  assert.match(note, /Boundary=left_in_progress/);
 });
 
 test('a capped batch leaves the cursor on the last Task it actually reconciled', () => {
@@ -565,6 +607,7 @@ test('a wall-clock cutoff landing inside a tied-timestamp Done cohort resumes pa
     tasks: doneTasks.concat([laterChangedTask]),
     events: [sharedEvent],
     now,
+    noEventsForTaskIds: [laterChangedTask.id],
   });
   sharedEvent.properties.Note = {
     type: 'rich_text',
@@ -674,6 +717,7 @@ test('25+ already-valid Done Tasks inside the overlap do not exhaust the batch a
   const { sandbox } = harness({
     tasks: doneTasks.concat([laterChangedTask]),
     events: [sharedEvent],
+    noEventsForTaskIds: [laterChangedTask.id],
   });
 
   // Pre-stamp the shared event as already validated for this exact Result, so
@@ -732,6 +776,7 @@ test('a Done cohort larger than the old scan cap does not stall reconciliation f
     tasks: doneTasks.concat([laterChangedTask]),
     events: [sharedEvent],
     scriptProperties: { LAST_SYNC_CURSOR: '2026-08-30T06:00:00.000Z' },
+    noEventsForTaskIds: [laterChangedTask.id],
   });
 
   // Pre-stamp, as above: this test is about the scan not stalling on a large
@@ -848,6 +893,36 @@ test('a reopened Task starts its new interval from the current Started At, not a
   assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:10:00.000Z');
 });
 
+test('a mid-execution reassignment opens the replacement actor at the reassignment boundary, not the execution start', () => {
+  // Regression: `allEvents` is fetched before this same call's own
+  // otherActor.forEach closes the outgoing actor's event, so its in-memory
+  // copy still shows no Ended At and latestEventTimestamp_ can't see the
+  // reassignment. Without accounting for that, the unchanged Task-level
+  // Started At (correctly representing the whole execution's true start)
+  // looks "trusted" and the replacement actor's event opens there instead
+  // of at the reassignment boundary — overlapping the outgoing actor's own
+  // interval and double-counting effort.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa01';
+  const outgoingOpenEvent = eventPage('evt-outgoing', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z', // matches the Task's own Started At below
+    endedAt: null,
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Human', // reassigned away from Claude
+    lastEdited: '2026-08-30T05:20:00.000Z', // the reassignment moment
+    startedAt: '2026-08-30T05:00:00.000Z', // the execution's true (unrelated, earlier) start
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [outgoingOpenEvent] });
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:20:00.000Z');
+});
+
 test('a query that hits the pagination safety limit does not let the cursor advance past unretrieved data', () => {
   const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d1f01', {
     status: 'Ready',
@@ -923,6 +998,26 @@ test('setup installs exactly one poll trigger and reinstalling does not duplicat
 
   sandbox.installSyncTrigger();
   assert.equal(triggers.length, 1);
+});
+
+test('setup creates the Time Events projection tab when the spreadsheet does not already have one', () => {
+  // Regression for the Codex-reported gap: sheet_() throws on a missing tab
+  // — correct for callers during normal reconciliation (a missing tab there
+  // means setup was never run) — but ensureProjectionHeaders_ IS setup's own
+  // initialization step, so on a genuinely brand-new spreadsheet with no
+  // "Time Events" tab yet, that same strictness made setup() itself throw
+  // before it ever got the chance to create one.
+  const { sandbox, spreadsheet } = harness();
+  spreadsheet.sheets.delete('Time Events');
+  assert.equal(spreadsheet.getSheetByName('Time Events'), null);
+
+  assert.doesNotThrow(function () {
+    sandbox.setup();
+  });
+
+  const sheet = spreadsheet.getSheetByName('Time Events');
+  assert.ok(sheet, 'expected setup() to create the Time Events tab');
+  assert.equal(sheet.rows[0][0], 'Event ID');
 });
 
 test('an out-of-range poll interval falls back to the default', () => {
@@ -1172,4 +1267,74 @@ test('a truncated backfill call whose tie is entirely already covered does not l
   assert.equal(summary.truncated, true);
   assert.equal(scriptProps.get('BACKFILL_RESUME_CURSOR'), cursor);
   assert.equal(scriptProps.get('BACKFILL_RESUME_TIE_OFFSET'), '1000000');
+});
+
+test('backfillResultFingerprints_ bails out on wall-clock time within a single pagination page and leaves a resumable checkpoint', () => {
+  // Regression for the Codex-reported gap: a batch of Done Tasks well under
+  // QUERY_PAGE_SAFETY_LIMIT can still make this run long enough to hit Apps
+  // Script's own execution limit, since every Done Task costs a real Time
+  // Events query/write (reconcileTaskPage_ always re-verifies Done) — a risk
+  // the pagination-truncation-only checkpointing above does nothing to guard
+  // against. MAX_RUN_DURATION_MS must stop the loop before that and persist
+  // a resumable checkpoint, the same as it already does for pollTaskChanges'
+  // own free-outcome scan.
+  const taskCount = 8;
+  const tasks = [];
+  for (let i = 1; i <= taskCount; i++) {
+    const ts = '2026-08-01T00:' + String(i).padStart(2, '0') + ':00.000Z';
+    const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dk' + String(i).padStart(3, '0'), {
+      status: 'Done', agent: 'Claude Opus', lastEdited: ts, startedAt: ts,
+    });
+    task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+    task.properties['Completed At'] = { type: 'date', date: { start: ts } };
+    tasks.push(task);
+  }
+  const routes = {
+    // Mirrors real Notion `on_or_after` semantics (inclusive) so a resumed
+    // second call genuinely sees a narrowed result set, exercising the same
+    // tie-offset local skip the production code depends on — not just the
+    // un-resumed first call's full list every time.
+    [TASKS_QUERY]: (body) => {
+      const onOrAfter = body.filter && body.filter.and &&
+        body.filter.and.find((f) => f.timestamp === 'last_edited_time');
+      const filtered = onOrAfter
+        ? tasks.filter((t) => t.last_edited_time >= onOrAfter.last_edited_time.on_or_after)
+        : tasks;
+      return { results: filtered, has_more: false };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  // A fake clock advancing 30 simulated seconds on every no-arg `new Date()`
+  // / `Date.now()` call, so MAX_RUN_DURATION_MS (4 minutes) is crossed well
+  // before all 8 Tasks are processed regardless of how many internal Date()
+  // reads reconcileTaskPage_ itself makes per Task.
+  let ticks = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 30 * 1000;
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+    now,
+  });
+
+  const summary = sandbox.backfillResultFingerprints_();
+
+  assert.equal(summary.timedOut, true);
+  assert.ok(summary.scanned > 0 && summary.scanned < taskCount, 'expected a partial scan: got ' + summary.scanned);
+  assert.equal(summary.truncated, false); // pagination itself never truncated — only the wall clock did
+  const resumeCursor = scriptProps.get('BACKFILL_RESUME_CURSOR');
+  assert.ok(resumeCursor, 'expected a resume checkpoint to be persisted after a wall-clock bail-out');
+  assert.equal(resumeCursor, tasks[summary.scanned - 1].last_edited_time);
+
+  // A second, unstubbed-clock call must resume past exactly what the first
+  // call already processed and drain the rest — never restart from scratch,
+  // and never skip the tail.
+  const secondRun = sandbox.backfillResultFingerprints_();
+  assert.equal(secondRun.scanned, taskCount - summary.scanned);
+  assert.equal(scriptProps.get('BACKFILL_RESUME_CURSOR'), '');
 });
