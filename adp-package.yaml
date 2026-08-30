@@ -61,6 +61,14 @@ required_capabilities:
 # Phase 2/3 — intentionally out of v1.0.0 scope, not a gap in this manifest.
 optional_adapters: []
 
+# Where an adopting agent/script finds the four asset classes above, and
+# where this deployment's own environment-specific values (Notion workspace,
+# GitHub org/repo names, named AI roles) are catalogued separately from the
+# package body. Added by ADP-049-C; see package/README.md for why this is a
+# reference index rather than a physical file move.
+package_root: package/README.md
+example_config: examples/cloud42-labo-config.md
+
 # How to move between manifest states. This is the first manifest this
 # repository has had, so there is no prior version to migrate from — the
 # only entry today documents adopting the manifest itself. Add an entry
@@ -77,3 +85,8 @@ migration_path:
       to the underlying Rules/Workflows/Templates (those were classified,
       not modified, by ADP-049-A).
     action_required: none
+  # ADP-049-C (2026-08-30) added the package_root/example_config fields
+  # above without bumping any version field: both are new optional-to-use
+  # fields, no existing field changed meaning, and no asset content
+  # changed — per docs/versioning-policy.md's "When to add a
+  # migration_path entry", a bump-free additive change does not need one.
