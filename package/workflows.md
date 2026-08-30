@@ -9,3 +9,4 @@ MAJOR/MINOR/PATCH mean for this class (`workflow_version` in
 | [`../docs/operating-guide.md`](../docs/operating-guide.md) | Stage 1–7 / Gate 1–6 development lifecycle, Sprint cadence, Backlog Refinement, Chris↔Claude handoff, Definition of Ready/Done, Human Gate policy |
 | [`../governance/postmortem-improvement-loop.md`](../governance/postmortem-improvement-loop.md) | Record → Analyze → Correct → Create preventive work → Make executable → Retest → Close, with independent-review gate |
 | [`../governance/monthly-risk-management-review.md`](../governance/monthly-risk-management-review.md) | Monthly risk review cadence, complements the Postmortem loop |
+| [`../docs/product-design-doc-standard.md`](../docs/product-design-doc-standard.md) | Vision → Inception Deck → PRD → Design Doc → Epic Brief flow: where each Product design document lives and when it's synced |
