@@ -666,3 +666,68 @@ test('an out-of-range poll interval falls back to the default', () => {
 
   assert.equal(triggers[0].minutes, 5);
 });
+
+test('backfillResultFingerprints_ stamps a legacy Done Task and the stamp then genuinely protects against a later stale-Result reopen', () => {
+  // Regression for the Codex-reported migration gap: a Task that reached
+  // Done under an OLDER Code.gs revision (before Result-fingerprint
+  // stamping existed) has an applicable closed event with no stamp. The
+  // reuse check can only catch a later reopen's stale, unchanged Result
+  // against an event it once stamped — so an unstamped legacy event is
+  // invisible to it. backfillResultFingerprints_ closes that gap by forcing
+  // the normal Done re-verification (which stamps on first pass) across
+  // every currently Done Task regardless of last_edited_time.
+  const legacyTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43dc001', {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-25T10:00:00.000Z', // old — outside any normal poll window
+    startedAt: '2026-08-25T09:00:00.000Z',
+  });
+  legacyTask.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped v1' }] };
+  legacyTask.properties['Completed At'] = { type: 'date', date: { start: '2026-08-25T09:45:00.000Z' } };
+  const legacyEvent = eventPage('evt-legacy', {
+    actor: 'Claude',
+    startedAt: '2026-08-25T09:00:00.000Z',
+    endedAt: '2026-08-25T09:30:00.000Z',
+    // No Note/fingerprint: this event predates the stamping feature.
+  });
+
+  const { sandbox, fetchLog } = harness({
+    tasks: [legacyTask],
+    events: [legacyEvent],
+  });
+
+  const summary = sandbox.backfillResultFingerprints_();
+
+  assert.equal(summary.scanned, 1);
+  assert.deepEqual(Array.from(summary.outcomes), ['done_gate_passed:stamped']);
+  const stampWrite = fetchLog.find((entry) => (entry.options.method || '').toUpperCase() === 'PATCH');
+  assert.ok(stampWrite, 'expected the backfill to PATCH-stamp the legacy event');
+
+  // Simulate the stamp having landed (as the real PATCH would), then verify
+  // the gap the finding described is now actually closed: reopen the Task
+  // with an unchanged Result and only Completed At refreshed for the new
+  // execution — this must now be rejected as stale, where before the
+  // backfill it would have silently passed.
+  legacyEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v1') }],
+  };
+  const reopenedTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43dc001', {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T03:00:00.000Z',
+    startedAt: '2026-08-30T03:00:00.000Z', // properly refreshed for the new execution
+  });
+  reopenedTask.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped v1' }] }; // unchanged
+  reopenedTask.properties['Completed At'] = { type: 'date', date: { start: '2026-08-30T03:45:00.000Z' } };
+  const newEvent = eventPage('evt-new-execution', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:30:00.000Z',
+  });
+
+  const reopenOutcome = sandbox.enforceDoneGate_(reopenedTask, [legacyEvent, newEvent], []);
+
+  assert.match(reopenOutcome, /^done_gate_rejected:/);
+  assert.match(reopenOutcome, /stale_result/);
+});

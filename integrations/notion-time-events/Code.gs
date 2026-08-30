@@ -218,6 +218,41 @@ function reconcileTaskById(pageId) {
   });
 }
 
+// Operator escape hatch for a version upgrade that adds Result-fingerprint
+// stamping (see enforceDoneGate_) to a Task that already reached Done under
+// an older Code.gs revision without it: reused unchanged after a later
+// reopen, that Task's stale Result would otherwise go undetected, since the
+// check can only catch a reuse against an event it once stamped. Forces the
+// exact same re-verification a normal poll already performs for a Done Task
+// (Done is always re-verified — reconcileTaskPage_) across *every* currently
+// Done Task regardless of last_edited_time, so ones outside the current poll
+// window get their applicable event stamped promptly instead of waiting on
+// some unrelated future edit to pull them back into view. Idempotent and
+// safe to run more than once (already-stamped events are left untouched, and
+// a Task that genuinely fails the gate is rolled back exactly as it would be
+// by the next ordinary poll to reach it). Run once from the editor
+// immediately after deploying this revision, before any already-Done Task is
+// reopened — see README "Known limitations". Not needed on a fresh deploy
+// with no pre-existing Done history.
+function backfillResultFingerprints_() {
+  return withPollLock_(function () {
+    const doneTasks = paginateNotionQuery_(
+      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+      {
+        page_size: 100,
+        filter: { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } },
+      }
+    );
+    const outcomes = doneTasks.results.map(function (task) {
+      return reconcileTaskPage_(task);
+    });
+    if (doneTasks.truncated) {
+      Logger.log('backfillResultFingerprints_: result set truncated at the pagination safety limit — re-run to cover the remainder.');
+    }
+    return { scanned: outcomes.length, truncated: doneTasks.truncated, outcomes: outcomes };
+  });
+}
+
 // Reconciles a single authoritative Notion Task page. Status, assignment,
 // timing and completion evidence are read from the page Notion returned; the
 // reconciler only ever moves Task Time Events toward the state Notion already
