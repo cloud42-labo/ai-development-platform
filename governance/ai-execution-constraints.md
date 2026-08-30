@@ -21,7 +21,8 @@ Before performing any managed work that writes to Notion, GitHub, another connec
 2. **Executable state** — the task is `Ready` or an already-valid `In Progress` continuation, its Definition of Ready is satisfied, and no unresolved Blocker prohibits execution.
 3. **Start state recorded** — immediately before execution, set `Status = In Progress` and record `Started At` in JST if this execution has not already started.
 4. **Time event opened** — create/open a Task Time Event for the actor and current active interval before the substantive work begins.
-5. **Authority checked** — confirm the acting AI has authority for the intended action. Human-only/account/physical/irreversible actions must be transferred instead of performed by an unauthorized AI.
+5. **AI Work Session opened** — create a record in the `AI Work Sessions` database with `Status = Running`, `Task` set to this Task, `Agent`/`Model`/`Role` set to the acting AI, `Stage` set to the current lifecycle stage, `Started At` in JST, and a one-line `Input Summary`. See "AI Work Session recording" below for the full field mapping. Skip only when `AI Work Sessions` itself is unreachable (see that section's degradation rule) — never skip merely because this feels like overhead.
+6. **Authority checked** — confirm the acting AI has authority for the intended action. Human-only/account/physical/irreversible actions must be transferred instead of performed by an unauthorized AI.
 
 If any required check fails, do not start the substantive work. Repair the tracking/state problem first or record a Blocker and stop that task.
 
@@ -108,8 +109,19 @@ Before setting a managed task to `Done`, the acting AI MUST verify **all** of th
 2. **Evidence recorded** — update `Result` with the material outcome, decisions, relevant URLs/commit/PR identifiers, and any remaining limitations.
 3. **Time interval closed** — verify that a Task Time Event exists for the actor/current active interval and set its `Ended At` in JST. Active Time is derived from the event; do not invent an `Actual Time` value independently when the rollup is authoritative. **A task with no applicable Time Event, or with an open Time Event, MUST NOT be marked Done.**
 4. **Completion timestamp recorded** — set `Completed At` in JST after the time record is complete.
-5. **Status transition last** — set `Status = Done` only after the evidence and time records needed to support Done are present.
-6. **Residual work routed** — if Human/another agent action remains necessary to satisfy the task's own acceptance criteria, do not mark the task Done; create/route the explicit follow-up and use the correct waiting/blocked state. Before routing anything to a Human or moving to `Blocked` for a Human reason, execute the Human gate pre-flight above and route only the genuinely Human-only remainder.
+5. **AI Work Session closed** — update this Task's `Running` `AI Work Sessions` record (opened in the execution pre-flight) with `Completed At` in JST, `Status` set to `Success` / `Failed` / `Needs Human` as applicable, an `Output Summary`, and `Pull Request` / `Git Commit` where applicable. If work is routed to a Human or another agent instead of completing, also set `Next Agent` and `Human Help Reason`. See "AI Work Session recording" below.
+6. **Status transition last** — set `Status = Done` only after the evidence and time records needed to support Done are present.
+7. **Residual work routed** — if Human/another agent action remains necessary to satisfy the task's own acceptance criteria, do not mark the task Done; create/route the explicit follow-up and use the correct waiting/blocked state. Before routing anything to a Human or moving to `Blocked` for a Human reason, execute the Human gate pre-flight above and route only the genuinely Human-only remainder.
+
+### AI Work Session recording
+
+`AI Work Sessions` (separate from `Time Events`) is the per-execution audit/outcome log: who ran, on what Task, with what result — as opposed to `Time Events`, which is pure elapsed-time measurement. Opening one is step 5 of the execution pre-flight above; closing it is step 5 of the completion post-flight above. Concretely:
+
+- **At start**: create a row with `Session` (a short human-readable label, e.g. `<Task title>｜<JST timestamp>`), `Task` (relation to the Stories & Tasks record), `Agent` (`Claude` / `ChatGPT` / `ChatGPT Codex` / `Gemini` / `Gemini CLI` / `Google AI Studio`), `Model` (`Opus` / `Sonnet` / `Haiku` / `Gemini` / `Codex` / `N/A`), `Role` (the closest of `Ideation` / `UI Validation` / `PM` / `Organizer` / `Design` / `Research` / `Coding` / `Quality` / `Final Review` / `PR Review` / `Merge`), `Stage` (`Plan` / `Design` / `Build` / `Test` / `Review` / `Merge`), `Status = Running`, `Started At` (JST), `Product` (relation), and a one-line `Input Summary`.
+- **At end**: set `Completed At` (JST) and `Status` to `Success` (task advanced or completed as intended), `Failed` (the attempt did not produce the intended result and was not routed onward), or `Needs Human` (routed to a Human as this task's residual). Fill `Output Summary`, and `Pull Request` / `Git Commit` when the session produced one. When routing onward, also set `Next Agent` and `Human Help Reason`.
+- **Multiple tasks in one autonomous run** (the normal case for Claude/Chris daily execution): open and close a separate `AI Work Sessions` row per Task, in the same start/end place as that Task's own `Status`/`Started At`/`Completed At` — do not batch multiple Tasks under one Session row, and do not open a Session for the run as a whole.
+- **Degradation**: if the `AI Work Sessions` database itself is unreachable (not merely a single failed call — retry once), proceed with the Task's own Time Event/Status/Result recording as normal and note the `AI Work Sessions` gap in that Task's `Result`. Do not block substantive work on this database alone, and do not build a replacement recording mechanism.
+- Views `⚠ Session Missing Started At` and `⚠ Success Missing Completed At` on the `AI Work Sessions` database exist to catch a session opened or closed out of compliance with this section; an agent that finds itself listed there has skipped a step above and should correct the record.
 
 ### Human work and PR completion
 

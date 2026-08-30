@@ -35,7 +35,7 @@ schema_version: 0.1.0-experimental
 # governance/research-security-policy.md,
 # governance/authority-stop-gate-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 0.1.0
+rules_version: 0.2.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -90,3 +90,23 @@ migration_path:
   # fields, no existing field changed meaning, and no asset content
   # changed — per docs/versioning-policy.md's "When to add a
   # migration_path entry", a bump-free additive change does not need one.
+  - field: rules_version
+    from: "0.1.0"
+    to: "0.2.0"
+    date: "2026-08-30"
+    change: >-
+      ADP-046: governance/ai-execution-constraints.md's managed-work
+      execution pre-flight and completion post-flight each gained a new
+      step ("AI Work Session opened" / "AI Work Session closed") plus an
+      "AI Work Session recording" subsection with the full field mapping.
+      Additive (MINOR per docs/versioning-policy.md's Rules judgment): no
+      existing gate, field, or required step was removed or redefined.
+    action_required: >-
+      An adopter following this Rule must, from this version on, also
+      create/update a row in an AI Work Sessions-equivalent database at
+      Task start and end (see governance/ai-execution-constraints.md's
+      "AI Work Session recording"), not only the Task's own Status/Time
+      Event. An adopter with no such database should either create one
+      matching that section's fields, or explicitly adopt the section's
+      degradation rule (record the gap in the Task's Result, do not block
+      substantive work on it).
