@@ -336,6 +336,37 @@ test('Done is rejected when a genuinely prior execution\'s closing event coincid
   assert.match(outcome, /stale_task_started_at/);
 });
 
+test('Done passes when an assignment was cleared and only later reassigned, leaving a real gap between events', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Actor A works the Task, the assignment is cleared while still In
+  // Progress (closing A's event via 'reassignment' per
+  // reconcileAuthoritativeTimeEvents_'s otherActor cleanup, with no
+  // replacement opened since desiredActor is empty), and only later is
+  // Actor B assigned — opening a new event at THAT later moment, not
+  // touching A's own Ended At. This is still one unbroken execution (the
+  // Task never left In Progress), so the gap must not make A look like
+  // prior-execution evidence against the Task's own (correctly fresh)
+  // Started At.
+  const task = taskPage({
+    startedAt: '2026-08-29T03:00:00.000Z',
+    result: 'shipped',
+    completedAt: '2026-08-29T05:00:00.000Z',
+  });
+  const actorAEvent = eventPage('evt-actor-a', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:20:00.000Z', // closed when the assignment was cleared
+    note: 'Reason=reassignment',
+  });
+  const actorBEvent = eventPage('evt-actor-b', {
+    startedAt: '2026-08-29T04:00:00.000Z', // opened much later — a real gap, not touching A's Ended At
+    endedAt: '2026-08-29T04:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [actorAEvent, actorBEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
 test('Done is still rejected for a genuinely prior execution even when the current one has two chained events', () => {
   const { sandbox } = harnessWithNotionStub();
   // A real prior, separate execution (oldEvent) sits before a reassignment
@@ -477,4 +508,25 @@ test('appendNote_ fits the marker alone even when it alone exceeds maxLength bud
   const combined = sandbox.appendNote_(existingNote, marker, marker.length + 2);
 
   assert.equal(combined, marker);
+});
+
+test('appendNote_ evicts non-fingerprint segments before ever touching an older Result Fingerprint', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const oldFingerprint = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v1');
+  // The older fingerprint stamp is the OLDEST segment (would be the first
+  // dropped by a naive "oldest segment first" rule), with a long,
+  // easily-droppable non-fingerprint segment recorded more recently. When
+  // space is needed for the newly written marker, the non-fingerprint
+  // segment must go first regardless of recency — stale-Result detection
+  // needs every fingerprint an event ever recorded to survive as long as
+  // possible.
+  const existingNote = oldFingerprint + ' | Snapshot=' + 'x'.repeat(1700);
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v2');
+
+  const combined = sandbox.appendNote_(existingNote, newMarker, 1800);
+
+  assert.ok(combined.length <= 1800);
+  assert.ok(combined.indexOf(oldFingerprint) >= 0, 'the older fingerprint must survive the eviction');
+  assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
+  assert.equal(combined.indexOf('Snapshot='), -1, 'the non-fingerprint segment should have been dropped instead');
 });

@@ -237,38 +237,66 @@ function pollTaskChanges() {
     // advances to the moment the query was issued, so edits made while it
     // ran are still inside the next run's overlap.
     const capped = iterated < tasksToProcess.length || sourceTruncated;
-    props.setProperty(
-      'LAST_SYNC_CURSOR',
-      capped && lastScannedEdit ? lastScannedEdit : runStartedAt.toISOString()
-    );
+    // A capped run that scanned nothing new at all (every Task the query
+    // returned was already covered by startIndex's tie-skip — e.g. a tied
+    // group wide enough to fill the entire truncated result set) has no
+    // `lastScannedEdit` to persist. Falling through to `runStartedAt` in
+    // that case would silently jump the cursor past whatever unretrieved
+    // data caused the truncation in the first place. Leave both
+    // LAST_SYNC_CURSOR and its tie offset untouched instead — the same
+    // "failed or skipped run leaves the cursor alone" behavior already
+    // documented for a lock-contended run — so the next run retries with
+    // the exact same resume state rather than losing data. (A single tie
+    // wide enough to itself exceed the pagination safety limit is a
+    // separate, extreme-scale limitation this cannot fully resolve — see
+    // README "Known limitations".)
+    const madeProgress = iterated > startIndex;
+    if (madeProgress || !capped) {
+      props.setProperty(
+        'LAST_SYNC_CURSOR',
+        capped && lastScannedEdit ? lastScannedEdit : runStartedAt.toISOString()
+      );
 
-    // Recompute the tie offset from scratch for whatever was just persisted
-    // as the cursor: the count of items sharing that exact timestamp,
-    // contiguously ending at the last Task actually reconciled (ascending
-    // sort keeps a tie contiguous, so a simple trailing count is correct
-    // whether it's a tie this run just started or one carried in via
-    // startIndex above). Zero for a run that reached a genuinely complete
-    // end — there is nothing left to resume mid-tie.
-    let newTieOffset = 0;
-    if (capped && lastScannedEdit) {
-      for (let i = 0; i < iterated; i++) {
-        newTieOffset = String(tasksToProcess[i].last_edited_time || '') === lastScannedEdit ? newTieOffset + 1 : 0;
+      // Recompute the tie offset from scratch for whatever was just
+      // persisted as the cursor: the count of items sharing that exact
+      // timestamp, contiguously ending at the last Task actually
+      // reconciled (ascending sort keeps a tie contiguous, so a simple
+      // trailing count is correct whether it's a tie this run just started
+      // or one carried in via startIndex above). Zero for a run that
+      // reached a genuinely complete end — there is nothing left to resume
+      // mid-tie.
+      let newTieOffset = 0;
+      if (capped && lastScannedEdit) {
+        for (let i = 0; i < iterated; i++) {
+          newTieOffset = String(tasksToProcess[i].last_edited_time || '') === lastScannedEdit ? newTieOffset + 1 : 0;
+        }
       }
+      props.setProperty('LAST_SYNC_CURSOR_TIE_OFFSET', String(newTieOffset));
     }
-    props.setProperty('LAST_SYNC_CURSOR_TIE_OFFSET', String(newTieOffset));
 
     if (activeResult) {
       if (activeResult.truncated) {
         // Not done: leave BOOTSTRAP_ACTIVE_DONE unset so the next run tries
         // again, and persist how far this call got so that retry resumes
-        // past it instead of re-querying the identical prefix.
+        // past it instead of re-querying the identical prefix. If nothing
+        // new was retrieved this call (the whole batch was already covered
+        // by the tie-offset skip), leave the resume state untouched rather
+        // than losing it — same rule pollTaskChanges' own cursor applies.
         if (activeResult.results.length) {
           const lastActiveSeen = String(activeResult.results[activeResult.results.length - 1].last_edited_time || '');
-          if (lastActiveSeen) props.setProperty('BOOTSTRAP_ACTIVE_RESUME_CURSOR', lastActiveSeen);
+          if (lastActiveSeen) {
+            props.setProperty('BOOTSTRAP_ACTIVE_RESUME_CURSOR', lastActiveSeen);
+            let newActiveTieOffset = 0;
+            for (let i = 0; i < activeResult.results.length; i++) {
+              newActiveTieOffset = String(activeResult.results[i].last_edited_time || '') === lastActiveSeen ? newActiveTieOffset + 1 : 0;
+            }
+            props.setProperty('BOOTSTRAP_ACTIVE_RESUME_TIE_OFFSET', String(newActiveTieOffset));
+          }
         }
       } else {
         props.setProperty('BOOTSTRAP_ACTIVE_DONE', '1');
         props.setProperty('BOOTSTRAP_ACTIVE_RESUME_CURSOR', '');
+        props.setProperty('BOOTSTRAP_ACTIVE_RESUME_TIE_OFFSET', '');
       }
     }
 
@@ -313,16 +341,22 @@ function backfillResultFingerprints_() {
   return withPollLock_(function () {
     const props = PropertiesService.getScriptProperties();
     const resumeCursor = props.getProperty('BACKFILL_RESUME_CURSOR');
-    // Sorted ascending and, on a resumed call, filtered to strictly after the
+    // Sorted ascending and, on a resumed call, filtered to on-or-after the
     // last Task this backfill actually looked at, so a deployment with more
     // Done Tasks than the pagination safety limit (QUERY_PAGE_SAFETY_LIMIT,
     // 5000 rows) can be drained by calling this repeatedly instead of the
-    // exact same unsorted, un-resumed 5000-row prefix being returned (and
-    // re-processed) every time it is re-run, leaving the tail unreachable.
+    // exact same unsorted, un-resumed prefix being returned every time it is
+    // re-run, leaving the tail unreachable. `on_or_after` (not `after`) plus
+    // a local tie-offset skip below — same pattern as LAST_SYNC_CURSOR_TIE_
+    // OFFSET in pollTaskChanges — instead of a strict `after` filter, which
+    // would silently drop the remainder of a tied group if the pagination
+    // limit had landed inside one (`last_edited_time` is minute-granular, so
+    // many Done Tasks can plausibly share one value).
+    const tieOffset = resumeCursor ? Number(props.getProperty('BACKFILL_RESUME_TIE_OFFSET') || '0') : 0;
     const filter = resumeCursor
       ? { and: [
           { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } },
-          { timestamp: 'last_edited_time', last_edited_time: { after: resumeCursor } },
+          { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
         ] }
       : { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } };
     const doneTasks = paginateNotionQuery_(
@@ -333,19 +367,46 @@ function backfillResultFingerprints_() {
         sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
       }
     );
-    const outcomes = doneTasks.results.map(function (task) {
+    let startIndex = 0;
+    if (resumeCursor && tieOffset > 0) {
+      let skipped = 0;
+      while (
+        startIndex < doneTasks.results.length &&
+        skipped < tieOffset &&
+        String(doneTasks.results[startIndex].last_edited_time || '') === resumeCursor
+      ) {
+        skipped++;
+        startIndex++;
+      }
+    }
+    const toProcess = doneTasks.results.slice(startIndex);
+    const outcomes = toProcess.map(function (task) {
       return reconcileTaskPage_(task);
     });
-    if (doneTasks.truncated && doneTasks.results.length) {
-      const lastSeen = String(doneTasks.results[doneTasks.results.length - 1].last_edited_time || '');
-      if (lastSeen) props.setProperty('BACKFILL_RESUME_CURSOR', lastSeen);
+    if (doneTasks.truncated && toProcess.length) {
+      const lastSeen = String(toProcess[toProcess.length - 1].last_edited_time || '');
+      if (lastSeen) {
+        props.setProperty('BACKFILL_RESUME_CURSOR', lastSeen);
+        let newTieOffset = 0;
+        for (let i = 0; i < toProcess.length; i++) {
+          newTieOffset = String(toProcess[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
+        }
+        props.setProperty('BACKFILL_RESUME_TIE_OFFSET', String(newTieOffset));
+      }
       Logger.log('backfillResultFingerprints_: result set truncated at the pagination safety limit — call again to resume from ' + lastSeen + '.');
+    } else if (doneTasks.truncated) {
+      // Truncated AND nothing new this call (the whole returned batch was
+      // already covered by the tie-offset skip): leave BACKFILL_RESUME_
+      // CURSOR/TIE_OFFSET exactly as they were rather than losing the resume
+      // point — same "no progress, don't touch persisted state" rule
+      // pollTaskChanges applies for the identical scenario.
     } else {
       // Fully drained (or nothing left to see): clear any stale resume point
       // so a future call starts a fresh full pass rather than silently
       // skipping Tasks edited before wherever a prior backfill happened to
       // stop.
       props.setProperty('BACKFILL_RESUME_CURSOR', '');
+      props.setProperty('BACKFILL_RESUME_TIE_OFFSET', '');
     }
     return { scanned: outcomes.length, truncated: doneTasks.truncated, outcomes: outcomes };
   });
@@ -422,14 +483,21 @@ function queryChangedTasks_(since) {
 // can be drained across repeated bootstrap runs instead of the exact same
 // unsorted, un-resumed prefix being returned every time.
 function queryActiveInProgressTasks_() {
-  const resumeCursor = PropertiesService.getScriptProperties().getProperty('BOOTSTRAP_ACTIVE_RESUME_CURSOR');
+  const props = PropertiesService.getScriptProperties();
+  const resumeCursor = props.getProperty('BOOTSTRAP_ACTIVE_RESUME_CURSOR');
+  // on_or_after (not a strict after) plus a local tie-offset skip — same
+  // pattern as backfillResultFingerprints_ and LAST_SYNC_CURSOR_TIE_OFFSET —
+  // so a resumed call is not silently missing whatever unretrieved active
+  // Tasks still share the exact resume timestamp (last_edited_time is
+  // minute-granular).
+  const tieOffset = resumeCursor ? Number(props.getProperty('BOOTSTRAP_ACTIVE_RESUME_TIE_OFFSET') || '0') : 0;
   const filter = resumeCursor
     ? { and: [
         { property: 'Status', status: { equals: DEFAULTS.START_STATUS } },
-        { timestamp: 'last_edited_time', last_edited_time: { after: resumeCursor } },
+        { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
       ] }
     : { property: 'Status', status: { equals: DEFAULTS.START_STATUS } };
-  return paginateNotionQuery_(
+  const result = paginateNotionQuery_(
     '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
     {
       page_size: 100,
@@ -437,6 +505,19 @@ function queryActiveInProgressTasks_() {
       sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
     }
   );
+  let startIndex = 0;
+  if (resumeCursor && tieOffset > 0) {
+    let skipped = 0;
+    while (
+      startIndex < result.results.length &&
+      skipped < tieOffset &&
+      String(result.results[startIndex].last_edited_time || '') === resumeCursor
+    ) {
+      skipped++;
+      startIndex++;
+    }
+  }
+  return { results: result.results.slice(startIndex), truncated: result.truncated };
 }
 
 // Dedups two Task-page lists by page ID (first occurrence wins) and returns
@@ -587,16 +668,25 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   // on file for this Task that is NOT part of the current execution.
   //
   // A single execution can produce more than one closed event — an
-  // in-progress reassignment closes the outgoing actor's event and opens the
-  // incoming actor's at the identical timestamp (reconcileAuthoritativeTime
-  // Events_), so consecutive events from the same execution always touch
-  // with zero gap: one's Ended At exactly equals the next one's Started At.
-  // A genuinely prior (separate, already-completed) execution's most recent
-  // event has no such successor touching it — there was a gap while the Task
-  // sat outside In Progress before being reopened. So: walk backward from the
-  // most-recently-closed event through that exact adjacency to collect every
-  // event belonging to the same unbroken execution; anything left over is
-  // fair evidence of a genuinely earlier execution.
+  // in-progress reassignment (including an assignee being cleared and only
+  // later reassigned, which can leave a real time gap with no open event in
+  // between) closes the outgoing actor's event via
+  // reconcileAuthoritativeTimeEvents_'s 'reassignment' cleanup, and a
+  // duplicate open event is closed via its 'duplicate_reconciliation'
+  // cleanup — neither ever ends an execution, only 'left_in_progress' does.
+  // So membership is decided by that Reason marker alone, not by timestamp
+  // adjacency: an event closed 'reassignment' or 'duplicate_reconciliation'
+  // is unconditionally part of whatever execution is current, however far
+  // its own Ended At sits from anything else (an assignment gap, or a
+  // duplicate detected well after the fact, are exactly this). The
+  // most-recently-closed event is always the seed regardless of its own
+  // reason — it is the candidate applicable event this whole check exists to
+  // validate, never evidence against itself. Anything else — a genuine
+  // 'left_in_progress' close (the Task actually left In Progress there), or
+  // no reason at all (legacy data) — is a real execution boundary and stays
+  // prior-execution evidence even if it happens to coincide in time with
+  // something in the current one (e.g. both landing in the same Notion
+  // minute).
   const closedEvents = (allEvents || []).filter(function (eventPage) {
     return Boolean(propertyDate_(eventPage.properties['Ended At']));
   });
@@ -608,48 +698,12 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     }
   });
   const currentExecutionEventIds = {};
-  if (mostRecentClosedEvent) {
-    currentExecutionEventIds[mostRecentClosedEvent.id] = true;
-    let frontierStartedAt = eventStartedAt_(mostRecentClosedEvent);
-    let extended = true;
-    while (extended) {
-      extended = false;
-      closedEvents.forEach(function (eventPage) {
-        if (currentExecutionEventIds[eventPage.id]) return;
-        const endedAt = propertyDate_(eventPage.properties['Ended At']);
-        if (!endedAt || endedAt.getTime() !== frontierStartedAt.getTime()) return;
-        // Timestamp adjacency alone is not enough: a genuinely prior,
-        // already-completed execution's own closing event ('left_in_progress'
-        // — the Task actually left In Progress there) can coincidentally
-        // touch a LATER, separate execution's opening Started At — e.g. both
-        // land in the same Notion minute, or the Task was reopened at the
-        // exact observed edit time. Only extend the chain through a
-        // candidate whose OWN close reason marks it as still part of an
-        // unbroken execution (an in-progress reassignment or duplicate-open
-        // cleanup); 'left_in_progress' — or no reason at all, e.g. legacy
-        // data — is exactly the boundary a genuinely separate execution
-        // looks like, and must never be absorbed just because it happens to
-        // touch.
-        const candidateReason = parseNoteMeta_(propertyText_(eventPage.properties.Note)).reason;
-        if (candidateReason !== 'reassignment' && candidateReason !== 'duplicate_reconciliation') return;
-        currentExecutionEventIds[eventPage.id] = true;
-        frontierStartedAt = eventStartedAt_(eventPage);
-        extended = true;
-      });
-    }
-  }
-  // A duplicate open event (two open events for the same actor at once, a
-  // data artifact rather than a genuine second execution) is closed at
-  // whatever moment the reconciler happens to notice it — see
-  // reconcileAuthoritativeTimeEvents_'s 'duplicate_reconciliation' cleanup —
-  // which generally does not equal the surviving event's Started At, so the
-  // exact-adjacency chain-walk above would not reach it. It is still always
-  // an artifact of the SAME ongoing execution the surviving event belongs
-  // to, never a separate prior one, so it must not count as prior-execution
-  // evidence regardless of where its own Ended At happens to land.
+  if (mostRecentClosedEvent) currentExecutionEventIds[mostRecentClosedEvent.id] = true;
   closedEvents.forEach(function (eventPage) {
-    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
-    if (meta.reason === 'duplicate_reconciliation') currentExecutionEventIds[eventPage.id] = true;
+    const reason = parseNoteMeta_(propertyText_(eventPage.properties.Note)).reason;
+    if (reason === 'reassignment' || reason === 'duplicate_reconciliation') {
+      currentExecutionEventIds[eventPage.id] = true;
+    }
   });
   const priorTimestamp = latestEventTimestamp_((allEvents || []).filter(function (eventPage) {
     return !currentExecutionEventIds[eventPage.id];
@@ -1175,23 +1229,31 @@ function clip_(value, maxLength) {
 // etc., from buildNote_) onto `existingNote`, keeping the combined text
 // within maxLength. Unlike clipping the combined string from the end, this
 // never risks truncating the marker being written *right now*: if the note
-// would overflow, whole leading (oldest) ' | '-delimited segments of
-// existingNote are dropped first, since parseNoteMeta_/noteField_ already
-// prefer the last occurrence of a key — the newest information is what
-// matters, so losing old history here is fine, but silently corrupting the
-// marker just written (e.g. a Result Fingerprint stamp becoming unparseable,
-// or a rollback Reason getting cut mid-word) is not: it would defeat the
-// very check the marker exists for.
+// would overflow, whole ' | '-delimited segments of existingNote are dropped
+// to make room instead. Which ones: oldest non-fingerprint segments first —
+// parseNoteMeta_/noteField_ already prefer the last occurrence of a key for
+// Reason=/Snapshot=/Changed By=/End Status=, so only the newest of those
+// ever matters and losing old ones is harmless — and only once none of
+// those remain does it fall back to dropping the oldest 'Result
+// Fingerprint=' segment(s). Stale-Result detection (enforceDoneGate_) needs
+// EVERY fingerprint an event ever recorded to survive as long as possible,
+// not just the newest, so those are the last thing evicted, not the first.
+// Silently corrupting the marker just written (e.g. truncating mid-hash, or
+// cutting a rollback Reason mid-word) is never acceptable either way: it
+// would defeat the very check the marker exists for.
 function appendNote_(existingNote, marker, maxLength) {
   const clippedMarker = clip_(marker, maxLength);
   if (!existingNote) return clippedMarker;
   const separator = ' | ';
-  let combined = existingNote + separator + clippedMarker;
-  if (combined.length <= maxLength) return combined;
+  const isFingerprintSegment = function (segment) {
+    return segment.trim().indexOf('Result Fingerprint=') === 0;
+  };
   const segments = existingNote.split(separator);
+  let combined = segments.concat([clippedMarker]).join(separator);
   while (segments.length && combined.length > maxLength) {
-    segments.shift();
-    combined = segments.length ? segments.join(separator) + separator + clippedMarker : clippedMarker;
+    const dropIndex = segments.findIndex(function (segment) { return !isFingerprintSegment(segment); });
+    segments.splice(dropIndex >= 0 ? dropIndex : 0, 1);
+    combined = segments.length ? segments.concat([clippedMarker]).join(separator) : clippedMarker;
   }
   return combined;
 }

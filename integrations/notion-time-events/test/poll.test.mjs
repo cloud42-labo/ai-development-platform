@@ -309,6 +309,66 @@ test('a truncated active-Task bootstrap query keeps retrying (and resuming) on l
   assert.equal(firstAttemptPages, firstAttemptPagesBefore);
 });
 
+test('the resumed active-Task bootstrap query uses on_or_after and correctly resumes within a tied timestamp', () => {
+  // Mirrors the backfill's tie-resume test: a strict `after` filter would
+  // silently drop the remainder of a tied group of active Tasks once the
+  // pagination limit lands inside one. Models a realistic boundary: 47
+  // active Tasks with distinct timestamps, then a tied group of 8 sharing
+  // one timestamp that straddles the truncation point.
+  const distinctCount = 47;
+  const tiedTimestamp = '2026-08-01T02:00:00.000Z';
+  const allTasks = [];
+  for (let i = 1; i <= distinctCount; i++) {
+    allTasks.push(taskPage('3cafbd82-6f3b-8158-9622-d795b43dk' + String(i).padStart(3, '0'), {
+      status: 'In Progress', agent: 'Claude Opus',
+      lastEdited: '2026-08-01T00:' + String(i).padStart(2, '0') + ':00.000Z',
+      startedAt: '2026-08-01T00:' + String(i).padStart(2, '0') + ':00.000Z',
+    }));
+  }
+  for (let i = 1; i <= 8; i++) {
+    allTasks.push(taskPage('3cafbd82-6f3b-8158-9622-d795b43dl' + String(i).padStart(3, '0'), {
+      status: 'In Progress', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp,
+    }));
+  }
+
+  const resumedFilters = [];
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const isActiveStatusQuery = Boolean(
+        (body.filter && body.filter.property === 'Status') ||
+        (body.filter && body.filter.and && body.filter.and.some((f) => f.property === 'Status'))
+      );
+      if (!isActiveStatusQuery) return { results: [], has_more: false };
+      const resumed = Boolean(body.filter.and);
+      if (resumed) resumedFilters.push(body.filter);
+      const pageIndex = body.start_cursor ? Number(body.start_cursor) : (resumed ? distinctCount : 0);
+      const task = allTasks[pageIndex];
+      if (!task) return { results: [], has_more: false };
+      return { results: [task], has_more: pageIndex + 1 < allTasks.length, next_cursor: String(pageIndex + 1) };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  const firstRun = sandbox.pollTaskChanges();
+  assert.equal(firstRun.bootstrap, true);
+  assert.equal(scriptProps.get('BOOTSTRAP_ACTIVE_RESUME_TIE_OFFSET'), '3'); // 3 of the 8 tied retrieved in the truncated batch
+
+  const secondRun = sandbox.pollTaskChanges();
+
+  const opened = secondRun.outcomes.filter((o) => /^opened:/.test(o));
+  assert.equal(opened.length, 5, 'expected the 5 remaining tied active Tasks to be reached: ' + JSON.stringify(secondRun.outcomes));
+  assert.equal(scriptProps.get('BOOTSTRAP_ACTIVE_DONE'), '1');
+  const onOrAfterClause = resumedFilters[0].and.find((f) => f.timestamp === 'last_edited_time');
+  assert.ok(onOrAfterClause.last_edited_time.on_or_after, 'expected an on_or_after (not after) clause');
+});
+
 test('overlap duplicates are skipped for free, so a dense duplicate cluster does not stall the unprocessed tail', () => {
   const cursor = '2026-08-30T06:00:00.000Z';
   const oldTasks = [];
@@ -524,6 +584,63 @@ test('a wall-clock cutoff landing inside a tied-timestamp Done cohort resumes pa
   // inside the tie was scanned more than once, i.e. the tie was not
   // correctly resumed.
   assert.equal(requestsTo(fetchLog, 'POST', EVENTS_DS).length, 22);
+});
+
+test('a truncated query whose tie is entirely already covered by the resume offset does not jump the cursor past it', () => {
+  // Regression: when a prior run's tie-skip already covers the FULL tied
+  // prefix a truncated query returns, this run's while loop never executes
+  // at all (iterated stays at startIndex === tasksToProcess.length), so
+  // lastScannedEdit is never set. Falling through to `runStartedAt` in that
+  // case would silently advance the cursor past whatever unretrieved data
+  // caused the truncation — the exact same category of data loss the tie
+  // offset mechanism exists to prevent, just triggered by a fully-consumed
+  // truncated batch instead of a partially-consumed one.
+  const cursor = '2026-08-30T05:59:00.000Z';
+  let pageCalls = 0;
+  const routes = {
+    [TASKS_QUERY]: () => {
+      pageCalls += 1;
+      // Every page shares the exact cursor timestamp; force truncation via
+      // QUERY_PAGE_SAFETY_LIMIT (50 pages) with only the first 10 carrying a
+      // Task, so the truncated result set ends up with exactly 10 tied
+      // items — all of which the pre-seeded tie offset below already covers.
+      const task = pageCalls <= 10
+        ? [taskPage('3cafbd82-6f3b-8158-9622-d795b43df' + String(pageCalls).padStart(3, '0'), {
+            status: 'Ready',
+            agent: 'Human',
+            lastEdited: cursor,
+          })]
+        : [];
+      return { results: task, has_more: true, next_cursor: 'c' + pageCalls };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      LAST_SYNC_CURSOR: cursor,
+      // Already covers more than the entire truncated batch this query can
+      // ever return (only 10 tied Tasks per call).
+      LAST_SYNC_CURSOR_TIE_OFFSET: '1000000',
+    },
+    fetch: notionFetchStub(routes),
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.deepEqual(plain(summary.outcomes), []); // nothing new was scanned this run
+  assert.equal(summary.truncated, true);
+  assert.equal(summary.capped, true);
+  // The cursor and its tie offset must be left exactly as they were, not
+  // advanced to "now" and not reset — the next run needs the same resume
+  // state to keep trying (or for an operator to notice and intervene on
+  // this extreme-scale case, per README "Known limitations").
+  assert.equal(scriptProps.get('LAST_SYNC_CURSOR'), cursor);
+  assert.equal(scriptProps.get('LAST_SYNC_CURSOR_TIE_OFFSET'), '1000000');
 });
 
 test('25+ already-valid Done Tasks inside the overlap do not exhaust the batch and starve a later changed Task', () => {
@@ -927,11 +1044,132 @@ test('backfillResultFingerprints_ resumes past what it already backfilled when t
 
   sandbox.backfillResultFingerprints_();
 
-  // The second call's query must be filtered to strictly after the persisted
+  // The second call's query must be filtered to on-or-after the persisted
   // resume cursor — not the same bare Status filter as the first call, which
-  // would just return the identical 50-page prefix again.
+  // would just return the identical 50-page prefix again. on_or_after (not
+  // a strict after) plus the local tie-offset skip is what correctly
+  // resumes within a tied group instead of silently dropping its remainder
+  // — see the dedicated tie test below.
   const secondCallFilter = seenFilters[seenFilters.length - 50];
   assert.ok(secondCallFilter.and, 'expected the resumed call to use a compound and-filter');
-  const afterClause = secondCallFilter.and.find((f) => f.timestamp === 'last_edited_time');
-  assert.equal(afterClause.last_edited_time.after, resumeCursor);
+  const onOrAfterClause = secondCallFilter.and.find((f) => f.timestamp === 'last_edited_time');
+  assert.equal(onOrAfterClause.last_edited_time.on_or_after, resumeCursor);
+});
+
+test('backfillResultFingerprints_ resumes past a tied timestamp instead of dropping its remainder', () => {
+  // Regression: a strict `after: resumeCursor` filter would exclude every
+  // unretrieved Task still sharing that exact timestamp once the pagination
+  // limit lands inside a tied group (last_edited_time is minute-granular,
+  // so a handful of Done Tasks can plausibly share one value right at an
+  // arbitrary 5000-row page boundary) — the backfill would silently give up
+  // on the remainder of the tie forever. Models a realistic boundary: 47
+  // Tasks with distinct timestamps, followed by a tied group of 8 sharing
+  // one timestamp that straddles the truncation point (3 retrieved in the
+  // first call, 5 left over) — not an entire history sharing one minute,
+  // which the underlying `on_or_after` query itself has no way to further
+  // paginate within (a separate, extreme-scale limitation — see README).
+  const distinctCount = 47;
+  const tiedTimestamp = '2026-08-01T02:00:00.000Z';
+  const allTasks = [];
+  for (let i = 1; i <= distinctCount; i++) {
+    allTasks.push(taskPage('3cafbd82-6f3b-8158-9622-d795b43dh' + String(i).padStart(3, '0'), {
+      status: 'Done', agent: 'Claude Opus',
+      lastEdited: '2026-08-01T00:' + String(i).padStart(2, '0') + ':00.000Z',
+      startedAt: '2026-08-01T00:' + String(i).padStart(2, '0') + ':00.000Z',
+    }));
+  }
+  for (let i = 1; i <= 8; i++) {
+    allTasks.push(taskPage('3cafbd82-6f3b-8158-9622-d795b43di' + String(i).padStart(3, '0'), {
+      status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp,
+    }));
+  }
+  allTasks.forEach(function (task) {
+    task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+    task.properties['Completed At'] = { type: 'date', date: { start: task.last_edited_time } };
+  });
+
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const resumed = Boolean(body.filter && body.filter.and);
+      if (resumed) resumedFilters.push(body.filter);
+      // A fresh (non-resumed) query starts at index 0; a resumed one starts
+      // directly at the tied group — modeling that `on_or_after` genuinely
+      // narrows the server-side result set rather than replaying everything.
+      const pageIndex = body.start_cursor ? Number(body.start_cursor) : (resumed ? distinctCount : 0);
+      const task = allTasks[pageIndex];
+      if (!task) return { results: [], has_more: false };
+      return { results: [task], has_more: pageIndex + 1 < allTasks.length, next_cursor: String(pageIndex + 1) };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const resumedFilters = [];
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  const firstRun = sandbox.backfillResultFingerprints_();
+  assert.equal(firstRun.truncated, true);
+  assert.equal(firstRun.scanned, 50); // 47 distinct + first 3 of the 8 tied
+  assert.equal(scriptProps.get('BACKFILL_RESUME_TIE_OFFSET'), '3');
+
+  const secondRun = sandbox.backfillResultFingerprints_();
+
+  // The 5 remaining tied Tasks must still be reached — none silently
+  // dropped just because they share the resume cursor's exact timestamp.
+  assert.equal(secondRun.scanned, 5);
+  assert.equal(secondRun.truncated, false);
+  // The resumed query itself must use on_or_after (inclusive of the tied
+  // boundary), not a strict after that would exclude same-timestamp
+  // siblings at the source — the local tie-offset skip is what avoids
+  // re-processing what on_or_after's inclusivity re-returns.
+  const onOrAfterClause = resumedFilters[0].and.find((f) => f.timestamp === 'last_edited_time');
+  assert.ok(onOrAfterClause.last_edited_time.on_or_after, 'expected an on_or_after (not after) clause');
+});
+
+test('a truncated backfill call whose tie is entirely already covered does not lose the resume point', () => {
+  // Mirrors the pollTaskChanges "fully skipped tie" test: when a prior
+  // call's tie offset already covers every Task a resumed, truncated query
+  // returns, nothing new gets processed this call — the resume state must
+  // be left exactly as it was rather than cleared or corrupted.
+  const cursor = '2026-08-01T02:00:00.000Z';
+  let pageCalls = 0;
+  const routes = {
+    [TASKS_QUERY]: () => {
+      pageCalls += 1;
+      // Every page shares the exact cursor timestamp; force truncation via
+      // QUERY_PAGE_SAFETY_LIMIT with only the first 10 carrying a Task.
+      const task = pageCalls <= 10
+        ? [taskPage('3cafbd82-6f3b-8158-9622-d795b43dj' + String(pageCalls).padStart(3, '0'), {
+            status: 'Done', agent: 'Claude Opus', lastEdited: cursor, startedAt: cursor,
+          })]
+        : [];
+      return { results: task, has_more: true, next_cursor: 'c' + pageCalls };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      BACKFILL_RESUME_CURSOR: cursor,
+      // Already covers more than the entire truncated batch this query can
+      // ever return (only 10 tied Tasks per call).
+      BACKFILL_RESUME_TIE_OFFSET: '1000000',
+    },
+    fetch: notionFetchStub(routes),
+  });
+
+  const summary = sandbox.backfillResultFingerprints_();
+
+  assert.equal(summary.scanned, 0);
+  assert.equal(summary.truncated, true);
+  assert.equal(scriptProps.get('BACKFILL_RESUME_CURSOR'), cursor);
+  assert.equal(scriptProps.get('BACKFILL_RESUME_TIE_OFFSET'), '1000000');
 });
