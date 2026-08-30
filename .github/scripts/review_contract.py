@@ -22,16 +22,35 @@ deeper (`####...`) inside a section's own content is not a boundary and is
 treated as ordinary content, matching how the PR template never nests that
 deep.
 
-HTML comments are stripped from the ENTIRE body first, before any heading
-is looked for -- not per-section after splitting. A per-section strip
-cannot catch a comment that itself SPANS a heading boundary (e.g. opened
-right after `### Purpose / Contract` and closed after the final required
-section, with every other required heading and its placeholder text
-sitting inside that one comment): each fragment produced by splitting on
-the hidden headings would see only half of the `<!--`/`-->` pair, so
-neither half's own `.sub()` call would ever match, and the "commented out"
-text would be wrongly counted as real content. Stripping first means those
-headings are never even seen as headings at all.
+HTML comments and fenced code blocks are hidden from the ENTIRE body
+first, in one line-oriented structural pass (`_strip_hidden_regions`),
+before any heading is looked for at all -- not per-section after
+splitting, and not with a single `.sub()` call. Two things a plain
+"replace every `<!--.*?-->` pair" regex gets wrong:
+
+- A comment that itself SPANS a heading boundary (e.g. opened right after
+  `### Purpose / Contract` and closed after the final required section,
+  with every other required heading and its placeholder text sitting
+  inside that one comment) needs stripping *before* splitting -- each
+  fragment produced by splitting on the hidden headings would otherwise
+  see only half of the `<!--`/`-->` pair, so neither half's own `.sub()`
+  call would ever match, and the "commented out" text would be wrongly
+  counted as real content.
+- A comment that never closes at all (`<!--` with no matching `-->`
+  anywhere in the rest of the body) matches nothing under `.*?-->`, so a
+  non-greedy regex leaves it -- and every heading after it -- completely
+  visible, the opposite of hidden. `_strip_hidden_regions` tracks comment
+  state explicitly line by line: once an unmatched `<!--` is seen, every
+  line after it is hidden through end-of-document, exactly like a real
+  Markdown renderer would treat it (an unterminated comment consumes the
+  rest of the document, it doesn't silently reveal it).
+
+The same pass also hides fenced code block bodies (``` ``` ``` `/`~~~`
+fences). A PR body can legitimately show the five required `###` headings
+as prose *inside* a fenced example (e.g. documenting what the template
+looks like) without actually completing the real contract -- heading
+discovery must never treat a `###` line that only exists as code text
+inside a fence as a real section boundary.
 """
 
 from __future__ import annotations
@@ -59,6 +78,69 @@ _SETEXT_HEADING_RE = re.compile(
 )
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _EMPTY_BULLET_RE = re.compile(r"(?m)^[ \t]*[-*+][ \t]*$")
+_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+
+
+def _strip_hidden_regions(body: str) -> str:
+    """Hides fenced code block bodies and HTML comments from `body` in a
+    single line-oriented pass, returning a same-line-count string safe to
+    run heading discovery against (see module docstring for why a single
+    `.sub()` regex handles neither case correctly).
+
+    A hidden fenced-code line becomes an empty line. A comment is hidden
+    character-for-character where it appears (mid-line comments leave the
+    rest of that line visible); an unmatched `<!--` hides everything from
+    that point through the end of the document, never just leaving it
+    visible by default. Line count is preserved so downstream heading
+    discovery and section slicing -- which both index into this returned
+    string, not the original body -- stay internally consistent.
+    """
+    lines = body.replace("\r\n", "\n").split("\n")
+    visible_lines: list[str] = []
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    in_comment = False
+
+    for line in lines:
+        if in_fence:
+            match = _FENCE_RE.match(line)
+            if match and match.group(1)[0] == fence_char and len(match.group(1)) >= fence_len:
+                in_fence = False
+            visible_lines.append("")
+            continue
+
+        if not in_comment:
+            match = _FENCE_RE.match(line)
+            if match:
+                in_fence = True
+                fence_char = match.group(1)[0]
+                fence_len = len(match.group(1))
+                visible_lines.append("")
+                continue
+
+        parts: list[str] = []
+        pos = 0
+        while True:
+            if in_comment:
+                close = line.find("-->", pos)
+                if close == -1:
+                    pos = len(line)
+                    break
+                in_comment = False
+                pos = close + 3
+                continue
+            open_idx = line.find("<!--", pos)
+            if open_idx == -1:
+                parts.append(line[pos:])
+                pos = len(line)
+                break
+            parts.append(line[pos:open_idx])
+            pos = open_idx + 4
+            in_comment = True
+        visible_lines.append("".join(parts))
+
+    return "\n".join(visible_lines)
 
 
 @dataclass(frozen=True)
@@ -86,14 +168,15 @@ def _find_headings(body: str):
 def split_sections(body: str) -> list[Section]:
     """Splits `body` into Markdown sections at every heading of level 1-3.
 
-    HTML comments are stripped from the whole body FIRST (see module
-    docstring for why a per-section strip cannot substitute for this).
-    Each section's `content` runs from immediately after its own heading
-    line(s) to immediately before the next level-1..3 heading (ATX or
-    Setext) or end of string. Content before the first heading is
-    discarded (not part of any named section, and never required).
+    HTML comments and fenced code blocks are hidden from the whole body
+    FIRST (see module docstring for why a per-section, single-regex strip
+    cannot substitute for this). Each section's `content` runs from
+    immediately after its own heading line(s) to immediately before the
+    next level-1..3 heading (ATX or Setext) or end of string. Content
+    before the first heading is discarded (not part of any named section,
+    and never required).
     """
-    body = _HTML_COMMENT_RE.sub("", body.replace("\r\n", "\n"))
+    body = _strip_hidden_regions(body)
     headings = _find_headings(body)
     sections: list[Section] = []
     for index, (_start, end, level, name) in enumerate(headings):

@@ -208,6 +208,55 @@ class SectionBoundaryScenarios(unittest.TestCase):
         sections = {s.name: s.content for s in split_sections(body) if s.level == 3}
         self.assertIn("More text that must still count", sections["Known Limitations / Non-goals"])
 
+    def test_unclosed_html_comment_hides_everything_after_it_through_end_of_body(self):
+        # Codex-reported gap: `<!--.*?-->` matches nothing when the opener
+        # has no matching closer anywhere in the rest of the document -- a
+        # non-greedy regex leaves an unmatched `<!--` (and everything after
+        # it) completely VISIBLE, the opposite of hidden. A real Markdown
+        # renderer treats an unterminated comment as consuming the rest of
+        # the document, not silently revealing it.
+        body = (
+            "### Purpose / Contract\n\nReal purpose.\n\n"
+            "### Invariants\n\n- I1. Real invariant.\n\n"
+            "### Adversarial Scenarios\n\n- A1. Real scenario.\n\n"
+            "### Validation\n\n- Real validation mapping.\n\n"
+            "<!-- opens here and never closes\n"
+            "### Known Limitations / Non-goals\n\n- Real limitation.\n"
+        )
+        failures = validate(body)
+        self.assertIn("missing heading: Known Limitations / Non-goals", failures)
+
+    def test_headings_inside_a_fenced_code_block_are_not_boundaries_or_content(self):
+        # Codex-reported gap: a PR body can legitimately show what the
+        # template looks like inside a fenced example -- complete with all
+        # five required `###` headings and prose -- without the real
+        # contract sections actually being filled in anywhere. Heading
+        # discovery must not treat a `###` line that only exists as code
+        # text inside a fence as a real section boundary.
+        body = (
+            "Here is what the template looks like:\n\n"
+            "```markdown\n"
+            "### Purpose / Contract\n\nExample purpose text.\n\n"
+            "### Invariants\n\n- Example invariant.\n\n"
+            "### Adversarial Scenarios\n\n- Example scenario.\n\n"
+            "### Validation\n\n- Example validation.\n\n"
+            "### Known Limitations / Non-goals\n\n- Example limitation.\n"
+            "```\n"
+        )
+        failures = validate(body)
+        for name in REQUIRED_SECTIONS:
+            self.assertIn(f"missing heading: {name}", failures)
+
+    def test_a_real_heading_immediately_after_a_closed_fence_is_still_found(self):
+        # The fence-hiding pass must not swallow content after the fence
+        # closes -- only the fenced region itself is hidden.
+        body = (
+            "```\nsome code\n```\n\n"
+            "### Known Limitations / Non-goals\n\nReal limitation text.\n"
+        )
+        sections = {s.name: s.content for s in split_sections(body) if s.level == 3}
+        self.assertIn("Real limitation text", sections["Known Limitations / Non-goals"])
+
 
 class EmptySectionDetection(unittest.TestCase):
     def test_html_comment_only_section_is_empty_for_every_required_section(self):
