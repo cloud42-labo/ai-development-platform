@@ -66,8 +66,12 @@ optional_adapters: []
 
 # Where an adopting agent/script finds the four asset classes above, and
 # where this deployment's own environment-specific values (Notion workspace,
-# GitHub org/repo names, named AI roles) are catalogued separately from the
-# package body. Added by ADP-049-C; see package/README.md for why this is a
+# GitHub org/repo names, named AI roles) are documented for manual reference.
+# This is a catalogue an adopter reads, not a substitution mechanism — the
+# canonical files under package_root's index still contain Cloud42's values
+# as-is (see package/README.md's "Environment-specific values" for why, and
+# for ADP-049-D, which is where actual compile-time substitution belongs).
+# Added by ADP-049-C; see package/README.md for why package_root is a
 # reference index rather than a physical file move.
 package_root: package/README.md
 example_config: examples/cloud42-labo-config.md

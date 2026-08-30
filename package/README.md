@@ -50,8 +50,19 @@ not embed this organization's concrete values. The canonical files they point
 to are the **live operating documents for `cloud42-labo`** and, as such, do
 contain this organization's own Notion links, GitHub org/repo names, and
 named AI roles — stripping those out would break this repository's current
-operational use. Where those values live, and what an adopting organization
-would substitute instead, is catalogued separately in
-[`../examples/cloud42-labo-config.md`](../examples/cloud42-labo-config.md),
-per `adp-package.yaml`'s `required_capabilities` and the Freeze-scope
-exception in `../docs/v1-asset-inventory.md`.
+operational use.
+
+**This is a catalogue, not a substitution mechanism.** Where those values
+live, and what an adopting organization would substitute instead, is
+*documented* — one file to read, not a repository-wide search — in
+[`../examples/cloud42-labo-config.md`](../examples/cloud42-labo-config.md).
+Reading that file does not itself reconfigure anything: an adopter today
+still edits the canonical Rules/Workflows files by hand for each value
+listed there. Actually compiling this package against an adopter's own
+values (so the canonical files a new environment reads never contained
+Cloud42's values in the first place) is out of `ADP-049-C`'s scope and is
+`ADP-049-D`'s job — "Bootstrap Skill で Install/Configure を自動化する",
+Backlog, reads the manifest and package assets and compiles/deploys them
+into a target environment rather than requiring manual edits. Until
+`ADP-049-D` exists, treat this catalogue as a reading aid for a manual
+edit, not as the config/adapter boundary itself.
