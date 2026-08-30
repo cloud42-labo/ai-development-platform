@@ -360,6 +360,45 @@ test('a reopened Task starts its new interval from the current Started At, not a
   assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:10:00.000Z');
 });
 
+test('a query that hits the pagination safety limit does not let the cursor advance past unretrieved data', () => {
+  const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d1f01', {
+    status: 'Ready',
+    agent: 'Human',
+    lastEdited: '2026-08-30T05:00:00.000Z',
+  });
+
+  let calls = 0;
+  const routes = {
+    [TASKS_QUERY]: () => {
+      calls++;
+      // Always claims there is more, so pagination never terminates
+      // naturally — only the safety limit (50 pages) stops it.
+      return { results: [task], has_more: true, next_cursor: 'cursor-' + calls };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      LAST_SYNC_CURSOR: '2026-08-30T04:00:00.000Z', // not a bootstrap run
+    },
+    fetch: notionFetchStub(routes),
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.truncated, true);
+  assert.equal(summary.capped, true);
+  // The cursor must hold at the last Task actually scanned, not jump ahead
+  // to "now" — there is unretrieved data beyond the 50-page safety limit
+  // that this run never saw.
+  assert.equal(scriptProps.get('LAST_SYNC_CURSOR'), '2026-08-30T05:00:00.000Z');
+});
+
 test('a poll that is already running is skipped without advancing the cursor', () => {
   const { sandbox, fetchLog, scriptProps } = harness({
     lockHeld: true,

@@ -114,7 +114,7 @@ function pollTaskChanges() {
     const sinceMs = (cursor ? parseTimestamp_(cursor).getTime() : runStartedAt.getTime() - INITIAL_LOOKBACK_MS)
       - SYNC_OVERLAP_MS;
 
-    const changed = queryChangedTasks_(new Date(sinceMs));
+    const changedResult = queryChangedTasks_(new Date(sinceMs));
 
     // On a fresh deploy (no cursor yet), a Task that has been sitting In
     // Progress since before the initial lookback window would never surface
@@ -123,9 +123,16 @@ function pollTaskChanges() {
     // any applicable interval once it eventually moves. Bootstrap once, only
     // when there is no cursor, by also pulling every currently In Progress
     // Task directly by Status, independent of last_edited_time.
+    const activeResult = isBootstrap ? queryActiveInProgressTasks_() : null;
     const tasksToProcess = isBootstrap
-      ? mergeTasksById_(changed, queryActiveInProgressTasks_())
-      : changed;
+      ? mergeTasksById_(changedResult.results, activeResult.results)
+      : changedResult.results;
+    // Either query hitting its own pagination safety limit (an incremental
+    // window, or the active-Task set, wider than QUERY_PAGE_SAFETY_LIMIT
+    // pages) means tasksToProcess is not actually the complete set for this
+    // run, even once every element in it has been scanned. The cursor must
+    // not advance past data that was never retrieved.
+    const sourceTruncated = changedResult.truncated || Boolean(activeResult && activeResult.truncated);
 
     const outcomes = [];
     let reconciledCount = 0;
@@ -153,13 +160,14 @@ function pollTaskChanges() {
       if (!isFreeOutcome_(outcome)) reconciledCount++;
     }
 
-    // If the run did not reach the end of tasksToProcess, the cursor must
+    // If the run did not reach the end of tasksToProcess, OR tasksToProcess
+    // itself was not the complete set (sourceTruncated), the cursor must
     // stay at the last Task actually scanned rather than jumping to now —
-    // otherwise the untouched tail of this window would be skipped
-    // permanently. A run that reached the end advances to the moment the
-    // query was issued, so edits made while it ran are still inside the next
-    // run's overlap.
-    const capped = iterated < tasksToProcess.length;
+    // otherwise the untouched (or unretrieved) tail of this window would be
+    // skipped permanently. A run that reached a genuinely complete end
+    // advances to the moment the query was issued, so edits made while it
+    // ran are still inside the next run's overlap.
+    const capped = iterated < tasksToProcess.length || sourceTruncated;
     props.setProperty(
       'LAST_SYNC_CURSOR',
       capped && lastScannedEdit ? lastScannedEdit : runStartedAt.toISOString()
@@ -169,6 +177,7 @@ function pollTaskChanges() {
       scanned: tasksToProcess.length,
       processed: reconciledCount,
       capped: capped,
+      truncated: sourceTruncated,
       bootstrap: isBootstrap,
       outcomes: outcomes,
     };
@@ -228,71 +237,35 @@ function reconcileTaskPage_(task) {
 }
 
 // Tasks whose last_edited_time is at or after `since`, oldest first, so a
-// capped run leaves a contiguous unprocessed tail behind the cursor.
+// capped run leaves a contiguous unprocessed tail behind the cursor. Returns
+// { results, truncated } — see paginateNotionQuery_.
 function queryChangedTasks_(since) {
-  let cursor = null;
-  let pageCount = 0;
-  const results = [];
-
-  do {
-    const body = {
+  return paginateNotionQuery_(
+    '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+    {
       page_size: 100,
       filter: {
         timestamp: 'last_edited_time',
         last_edited_time: { on_or_after: since.toISOString() },
       },
       sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
-    };
-    if (cursor) body.start_cursor = cursor;
-
-    const response = notionRequest_(
-      'post',
-      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
-      body
-    );
-
-    (response.results || []).forEach(function (item) {
-      if (item && item.object === 'page') results.push(item);
-    });
-
-    cursor = response.has_more ? response.next_cursor : null;
-    pageCount++;
-  } while (cursor && pageCount < 5);
-
-  return results;
+    }
+  );
 }
 
 // Bootstrap-only query: every Task currently Status = In Progress, regardless
 // of last_edited_time. Used exactly once per fresh deploy (or cursor reset),
 // so a Task that has been active since before the initial lookback window
-// still gets an open Time Event instead of never receiving one.
+// still gets an open Time Event instead of never receiving one. Returns
+// { results, truncated } — see paginateNotionQuery_.
 function queryActiveInProgressTasks_() {
-  let cursor = null;
-  let pageCount = 0;
-  const results = [];
-
-  do {
-    const body = {
+  return paginateNotionQuery_(
+    '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+    {
       page_size: 100,
       filter: { property: 'Status', status: { equals: DEFAULTS.START_STATUS } },
-    };
-    if (cursor) body.start_cursor = cursor;
-
-    const response = notionRequest_(
-      'post',
-      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
-      body
-    );
-
-    (response.results || []).forEach(function (item) {
-      if (item && item.object === 'page') results.push(item);
-    });
-
-    cursor = response.has_more ? response.next_cursor : null;
-    pageCount++;
-  } while (cursor && pageCount < 5);
-
-  return results;
+    }
+  );
 }
 
 // Dedups two Task-page lists by page ID (first occurrence wins) and returns
@@ -534,33 +507,25 @@ function closeNotionTimeEvent_(eventPage, endStatus, changedBy, snapshotId, when
 }
 
 function queryNotionTimeEventsForTask_(taskId) {
-  let cursor = null;
-  let pageCount = 0;
-  const results = [];
-
-  do {
-    const body = {
+  const result = paginateNotionQuery_(
+    '/v1/data_sources/' + encodeURIComponent(timeEventsDataSourceId_()) + '/query',
+    {
       page_size: 100,
       filter: { property: 'Task', relation: { contains: taskId } },
       sorts: [{ property: 'Started At', direction: 'descending' }],
-    };
-    if (cursor) body.start_cursor = cursor;
-
-    const response = notionRequest_(
-      'post',
-      '/v1/data_sources/' + encodeURIComponent(timeEventsDataSourceId_()) + '/query',
-      body
+    }
+  );
+  // A single Task accumulating more Time Events than the safety limit is not
+  // expected in normal operation. Fail loudly rather than silently
+  // reconciling (including a Done gate decision) against a truncated,
+  // possibly-incomplete event history.
+  if (result.truncated) {
+    throw new Error(
+      'queryNotionTimeEventsForTask_ hit the pagination safety limit for Task ' +
+      taskId + ' — more Time Events exist than were retrieved. Investigate before continuing.'
     );
-
-    (response.results || []).forEach(function (item) {
-      if (item && item.object === 'page') results.push(item);
-    });
-
-    cursor = response.has_more ? response.next_cursor : null;
-    pageCount++;
-  } while (cursor && pageCount < 5);
-
-  return results;
+  }
+  return result.results;
 }
 
 function syncTaskProjection_(taskId, taskTitle, taskUrl, currentStatus, fallbackChangedBy, fallbackSnapshotId) {
@@ -639,6 +604,43 @@ function notionRequest_(method, path, body) {
     throw new Error('Notion API failed: ' + method.toUpperCase() + ' ' + path + ' HTTP ' + code + ' ' + text);
   }
   return text ? JSON.parse(text) : {};
+}
+
+// Generous safety valve on paginated Notion data-source queries. High enough
+// that hitting it means something structurally unusual is going on (a huge
+// workspace, or a runaway result set) rather than normal operation — the
+// prior 5-page (500-row) cap was low enough to silently truncate a single
+// ordinary incremental poll window during a bulk edit. If this limit is hit,
+// `truncated: true` is returned so a caller (pollTaskChanges) never mistakes
+// a partial result for the complete set and advances its cursor past
+// unretrieved data.
+const QUERY_PAGE_SAFETY_LIMIT = 50;
+
+function paginateNotionQuery_(path, baseBody) {
+  let cursor = null;
+  let pageCount = 0;
+  const results = [];
+  let truncated = false;
+
+  do {
+    const body = Object.assign({}, baseBody);
+    if (cursor) body.start_cursor = cursor;
+
+    const response = notionRequest_('post', path, body);
+
+    (response.results || []).forEach(function (item) {
+      if (item && item.object === 'page') results.push(item);
+    });
+
+    cursor = response.has_more ? response.next_cursor : null;
+    pageCount++;
+    if (cursor && pageCount >= QUERY_PAGE_SAFETY_LIMIT) {
+      truncated = true;
+      cursor = null;
+    }
+  } while (cursor);
+
+  return { results: results, truncated: truncated };
 }
 
 function isConfiguredTask_(page) {

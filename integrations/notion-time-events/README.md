@@ -29,7 +29,7 @@ There is **no webhook, no public endpoint, and no receiver credential** anywhere
 - A Task observed as `Done` is **always** re-verified by the gate, even if its reconciliation snapshot happens to hash identically to one already processed (Notion reports `last_edited_time` at only minute granularity, so a same-minute rollback-and-retry can collide) — an invalid Done is never silently left in place because of a hash collision.
 - A newly opened Time Event starts from the Task's current `Started At` whenever that is at or after every timestamp already on file for the Task — covering both a first-ever event and a reopened Task — rather than from whatever moment the poll happened to observe the edit, so a later same-window edit (e.g. a reassignment moments after restart) cannot silently drop the time before it.
 - Valid completion order is: finish work → `Review` (time event closes) → record `Result` + `Completed At` → `Done`.
-- Reconciliation snapshots are derived from the authoritative Notion page (`last_edited_time`, Status, Assigned Agent). Recorded interval timestamps come from `last_edited_time` on the Task, **not** from when the poll happened, so a poll interval does not distort recorded effort.
+- Reconciliation snapshots are derived from the authoritative Notion page (`last_edited_time`, Status, Assigned Agent). Recorded interval timestamps come from `last_edited_time` on the Task, not from when the poll happened to run — this avoids polling-frequency itself distorting recorded effort, though `last_edited_time` carries its own bounded imprecision; see **Known limitations**.
 - Sheet rows are upserted by the authoritative Notion Task Time Event page ID.
 
 Actor mapping:
@@ -55,7 +55,7 @@ The relay was real work solving a real constraint, but the constraint only exist
 
 Removing the webhook removes the header problem, the relay, the relay secret, the verification-token enrollment dance, and the public endpoint, without changing what gets recorded.
 
-Trade-off, stated plainly: reconciliation is no longer near-instant. A change is picked up within one poll interval (5 minutes by default, tunable to 1). This delays a Done-gate rollback by up to that interval; it does **not** shift recorded `Started At` / `Ended At` values, which are read from Notion's own `last_edited_time`.
+Trade-off, stated plainly: reconciliation is no longer near-instant. A change is picked up within one poll interval (5 minutes by default, tunable to 1). This delays a Done-gate rollback by up to that interval, and — see **Known limitations** — the same page-level `last_edited_time` used for both detection and recorded `Ended At`/boundary timestamps carries a comparably bounded imprecision of its own, for a distinct reason: Notion's public API exposes no per-property change history, only one edit time for the whole page.
 
 ## Security model
 
@@ -174,6 +174,8 @@ The reconciler intentionally uses the Task's **current authoritative state** rat
 The Done gate is reactive: it observes a Status that has already been set. An invalid Done may exist for up to one poll interval before the reconciler rolls it back, but it cannot remain Done once the Task is reconciled. Durable completion still requires the Time Event and completion evidence first.
 
 `last_edited_time` is minute-granular, so two distinct edits to the same Task within one minute produce the same reconciliation snapshot and are reconciled once, against the later state.
+
+**Recorded boundary timestamps carry the same order-of-magnitude imprecision as detection delay, for a structural reason.** `Ended At` (and a reassignment's actor-boundary timestamp) is set from `task.last_edited_time` at the moment the reconciler observes the Task leaving `In Progress` — but that field is the *page's* last edit time, not a per-property change time, because Notion's public API does not expose one. If an unrelated property (e.g. `Result`) is edited after the actual status transition but before any poll observes the page in between, `last_edited_time` reflects that later, unrelated edit, and the recorded `Ended At` is inflated by the gap. This is only possible when **no poll ever observed the Task at its true transition instant** — which requires either (a) both edits landing within the same poll interval (bounded to that interval, same order of magnitude as the disclosed detection-delay trade-off), or (b) the transition's own reconciliation being deferred by a capped/backlogged run. `pollTaskChanges` does not defer indefinitely — every run either reconciles a Task or holds the cursor at the exact point it stopped, so (b) adds at most one further poll cycle, not an unbounded amount. There is no page-history or property-level-timestamp endpoint in Notion's public API to close this gap outright; narrowing `POLL_INTERVAL_MINUTES` narrows the exposure further. This is a known, bounded limitation of polling `last_edited_time`, not a bug with an available fix — treat recorded boundary timestamps as accurate to within roughly one poll interval, not to the second.
 
 ## Success criteria
 
