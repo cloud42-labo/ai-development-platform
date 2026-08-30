@@ -31,10 +31,18 @@ const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 // Done needing no change) does not count against this — see isFreeOutcome_.
 const MAX_TASKS_PER_RUN = 25;
 
-// Separate, much larger bound on how many Tasks a single run will even look
-// at (scan), independent of how many of those turn out to be free re-skips.
-// This exists only as a runtime safety valve for a pathological overlap
-// cluster; MAX_TASKS_PER_RUN is the bound that matters in normal operation.
+// Separate bound on how many Tasks needing an actual Notion API call — a
+// real write (charged against MAX_TASKS_PER_RUN) or a no-write Done re-check
+// (`done_gate_passed`, which still costs a Time Events query even though it
+// makes no write) — a single run will make, so a large volume of legitimate
+// re-verification traffic can't itself exhaust Apps Script's execution time
+// or UrlFetch quota. A Task whose outcome makes literally zero Notion calls
+// (`duplicate:`, `ignored:not_configured_task`) does NOT count against this
+// either — see isZeroCostOutcome_. Without that exemption, a cohort of more
+// than this many Tasks sharing one last_edited_time (e.g. a bulk edit
+// landing in the same minute) could get permanently stuck: every run would
+// re-scan the same already-processed prefix, hit this cap before reaching
+// the tail, and hold the cursor at that same static timestamp forever.
 const MAX_TASKS_SCANNED_PER_RUN = 500;
 
 function setup() {
@@ -136,12 +144,13 @@ function pollTaskChanges() {
 
     const outcomes = [];
     let reconciledCount = 0;
+    let apiCallCount = 0;
     let iterated = 0;
     let lastScannedEdit = '';
 
     while (
       iterated < tasksToProcess.length &&
-      iterated < MAX_TASKS_SCANNED_PER_RUN &&
+      apiCallCount < MAX_TASKS_SCANNED_PER_RUN &&
       reconciledCount < MAX_TASKS_PER_RUN
     ) {
       const task = tasksToProcess[iterated];
@@ -149,6 +158,17 @@ function pollTaskChanges() {
       outcomes.push(outcome);
       lastScannedEdit = String(task.last_edited_time || '');
       iterated++;
+      // A zero-cost outcome (duplicate/ignored) made literally no Notion API
+      // call, so it must not consume MAX_TASKS_SCANNED_PER_RUN either — only
+      // tasksToProcess.length (itself bounded by pagination, see
+      // sourceTruncated above) limits how many of these one run can scan.
+      // Without this, a cohort larger than MAX_TASKS_SCANNED_PER_RUN sharing
+      // one last_edited_time (e.g. a bulk edit landing in the same minute)
+      // would get permanently stuck: every run re-scans the same
+      // already-processed prefix, hits this cap before reaching the
+      // unprocessed tail, and holds the cursor at that same static
+      // timestamp forever.
+      if (!isZeroCostOutcome_(outcome)) apiCallCount++;
       // A free outcome (duplicate/ignored re-read, or an already-valid Done
       // needing no change) made no Notion write, so it must not consume the
       // reconciliation budget. Otherwise a dense cluster of such outcomes
@@ -306,6 +326,16 @@ function isFreeOutcome_(outcome) {
   return outcome === 'ignored:not_configured_task' ||
     outcome === 'done_gate_passed' ||
     /^duplicate:/.test(String(outcome));
+}
+
+// Outcomes that made literally zero Notion API calls — reconcileTaskPage_
+// returns both of these before ever fetching the Task's Time Events, unlike
+// every other outcome (including 'done_gate_passed', which still costs a
+// Time Events query even though it makes no write). These are the only
+// outcomes safe to exempt from MAX_TASKS_SCANNED_PER_RUN as well as
+// MAX_TASKS_PER_RUN — see the comment at that constant's declaration.
+function isZeroCostOutcome_(outcome) {
+  return outcome === 'ignored:not_configured_task' || /^duplicate:/.test(String(outcome));
 }
 
 function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {

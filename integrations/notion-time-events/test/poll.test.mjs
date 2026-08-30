@@ -272,6 +272,48 @@ test('overlap duplicates are skipped for free, so a dense duplicate cluster does
   assert.ok(new Date(scriptProps.get('LAST_SYNC_CURSOR')).getTime() >= new Date('2026-08-30T06:00:19.000Z').getTime());
 });
 
+test('a duplicate cohort larger than the scan cap does not stall reconciliation forever', () => {
+  // Regression for the Codex-reported 501-Task repro: a cohort sharing one
+  // last_edited_time (e.g. a bulk edit landing in the same minute) larger
+  // than the old MAX_TASKS_SCANNED_PER_RUN(500) used to get permanently
+  // stuck, because free `duplicate:` outcomes still consumed that cap.
+  const sharedLastEdited = '2026-08-30T05:59:00.000Z';
+  const cursor = '2026-08-30T06:00:00.000Z';
+  const oldTasks = [];
+  for (let i = 0; i < 520; i++) {
+    oldTasks.push(taskPage('3cafbd82-6f3b-8158-9622-d795b43d3' + String(i).padStart(3, '0'), {
+      status: 'Ready',
+      agent: 'Human',
+      lastEdited: sharedLastEdited, // every Task shares the exact same timestamp
+    }));
+  }
+  const laterTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43d4999', {
+    status: 'Ready',
+    agent: 'Human',
+    lastEdited: '2026-08-30T06:00:30.000Z',
+  });
+
+  const { sandbox, scriptProps } = harness({
+    tasks: oldTasks.concat([laterTask]),
+    scriptProperties: { LAST_SYNC_CURSOR: cursor },
+  });
+
+  // Pre-seed all 520 as already reconciled, so this run's re-read of each is
+  // a free `duplicate:` outcome — a cohort larger than the old scan cap.
+  oldTasks.forEach((task) => sandbox.reconcileTaskPage_(task));
+
+  const summary = sandbox.pollTaskChanges();
+
+  const duplicateOutcomes = summary.outcomes.filter((o) => /^duplicate:/.test(o));
+  assert.equal(duplicateOutcomes.length, 520); // the whole cohort was scanned, not just the first 500
+  // The Task sorted after the entire 520-strong cohort was still reached
+  // and reconciled in the same run, rather than being left behind a scan
+  // cap that stops before ever getting past a static, unchanging timestamp.
+  assert.equal(summary.outcomes[summary.outcomes.length - 1], 'no_change:Ready');
+  assert.equal(summary.capped, false);
+  assert.ok(new Date(scriptProps.get('LAST_SYNC_CURSOR')).getTime() > new Date(sharedLastEdited).getTime());
+});
+
 test('25+ already-valid Done Tasks inside the overlap do not exhaust the batch and starve a later changed Task', () => {
   // A single shared closed Time Event that satisfies every Done Task below
   // (all share the same Started At, so it counts as "applicable" for each).
