@@ -770,3 +770,68 @@ test('Done is rejected when Execution= identifies a tied close as belonging to a
   assert.match(outcome, /^done_gate_rejected:/);
   assert.match(outcome, /stale_task_started_at/);
 });
+
+test('Done is rejected when an Execution=-mismatched event still satisfies the timestamp-only applicability check', () => {
+  // Model/Invariant Review I3, scenario S7 (PR #17 Codex finding "Exclude
+  // mismatched executions from applicable events"): a prior execution's
+  // reassignment replacement can close in the exact same minute a later,
+  // never-observed reopen records as its own Started At. currentExecution
+  // EventIds above already correctly excludes this event (its Execution=
+  // does not match the Task's current Started At) — but the OLD
+  // applicableClosedEvent search derived applicability independently, from
+  // eventStartedAt_ >= taskStartedAt alone, so the very same coincidental
+  // tie that makes taskStartedAtTrusted hold (the prior event's own Started/
+  // Ended At being AT MOST taskStartedAt) also makes it satisfy that naive
+  // filter (its Started At being AT LEAST taskStartedAt) — forcing exact
+  // equality, which this fixture models directly. Without requiring
+  // currentExecutionEventIds membership too, this event would wrongly
+  // become the applicable evidence and let Done pass for an execution that
+  // produced no real Time Event of its own.
+  const { sandbox } = harnessWithNotionStub();
+  const taskStartedAt = '2026-08-30T10:00:00.000Z';
+  const mismatchedExecutionClose = eventPage('evt-mismatched-execution', {
+    startedAt: taskStartedAt,
+    endedAt: taskStartedAt, // zero-duration, tied exactly with taskStartedAt
+    note: 'Reason=reassignment | Execution=2026-08-29T08:00:00.000Z', // does not match taskStartedAt
+  });
+  const task = taskPage({
+    startedAt: taskStartedAt,
+    result: 'shipped',
+    completedAt: '2026-08-30T10:05:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [mismatchedExecutionClose], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /missing_applicable_time_event/);
+});
+
+test('Done passes by correctly picking the Execution=-matching event out of a tied cohort, ignoring the mismatched one', () => {
+  // Companion to the previous test, from the opposite direction: the fix
+  // must not become overly restrictive. When a genuinely current event
+  // (Execution= matches) ties on Ended At with a mismatched prior one (the
+  // exact scenario above, now with a real current event present too),
+  // the mismatched event must still be excluded while the matching one is
+  // correctly selected as applicable — Done must still pass.
+  const { sandbox } = harnessWithNotionStub();
+  const taskStartedAt = '2026-08-30T10:00:00.000Z';
+  const mismatchedExecutionClose = eventPage('evt-mismatched-execution-2', {
+    startedAt: taskStartedAt,
+    endedAt: taskStartedAt,
+    note: 'Reason=reassignment | Execution=2026-08-29T08:00:00.000Z',
+  });
+  const currentExecutionClose = eventPage('evt-current-execution-2', {
+    startedAt: taskStartedAt,
+    endedAt: taskStartedAt, // ties with the mismatched event's own Ended At
+    note: 'Reason=reassignment | Execution=' + taskStartedAt, // matches taskStartedAt
+  });
+  const task = taskPage({
+    startedAt: taskStartedAt,
+    result: 'shipped',
+    completedAt: '2026-08-30T10:05:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [mismatchedExecutionClose, currentExecutionClose], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});

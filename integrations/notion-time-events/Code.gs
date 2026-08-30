@@ -70,10 +70,24 @@ const MAX_RUN_DURATION_MS = 4 * 60 * 1000;
 // to clear the tie offset right near that bound would exit pagination with
 // effectively zero wall-clock time left, process nothing, and — since a call
 // that processes nothing leaves persisted state untouched — repeat the exact
-// same expensive fetch-only round trip indefinitely. Kept well under half of
-// MAX_RUN_DURATION_MS so it never itself starves the primary pagination
-// phase down to nothing.
-const MIN_PROCESSING_RESERVE_MS = 20 * 1000;
+// same expensive fetch-only round trip indefinitely.
+//
+// This must cover more than "some processing time": paginateNotionQuery_'s
+// deadline check only runs BEFORE issuing a page's request (see the comment
+// there), never while one is in flight — it bounds when a new request is
+// allowed to START, not how long the run's wall clock has actually advanced
+// once that request RETURNS. A single Notion request that itself blocks
+// longer than this reserve can still land after the full run deadline,
+// leaving the processing loop with zero usable time regardless of how early
+// pagination's own checks ran. For the reserve to actually guarantee
+// processing time (not just usually leave some), it must be at least as
+// large as the worst-case duration of one single UrlFetchApp.fetch call —
+// Apps Script does not expose a configurable fetch timeout, so this is an
+// assumption about platform behavior (commonly observed to cap around a
+// minute), not a documented guarantee; see README "Known limitations".
+// Still kept well under half of MAX_RUN_DURATION_MS so it never itself
+// starves the primary pagination phase down to nothing.
+const MIN_PROCESSING_RESERVE_MS = 65 * 1000;
 
 function setup() {
   const props = PropertiesService.getScriptProperties();
@@ -997,6 +1011,18 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     (allEvents || []).forEach(function (eventPage) {
       const endedAt = propertyDate_(eventPage.properties['Ended At']);
       if (!endedAt) return;
+      // Applicability must go through the SAME current-execution
+      // classification `currentExecutionEventIds` above already computed —
+      // never re-derive it from a separate, parallel timestamp check. An
+      // event a prior execution's reassignment replacement whose own
+      // `Started At`/`Ended At` happen to land in the same minute as the
+      // current (later, possibly never-observed-reopen) `Started At` can
+      // satisfy `eventStartedAt_ >= taskStartedAt` on timestamps alone even
+      // though its `Execution=` marker (or the legacy heuristic) has
+      // already, correctly, excluded it as prior evidence. Without this
+      // check, such an event could be selected as applicable and let Done
+      // pass for an execution that produced no real Time Event of its own.
+      if (!currentExecutionEventIds[eventPage.id]) return;
       if (eventStartedAt_(eventPage).getTime() < taskStartedAt.getTime()) return;
       // Prefer the most-recently-closed applicable event, so a stale
       // Completed At is checked against the freshest legitimate close below.

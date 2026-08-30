@@ -1425,7 +1425,7 @@ test('backfillResultFingerprints_ escalates past the reserved pagination budget 
   // past the offset it already has to skip.
   const tiedTimestamp = '2026-08-01T00:00:00.000Z';
   const totalRows = 60;
-  const alreadyProcessed = 25; // more than the half-budget fetch below can retrieve
+  const alreadyProcessed = 22; // more than the half-budget fetch below can retrieve
   const routes = {
     // One row per page (like real Notion pagination) so the wall-clock
     // deadline actually bounds how much of the tied group a single
@@ -1460,7 +1460,8 @@ test('backfillResultFingerprints_ escalates past the reserved pagination budget 
   };
   // 6 simulated seconds per Date() read: the reserved half-budget deadline
   // (120s) lands around page ~20 — comfortably short of alreadyProcessed
-  // (25) — while the full budget (240s) reaches well past it.
+  // (22) — while the MIN_PROCESSING_RESERVE_MS-shortened extended deadline
+  // (240s - 65s = 175s) still reaches past it.
   let ticks = 0;
   const now = () => {
     ticks += 1;
@@ -1998,4 +1999,75 @@ test('backfillResultFingerprints_ reserves processing time even while its pagina
   // itself gives up first, on the safe (bounded, no-progress) side, never
   // handing the processing loop a batch it has no time left to touch.
   assert.equal(summary.timedOut, false, 'expected pagination to yield to the processing loop before the run\'s own deadline, not exhaust it first');
+});
+
+test('backfillResultFingerprints_ survives a single abnormally slow request, not just a uniformly slow one', () => {
+  // Model/Invariant Review I10, scenario S12 (PR #17 Codex finding "Account
+  // for the final request in the processing reserve"): the test above
+  // models every Date() read costing an identical, small amount of time —
+  // it never models a SINGLE request whose own duration, on its own, eats
+  // deep into the reserve. paginateNotionQuery_'s deadline check only runs
+  // BEFORE issuing a request, never accounting for how long that ONE
+  // request, once in flight, actually takes to return — a request that is
+  // permitted to start (still comfortably inside the deadline) can still,
+  // by itself, consume most or all of the reserve by the time it resolves.
+  // This fixture injects exactly that: one specific page fetch, positioned
+  // right where escalation would only be reachable under a reserve too
+  // small to cover its own duration, takes an extra 30 simulated seconds —
+  // on top of the ordinary per-check tick cost every other request pays.
+  const tiedTimestamp = '2026-08-01T00:00:00.000Z';
+  const totalRows = 40; // well under QUERY_PAGE_SAFETY_LIMIT (50)
+  const alreadyProcessed = 26;
+  const slowAtCursor = 26; // the single page fetch that crosses the tie offset
+  const slowExtraMs = 30 * 1000;
+  let ticks = 0;
+  let extraMs = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 6 * 1000 + extraMs;
+  };
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const cursor = body.start_cursor ? Number(body.start_cursor) : 0;
+      if (cursor >= totalRows) return { results: [], has_more: false };
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dr' + String(cursor + 1).padStart(3, '0'), {
+        status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp,
+      });
+      task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+      task.properties['Completed At'] = { type: 'date', date: { start: tiedTimestamp } };
+      // Simulate this one request itself blocking for slowExtraMs beyond the
+      // loop's own bookkeeping — not spread across many requests, exactly
+      // one, at the position that finally makes escalation cross the tie
+      // offset (results.length exceeding it for the first time).
+      if (cursor === slowAtCursor) extraMs += slowExtraMs;
+      return { results: [task], has_more: cursor + 1 < totalRows, next_cursor: String(cursor + 1) };
+    },
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      return { results: [eventPage('evt-' + requestedTaskId, { actor: 'Claude', startedAt: tiedTimestamp, endedAt: tiedTimestamp })], has_more: false };
+    },
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      BACKFILL_RESUME_CURSOR: tiedTimestamp,
+      BACKFILL_RESUME_TIE_OFFSET: String(alreadyProcessed),
+    },
+    fetch: notionFetchStub(routes),
+    now,
+  });
+
+  const summary = sandbox.backfillResultFingerprints_();
+
+  // The bug's signature is identical to the test above (timedOut === true
+  // with nothing scanned) but reached through a different mechanism: not
+  // many ordinary requests slowly eating the reserve together, but ONE
+  // request whose own duration alone exceeds what a too-small reserve
+  // assumed no single request would ever take. MIN_PROCESSING_RESERVE_MS
+  // must be sized to survive this — not just the uniform-cost case.
+  assert.equal(summary.timedOut, false, 'expected the reserve to survive one abnormally slow request, not just uniformly slow ones');
 });
