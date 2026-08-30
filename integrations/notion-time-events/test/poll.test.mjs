@@ -377,6 +377,77 @@ test('a long-running free-outcome scan bails out on wall-clock time and leaves a
   assert.equal(scriptProps.get('LAST_SYNC_CURSOR'), sharedLastEdited);
 });
 
+test('a wall-clock cutoff landing inside a tied-timestamp Done cohort resumes past what it already scanned, across repeated runs', () => {
+  // Regression for the Codex-reported gap in the wall-clock fix above: a
+  // capped run pins the cursor at the shared, tied last_edited_time of the
+  // cohort it stopped inside — but the cursor alone cannot express "partway
+  // through a tie", so the next run's `on_or_after` query returns the exact
+  // same tied group from its own start again. For a Done cohort (always
+  // re-verified, never dedup-skipped) that would mean re-querying the same
+  // leading members forever without ever draining the tie or reaching the
+  // Task behind it. LAST_SYNC_CURSOR_TIE_OFFSET must let each run resume
+  // exactly where the previous one left off.
+  const sharedEvent = eventPage('evt-shared', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: '2026-08-30T05:05:00.000Z',
+  });
+
+  const sharedLastEdited = '2026-08-30T05:20:00.000Z';
+  const doneTasks = [];
+  for (let i = 0; i < 10; i++) {
+    const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43de' + String(i).padStart(3, '0'), {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: sharedLastEdited, // every Done Task shares the exact same timestamp
+      startedAt: '2026-08-30T05:00:00.000Z',
+    });
+    task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+    task.properties['Completed At'] = { type: 'date', date: { start: '2026-08-30T05:10:00.000Z' } };
+    doneTasks.push(task);
+  }
+  const laterChangedTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43def99', {
+    status: 'Ready',
+    agent: 'Human',
+    lastEdited: '2026-08-30T06:00:00.000Z',
+  });
+
+  // A fake clock advancing 1 simulated minute per no-arg Date call, shared
+  // across every pollTaskChanges() call below (not reset between them) —
+  // each run's own runStartedAt is whatever the clock reads when that run
+  // begins, so every run independently gets ~3 Tasks in before its own
+  // MAX_RUN_DURATION_MS (4 minutes) elapses.
+  let ticks = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 60 * 1000;
+  };
+
+  const { sandbox, fetchLog } = harness({
+    tasks: doneTasks.concat([laterChangedTask]),
+    events: [sharedEvent],
+    now,
+  });
+  sharedEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped') }],
+  };
+
+  let reachedTail = false;
+  for (let run = 0; run < 6 && !reachedTail; run++) {
+    const summary = sandbox.pollTaskChanges();
+    if (summary.outcomes.includes('no_change:Ready')) reachedTail = true;
+  }
+
+  assert.ok(reachedTail, 'expected the Task behind the tied cohort to be reached within a bounded number of runs');
+  // Exactly two Time Events queries per Task actually reconciled (one from
+  // reconcileAuthoritativeTimeEvents_, one from the Sheet projection sync)
+  // — 11 Tasks (10 Done + the tail) means 22. Anything more means some Task
+  // inside the tie was scanned more than once, i.e. the tie was not
+  // correctly resumed.
+  assert.equal(requestsTo(fetchLog, 'POST', EVENTS_DS).length, 22);
+});
+
 test('25+ already-valid Done Tasks inside the overlap do not exhaust the batch and starve a later changed Task', () => {
   // A single shared closed Time Event that satisfies every Done Task below
   // (all share the same Started At, so it counts as "applicable" for each).

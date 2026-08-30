@@ -158,9 +158,45 @@ function pollTaskChanges() {
     // not advance past data that was never retrieved.
     const sourceTruncated = changedResult.truncated || Boolean(activeResult && activeResult.truncated);
 
+    // A capped run (MAX_TASKS_PER_RUN or MAX_RUN_DURATION_MS) can stop
+    // partway through a group of Tasks that all share the exact same
+    // last_edited_time (a bulk edit, or many Done Tasks re-verified in the
+    // same poll minute) — ascending sort keeps such a group contiguous. The
+    // cursor alone cannot express "partway through a tie": the next run's
+    // `on_or_after: cursor - overlap` query returns the *entire* tied group
+    // again from its start. For most outcomes that is harmless (re-reading
+    // an already-processed Task is a free `duplicate:`), but a Done Task is
+    // never dedup-skipped (mustReverify) and always costs a real Time Events
+    // query to re-verify — so a tied cohort of valid Done Tasks larger than
+    // one run's budget would otherwise be re-scanned from its own start on
+    // every subsequent run, never draining. LAST_SYNC_CURSOR_TIE_OFFSET
+    // records how many leading members of the tied-at-cursor group were
+    // already reconciled, so this run can skip exactly that many and resume
+    // where the previous one actually stopped.
+    const tieOffset = isBootstrap ? 0 : Number(props.getProperty('LAST_SYNC_CURSOR_TIE_OFFSET') || '0');
+    let startIndex = 0;
+    if (tieOffset > 0 && cursor) {
+      let tieStart = -1;
+      for (let i = 0; i < tasksToProcess.length; i++) {
+        if (String(tasksToProcess[i].last_edited_time || '') === cursor) {
+          tieStart = i;
+          break;
+        }
+      }
+      if (tieStart >= 0) {
+        let skipped = 0;
+        let i = tieStart;
+        while (i < tasksToProcess.length && skipped < tieOffset && String(tasksToProcess[i].last_edited_time || '') === cursor) {
+          skipped++;
+          i++;
+        }
+        startIndex = i;
+      }
+    }
+
     const outcomes = [];
     let reconciledCount = 0;
-    let iterated = 0;
+    let iterated = startIndex;
     let lastScannedEdit = '';
 
     while (
@@ -196,6 +232,21 @@ function pollTaskChanges() {
       'LAST_SYNC_CURSOR',
       capped && lastScannedEdit ? lastScannedEdit : runStartedAt.toISOString()
     );
+
+    // Recompute the tie offset from scratch for whatever was just persisted
+    // as the cursor: the count of items sharing that exact timestamp,
+    // contiguously ending at the last Task actually reconciled (ascending
+    // sort keeps a tie contiguous, so a simple trailing count is correct
+    // whether it's a tie this run just started or one carried in via
+    // startIndex above). Zero for a run that reached a genuinely complete
+    // end — there is nothing left to resume mid-tie.
+    let newTieOffset = 0;
+    if (capped && lastScannedEdit) {
+      for (let i = 0; i < iterated; i++) {
+        newTieOffset = String(tasksToProcess[i].last_edited_time || '') === lastScannedEdit ? newTieOffset + 1 : 0;
+      }
+    }
+    props.setProperty('LAST_SYNC_CURSOR_TIE_OFFSET', String(newTieOffset));
 
     return {
       scanned: tasksToProcess.length,
