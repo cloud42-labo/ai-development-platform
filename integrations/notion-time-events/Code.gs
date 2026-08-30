@@ -764,7 +764,25 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const mostRecentClosedMeta = parseNoteMeta_(propertyText_(mostRecentClosed.properties.Note));
       const needsBoundary = mostRecentClosedMeta.reason === 'reassignment' || mostRecentClosedMeta.reason === 'duplicate_reconciliation';
       if (needsBoundary && mostRecentClosedMeta.boundary !== 'left_in_progress') {
-        stampExecutionBoundary_(mostRecentClosed);
+        // If this event predates the Execution= field entirely (legacy
+        // data), backfill it with the Task's own current Started At at the
+        // same time as the Boundary stamp — never overwrite an existing
+        // Execution= (mostRecentClosedMeta.execution is truthy exactly when
+        // one is already present). Without this, a legacy event that is
+        // actually this Task's ONLY (and therefore current) execution would
+        // get Boundary-marked with no Execution= to prove that, fall back to
+        // the legacy Reason/Boundary heuristic in enforceDoneGate_, and be
+        // wrongly excluded from current-execution membership — poisoning
+        // its own Ended At into looking like prior evidence against itself
+        // and permanently blocking Done. Backfilling here lets the new
+        // Execution=-based check correctly recognize it as current whenever
+        // the Task's Started At genuinely hasn't changed since.
+        let executionId = '';
+        if (!mostRecentClosedMeta.execution) {
+          const taskStartedAtForBoundary = propertyDate_(task.properties['Started At']);
+          executionId = taskStartedAtForBoundary ? taskStartedAtForBoundary.toISOString() : '';
+        }
+        stampExecutionBoundary_(mostRecentClosed, executionId);
         actions.push('boundary:' + mostRecentClosed.id);
       }
     }
@@ -1028,9 +1046,18 @@ function markResultValidated_(eventPage, result) {
 // own Reason (e.g. 'reassignment') never signals that on its own. Does not
 // touch the original Reason: both facts (why it closed, and that this is
 // also where its execution ended) are preserved side by side.
-function stampExecutionBoundary_(eventPage) {
+//
+// `executionId`, when non-empty, backfills Execution= at the same time —
+// the caller passes one only when this event has no Execution= yet (legacy
+// data predating that field). Without it, a legacy event that is actually
+// the Task's own current (and only) execution would be Boundary-marked
+// with nothing to prove that to enforceDoneGate_'s Execution=-based check,
+// falling back to the legacy Reason/Boundary heuristic and getting excluded
+// from current-execution membership — poisoning its own Ended At into
+// looking like prior evidence against itself.
+function stampExecutionBoundary_(eventPage, executionId) {
   const existingNote = propertyText_(eventPage.properties.Note);
-  const marker = buildNote_({ boundary: 'left_in_progress' });
+  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId });
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
     properties: {
       Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },

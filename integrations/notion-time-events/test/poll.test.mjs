@@ -211,6 +211,61 @@ test('leaving In Progress with nothing open retroactively stamps the last closed
   const note = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
   assert.match(note, /Reason=reassignment/);
   assert.match(note, /Boundary=left_in_progress/);
+  // The event predated Execution= (no marker on the fixture above), so the
+  // boundary stamp must backfill it from the Task's own Started At — see
+  // the dedicated legacy-boundary-backfill test below for why.
+  assert.match(note, /Execution=2026-08-30T05:10:00\.000Z/);
+});
+
+test('boundary-stamping a legacy event backfills Execution= so it is not wrongly excluded from its own current execution', () => {
+  // Codex-reported gap: a legacy (pre-Execution=) event that closes via
+  // reassignment and is later retroactively Boundary-marked (the test
+  // above) had no Execution= to inherit or backfill until now. Without the
+  // backfill, enforceDoneGate_'s legacy Reason/Boundary heuristic would
+  // treat this Boundary-marked event as prior evidence — even when it is
+  // actually the Task's ONLY (and therefore current) execution — poisoning
+  // its own Ended At into looking like evidence against itself and
+  // permanently rejecting Done. This test drives the full sequence:
+  // boundary-stamp via pollTaskChanges, then simulate the stamp landing and
+  // verify enforceDoneGate_ now accepts it as current.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa05';
+  const legacyEvent = eventPage('evt-legacy-only-execution', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: '2026-08-30T05:20:00.000Z',
+    note: 'Reason=reassignment', // legacy: predates Execution=
+  });
+  const task = taskPage(taskId, {
+    status: 'Review',
+    agent: 'Human',
+    lastEdited: '2026-08-30T05:30:00.000Z',
+    startedAt: '2026-08-30T05:00:00.000Z', // this Task's one and only execution
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [legacyEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+  assert.match(summary.outcomes[0], /boundary:evt-legacy-only-execution/);
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-only-execution');
+  const note = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.match(note, /Execution=2026-08-30T05:00:00\.000Z/);
+
+  // Simulate the stamp having landed, then attempt Done for this same
+  // (only) execution.
+  legacyEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: note }],
+  };
+  const doneTask = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Human',
+    lastEdited: '2026-08-30T05:35:00.000Z',
+    startedAt: '2026-08-30T05:00:00.000Z',
+  });
+  doneTask.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+  doneTask.properties['Completed At'] = { type: 'date', date: { start: '2026-08-30T05:35:00.000Z' } };
+  const outcome = sandbox.enforceDoneGate_(doneTask, [legacyEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
 });
 
 test('re-observing a Task already closed normally does not retroactively stamp its ordinary close as a boundary', () => {
