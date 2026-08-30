@@ -120,6 +120,94 @@ class SectionBoundaryScenarios(unittest.TestCase):
         self.assertIn("Sub-scenario detail", sections["Adversarial Scenarios"])
         self.assertIn("Still inside", sections["Adversarial Scenarios"])
 
+    def test_headings_hidden_inside_a_spanning_html_comment_are_not_boundaries(self):
+        # Codex-reported gap: opening an HTML comment right after the first
+        # required heading and closing it only after the last one hides
+        # every other required heading (and its placeholder text) inside
+        # ONE comment spanning multiple would-be sections. A per-fragment
+        # comment-strip (after splitting) never sees a matching <!--/--> pair
+        # in any single fragment, so the "commented out" headings would be
+        # treated as real boundaries and their placeholder text as real
+        # content. Stripping comments from the WHOLE body before splitting
+        # closes this: none of those headings should even be found.
+        body = (
+            "### Purpose / Contract\n\n"
+            "Real purpose.\n\n"
+            "<!--\n"
+            "### Invariants\n"
+            "This whole rest of the contract is inside one HTML comment.\n\n"
+            "### Adversarial Scenarios\n"
+            "Placeholder text that must NOT be counted as real content.\n\n"
+            "### Validation\n"
+            "Placeholder text that must NOT be counted as real content.\n\n"
+            "### Known Limitations / Non-goals\n"
+            "Placeholder text that must NOT be counted as real content.\n"
+            "-->\n"
+        )
+        # Without stripping comments first, each fragment produced by
+        # splitting on the hidden headings sees only real-looking prose (no
+        # matching <!--/--> pair in any single fragment to strip), so this
+        # would wrongly validate as complete instead of failing outright.
+        failures = validate(body)
+        self.assertIn("missing heading: Invariants", failures)
+        self.assertIn("missing heading: Adversarial Scenarios", failures)
+        self.assertIn("missing heading: Validation", failures)
+        self.assertIn("missing heading: Known Limitations / Non-goals", failures)
+
+    def test_setext_h1_stops_a_section_the_same_as_atx(self):
+        # Codex-reported gap: Markdown also supports Setext-style headings
+        # (`Text` underlined with `===`/`---`) as an alternative to `#`/`##`.
+        # I2 requires stopping at ANY same-or-shallower heading, not only
+        # ATX ones.
+        body = (
+            "### Known Limitations / Non-goals\n\n"
+            "<!-- nothing real here -->\n\n"
+            "References\n"
+            "==========\n\n"
+            "- https://example.com/real-link\n"
+        )
+        failures = validate(body)
+        self.assertIn("empty section: Known Limitations / Non-goals", failures)
+        sections = {s.name: s.content for s in split_sections(body)}
+        self.assertNotIn("real-link", sections["Known Limitations / Non-goals"])
+
+    def test_setext_h2_stops_a_section_the_same_as_atx(self):
+        body = (
+            "### Known Limitations / Non-goals\n\n"
+            "<!-- nothing real here -->\n\n"
+            "References\n"
+            "----------\n\n"
+            "- https://example.com/real-link\n"
+        )
+        failures = validate(body)
+        self.assertIn("empty section: Known Limitations / Non-goals", failures)
+
+    def test_single_dash_line_is_not_mistaken_for_a_setext_underline(self):
+        # A lone `-` immediately after text is an ordinary list item, not a
+        # Setext H2 underline (which requires 2+ dashes) — must not be
+        # treated as a boundary or misclassified as anything but content.
+        body = (
+            "### Known Limitations / Non-goals\n\n"
+            "Some real limitation text.\n"
+            "-\n"
+        )
+        sections = {s.name: s.content for s in split_sections(body) if s.level == 3}
+        self.assertIn("Some real limitation text", sections["Known Limitations / Non-goals"])
+
+    def test_horizontal_rule_after_a_blank_line_is_not_mistaken_for_setext(self):
+        # A `---` thematic break separated from the preceding paragraph by a
+        # blank line is a horizontal rule, not a Setext heading of that
+        # paragraph — CommonMark requires no blank line between the text and
+        # its underline for a Setext heading to form.
+        body = (
+            "### Known Limitations / Non-goals\n\n"
+            "Some real limitation text.\n\n"
+            "---\n\n"
+            "More text that must still count as this section's own content.\n"
+        )
+        sections = {s.name: s.content for s in split_sections(body) if s.level == 3}
+        self.assertIn("More text that must still count", sections["Known Limitations / Non-goals"])
+
 
 class EmptySectionDetection(unittest.TestCase):
     def test_html_comment_only_section_is_empty_for_every_required_section(self):

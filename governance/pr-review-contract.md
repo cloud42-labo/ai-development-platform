@@ -69,7 +69,7 @@ Immediately before merge, the merge actor must verify the exact latest head SHA 
 
 - required CI for that SHA is green;
 - the latest Codex review for that exact SHA has completed;
-- **the latest Codex review's `submitted_at` is at or after the PR's own `updated_at`** — see "Binding review freshness to the contract revision" below;
+- **the review being relied on was requested at or after the PR's own `updated_at`** — see "Binding review freshness to the contract revision" below;
 - there are no unresolved P0/P1 findings;
 - any required device/permission/security acceptance is complete.
 
@@ -79,9 +79,14 @@ A pending latest-head review is not equivalent to a clean review. Neither is a r
 
 The head SHA identifies which *code* was reviewed. It does not identify which *Review Contract* was reviewed, because editing the PR body — the Review Contract's only home — does not create a new commit and does not change the head SHA. A reviewer (Codex or a human) can review head `H` against contract revision `B1`; the author can then materially edit the body to `B2` without pushing anything; the existing review remains "the latest completed review for head `H`" under a SHA-only freshness check, even though it never saw `B2`.
 
-GitHub's PR `updated_at` timestamp already answers "when did this PR (including its body) last change?", natively and with no new service, secret, or stored digest: any edit to the PR — a body edit included — advances it. So the merge gate binds freshness to the *contract revision*, not just the code revision, using a comparison that is already free to make from data every review already has:
+GitHub's PR `updated_at` timestamp already answers "when did this PR (including its body) last change?", natively and with no new service, secret, or stored digest: any edit to the PR — a body edit included — advances it. So the merge gate binds freshness to the *contract revision*, not just the code revision.
 
-- **A completed Codex (or human) review is fresh for the current contract only if `review.submitted_at >= pr.updated_at`.**
-- If the PR body was edited after the latest review (`pr.updated_at > review.submitted_at`), that review is stale for the contract even though it may still be current for the code (same head SHA) — request a fresh review before merge.
+**Bind to when the review was requested, not when it completed.** A review's own completion timestamp (`review.submitted_at`) is not a safe proxy for "this review saw the current body": Codex (or a human reviewer) can begin a review against body `B1`, the author can edit the body to `B2` *while that review is still running*, and the review can then complete and submit *after* `B2` landed — its `submitted_at` would be later than `pr.updated_at`, wrongly reading as fresh, even though the review only ever evaluated `B1`. The completion timestamp reflects when the reviewer finished reading, not when it started, and a body edit can land at any point during that window.
+
+What every review DOES have a reliable timestamp for is what triggered it — Codex's own trigger rules are exactly: opening the PR, marking a draft ready, or an explicit `@codex review` comment. Bind freshness to that request instead:
+
+- **A completed review is fresh for the current contract only if the request that triggered it — the `@codex review` comment, or the PR's own `created_at`/`ready_for_review` event — has a `created_at` at or after `pr.updated_at`.** The request event necessarily happens before the reviewer starts reading, so a request timestamped at or after the last body edit guarantees the reviewer fetched the current body, regardless of how long the review then took to complete.
+- Identify which request a given completed review answers by matching it to the most recent qualifying request (`@codex review` comment, PR open, or ready-for-review) whose own timestamp precedes that review's `submitted_at` — normally unambiguous, since Codex's own trigger rules mean requests and their responses pair up in order.
+- If the PR body was edited after the request that produced the review being relied on (`pr.updated_at > request.created_at`), that review is stale for the contract regardless of when it happened to finish — post a fresh `@codex review` (or equivalent human re-request) after the edit, not before it, and rely on the review answering *that* request.
 - A body edit that only touches `## Summary`/`## References` prose still advances `updated_at` and is treated the same as a Review Contract edit by this check; a false negative here (an unnecessary re-review request) is preferred over a false positive (merging on a review that never saw a material contract edit) — this repository's connector does not expose a way to distinguish material from cosmetic body edits without adding an external service, which is out of scope (see Known Limitations in PR #11's Review Contract).
-- This rule requires no new external service, secret, or stored digest — `pr.updated_at` and `review.submitted_at` are both already read from the same GitHub API surface the "exact latest head SHA" check already uses.
+- This rule requires no new external service, secret, or stored digest — `pr.updated_at`, the request comment's `created_at`, and the review's `submitted_at` are all already read from the same GitHub API surface the "exact latest head SHA" check already uses.
