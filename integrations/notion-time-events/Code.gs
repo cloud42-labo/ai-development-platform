@@ -140,15 +140,24 @@ function pollTaskChanges() {
 
     const changedResult = queryChangedTasks_(new Date(sinceMs));
 
-    // On a fresh deploy (no cursor yet), a Task that has been sitting In
-    // Progress since before the initial lookback window would never surface
-    // through the time-window query above, so it would never receive an open
-    // Time Event — and would then permanently fail the Done gate for lack of
-    // any applicable interval once it eventually moves. Bootstrap once, only
-    // when there is no cursor, by also pulling every currently In Progress
-    // Task directly by Status, independent of last_edited_time.
-    const activeResult = isBootstrap ? queryActiveInProgressTasks_() : null;
-    const tasksToProcess = isBootstrap
+    // On a fresh deploy, a Task that has been sitting In Progress since
+    // before the initial lookback window would never surface through the
+    // time-window query above, so it would never receive an open Time Event
+    // — and would then permanently fail the Done gate for lack of any
+    // applicable interval once it eventually moves. Bootstrap by also
+    // pulling every currently In Progress Task directly by Status,
+    // independent of last_edited_time, until that has genuinely finished —
+    // tracked by its OWN flag (BOOTSTRAP_ACTIVE_DONE), not by whether
+    // LAST_SYNC_CURSOR happens to be set. If that were coupled to the
+    // cursor, an active-Task set wide enough to truncate (more than
+    // QUERY_PAGE_SAFETY_LIMIT pages) would still let the very first run set
+    // a cursor, and every subsequent run would see isBootstrap = false and
+    // never issue this query again — permanently stranding whatever of the
+    // active set wasn't retrieved the first time, since it may be too old to
+    // ever fall inside a future incremental window either.
+    const activeBootstrapDone = Boolean(props.getProperty('BOOTSTRAP_ACTIVE_DONE'));
+    const activeResult = activeBootstrapDone ? null : queryActiveInProgressTasks_();
+    const tasksToProcess = activeResult
       ? mergeTasksById_(changedResult.results, activeResult.results)
       : changedResult.results;
     // Either query hitting its own pagination safety limit (an incremental
@@ -248,6 +257,21 @@ function pollTaskChanges() {
     }
     props.setProperty('LAST_SYNC_CURSOR_TIE_OFFSET', String(newTieOffset));
 
+    if (activeResult) {
+      if (activeResult.truncated) {
+        // Not done: leave BOOTSTRAP_ACTIVE_DONE unset so the next run tries
+        // again, and persist how far this call got so that retry resumes
+        // past it instead of re-querying the identical prefix.
+        if (activeResult.results.length) {
+          const lastActiveSeen = String(activeResult.results[activeResult.results.length - 1].last_edited_time || '');
+          if (lastActiveSeen) props.setProperty('BOOTSTRAP_ACTIVE_RESUME_CURSOR', lastActiveSeen);
+        }
+      } else {
+        props.setProperty('BOOTSTRAP_ACTIVE_DONE', '1');
+        props.setProperty('BOOTSTRAP_ACTIVE_RESUME_CURSOR', '');
+      }
+    }
+
     return {
       scanned: tasksToProcess.length,
       processed: reconciledCount,
@@ -287,18 +311,41 @@ function reconcileTaskById(pageId) {
 // with no pre-existing Done history.
 function backfillResultFingerprints_() {
   return withPollLock_(function () {
+    const props = PropertiesService.getScriptProperties();
+    const resumeCursor = props.getProperty('BACKFILL_RESUME_CURSOR');
+    // Sorted ascending and, on a resumed call, filtered to strictly after the
+    // last Task this backfill actually looked at, so a deployment with more
+    // Done Tasks than the pagination safety limit (QUERY_PAGE_SAFETY_LIMIT,
+    // 5000 rows) can be drained by calling this repeatedly instead of the
+    // exact same unsorted, un-resumed 5000-row prefix being returned (and
+    // re-processed) every time it is re-run, leaving the tail unreachable.
+    const filter = resumeCursor
+      ? { and: [
+          { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } },
+          { timestamp: 'last_edited_time', last_edited_time: { after: resumeCursor } },
+        ] }
+      : { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } };
     const doneTasks = paginateNotionQuery_(
       '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
       {
         page_size: 100,
-        filter: { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } },
+        filter: filter,
+        sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
       }
     );
     const outcomes = doneTasks.results.map(function (task) {
       return reconcileTaskPage_(task);
     });
-    if (doneTasks.truncated) {
-      Logger.log('backfillResultFingerprints_: result set truncated at the pagination safety limit — re-run to cover the remainder.');
+    if (doneTasks.truncated && doneTasks.results.length) {
+      const lastSeen = String(doneTasks.results[doneTasks.results.length - 1].last_edited_time || '');
+      if (lastSeen) props.setProperty('BACKFILL_RESUME_CURSOR', lastSeen);
+      Logger.log('backfillResultFingerprints_: result set truncated at the pagination safety limit — call again to resume from ' + lastSeen + '.');
+    } else {
+      // Fully drained (or nothing left to see): clear any stale resume point
+      // so a future call starts a fresh full pass rather than silently
+      // skipping Tasks edited before wherever a prior backfill happened to
+      // stop.
+      props.setProperty('BACKFILL_RESUME_CURSOR', '');
     }
     return { scanned: outcomes.length, truncated: doneTasks.truncated, outcomes: outcomes };
   });
@@ -368,12 +415,26 @@ function queryChangedTasks_(since) {
 // so a Task that has been active since before the initial lookback window
 // still gets an open Time Event instead of never receiving one. Returns
 // { results, truncated } — see paginateNotionQuery_.
+// Sorted ascending and, once a prior call truncated, filtered to strictly
+// after the last Task it actually retrieved — BOOTSTRAP_ACTIVE_RESUME_CURSOR,
+// managed by the caller (pollTaskChanges) — so a deployment with more than
+// QUERY_PAGE_SAFETY_LIMIT pages' worth of simultaneously In Progress Tasks
+// can be drained across repeated bootstrap runs instead of the exact same
+// unsorted, un-resumed prefix being returned every time.
 function queryActiveInProgressTasks_() {
+  const resumeCursor = PropertiesService.getScriptProperties().getProperty('BOOTSTRAP_ACTIVE_RESUME_CURSOR');
+  const filter = resumeCursor
+    ? { and: [
+        { property: 'Status', status: { equals: DEFAULTS.START_STATUS } },
+        { timestamp: 'last_edited_time', last_edited_time: { after: resumeCursor } },
+      ] }
+    : { property: 'Status', status: { equals: DEFAULTS.START_STATUS } };
   return paginateNotionQuery_(
     '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
     {
       page_size: 100,
-      filter: { property: 'Status', status: { equals: DEFAULTS.START_STATUS } },
+      filter: filter,
+      sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
     }
   );
 }
@@ -564,6 +625,19 @@ function enforceDoneGate_(task, allEvents, openEvents) {
       });
     }
   }
+  // A duplicate open event (two open events for the same actor at once, a
+  // data artifact rather than a genuine second execution) is closed at
+  // whatever moment the reconciler happens to notice it — see
+  // reconcileAuthoritativeTimeEvents_'s 'duplicate_reconciliation' cleanup —
+  // which generally does not equal the surviving event's Started At, so the
+  // exact-adjacency chain-walk above would not reach it. It is still always
+  // an artifact of the SAME ongoing execution the surviving event belongs
+  // to, never a separate prior one, so it must not count as prior-execution
+  // evidence regardless of where its own Ended At happens to land.
+  closedEvents.forEach(function (eventPage) {
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    if (meta.reason === 'duplicate_reconciliation') currentExecutionEventIds[eventPage.id] = true;
+  });
   const priorTimestamp = latestEventTimestamp_((allEvents || []).filter(function (eventPage) {
     return !currentExecutionEventIds[eventPage.id];
   }));
@@ -672,10 +746,9 @@ function markResultValidated_(eventPage, result) {
   const existingNote = propertyText_(eventPage.properties.Note);
   if (parseNoteMeta_(existingNote).resultFingerprint === fingerprint) return false;
   const marker = buildNote_({ resultFingerprint: fingerprint });
-  const note = existingNote ? existingNote + ' | ' + marker : marker;
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
     properties: {
-      Note: { rich_text: [{ type: 'text', text: { content: clip_(note, 1800) } }] },
+      Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
     },
   });
   return true;
@@ -724,13 +797,12 @@ function closeNotionTimeEvent_(eventPage, endStatus, changedBy, snapshotId, when
     snapshotId: snapshotId,
     changedBy: changedBy,
   });
-  const note = existingNote ? existingNote + ' | ' + closeMeta : closeMeta;
 
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
     properties: {
       'Ended At': { date: { start: when.toISOString() } },
       Note: {
-        rich_text: [{ type: 'text', text: { content: clip_(note, 1800) } }],
+        rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, closeMeta, 1800) } }],
       },
     },
   });
@@ -961,6 +1033,7 @@ function buildNote_(fields) {
 function parseNoteMeta_(note) {
   return {
     endStatus: noteField_(note, 'End Status'),
+    reason: noteField_(note, 'Reason'),
     snapshotId: noteField_(note, 'Snapshot'),
     changedBy: noteField_(note, 'Changed By'),
     resultFingerprint: noteField_(note, 'Result Fingerprint'),
@@ -1051,6 +1124,31 @@ function normalizeId_(value) {
 function clip_(value, maxLength) {
   value = String(value || '');
   return value.length <= maxLength ? value : value.substring(0, maxLength);
+}
+
+// Appends a freshly built structured `marker` (Reason=/Result Fingerprint=/
+// etc., from buildNote_) onto `existingNote`, keeping the combined text
+// within maxLength. Unlike clipping the combined string from the end, this
+// never risks truncating the marker being written *right now*: if the note
+// would overflow, whole leading (oldest) ' | '-delimited segments of
+// existingNote are dropped first, since parseNoteMeta_/noteField_ already
+// prefer the last occurrence of a key — the newest information is what
+// matters, so losing old history here is fine, but silently corrupting the
+// marker just written (e.g. a Result Fingerprint stamp becoming unparseable,
+// or a rollback Reason getting cut mid-word) is not: it would defeat the
+// very check the marker exists for.
+function appendNote_(existingNote, marker, maxLength) {
+  const clippedMarker = clip_(marker, maxLength);
+  if (!existingNote) return clippedMarker;
+  const separator = ' | ';
+  let combined = existingNote + separator + clippedMarker;
+  if (combined.length <= maxLength) return combined;
+  const segments = existingNote.split(separator);
+  while (segments.length && combined.length > maxLength) {
+    segments.shift();
+    combined = segments.length ? segments.join(separator) + separator + clippedMarker : clippedMarker;
+  }
+  return combined;
 }
 
 // A poll that is still running keeps the lock; the next trigger tick simply

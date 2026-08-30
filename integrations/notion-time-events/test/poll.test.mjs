@@ -231,6 +231,84 @@ test('a fresh deploy bootstraps every currently In Progress Task even if it pred
   assert.ok(creates.some((body) => body.properties.Task.relation[0].id === staleActiveTask.id));
 });
 
+test('a truncated active-Task bootstrap query keeps retrying (and resuming) on later runs instead of never running again', () => {
+  // Regression: a deployment with more simultaneously In Progress Tasks than
+  // the pagination safety limit used to have the bootstrap active-Task query
+  // truncate on its first (and only) attempt, since it was gated on
+  // `isBootstrap` (LAST_SYNC_CURSOR unset) — but the first run still sets
+  // that cursor from the incremental query regardless, so every subsequent
+  // run saw isBootstrap = false and never issued the active-Task query
+  // again. Whatever active Task fell past the truncation point (and is old
+  // enough to also never re-enter a future incremental window) would then
+  // never receive its required open Time Event.
+  const staleActiveA = taskPage('3cafbd82-6f3b-8158-9622-d795b43dg001', {
+    status: 'In Progress', agent: 'Claude Opus',
+    lastEdited: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z',
+  });
+  const staleActiveB = taskPage('3cafbd82-6f3b-8158-9622-d795b43dg002', {
+    status: 'In Progress', agent: 'Claude Opus',
+    lastEdited: '2026-08-01T00:01:00.000Z', startedAt: '2026-08-01T00:01:00.000Z',
+  });
+  // Force paginateNotionQuery_'s truncation on the first (un-resumed) active
+  // query by claiming more exist for QUERY_PAGE_SAFETY_LIMIT (50) pages —
+  // only the first page carries a Task, the rest are empty-but-more, so the
+  // truncated result set ends up containing exactly staleActiveA, not 50
+  // copies of it. The resumed (second) call returns staleActiveB directly.
+  let firstAttemptPages = 0;
+  let resumedCalls = 0;
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const isActiveStatusQuery = Boolean(
+        (body.filter && body.filter.property === 'Status') ||
+        (body.filter && body.filter.and && body.filter.and.some((f) => f.property === 'Status'))
+      );
+      if (!isActiveStatusQuery) return { results: [], has_more: false };
+      const resumed = Boolean(body.filter.and);
+      if (!resumed) {
+        firstAttemptPages += 1;
+        return {
+          results: firstAttemptPages === 1 ? [staleActiveA] : [],
+          has_more: true,
+          next_cursor: 'c' + firstAttemptPages,
+        };
+      }
+      resumedCalls += 1;
+      return { results: [staleActiveB], has_more: false };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  const firstRun = sandbox.pollTaskChanges();
+  assert.equal(firstRun.bootstrap, true);
+  assert.equal(scriptProps.get('BOOTSTRAP_ACTIVE_DONE'), undefined); // not yet done: truncated
+  assert.ok(scriptProps.get('BOOTSTRAP_ACTIVE_RESUME_CURSOR'), 'expected a resume cursor after the truncated bootstrap attempt');
+  // Cursor still advanced from the (untruncated) incremental side — proving
+  // this run alone would, under the old coupling, have permanently disabled
+  // any future bootstrap attempt.
+  assert.ok(scriptProps.get('LAST_SYNC_CURSOR'));
+
+  const secondRun = sandbox.pollTaskChanges();
+  assert.equal(secondRun.bootstrap, false); // LAST_SYNC_CURSOR is set now — this is the exact case the old code got wrong
+  const openedB = secondRun.outcomes.some((o) => o === 'opened:evt-created');
+  assert.ok(openedB, 'expected the second run to still retry the active-Task query and reach staleActiveB: ' + JSON.stringify(secondRun.outcomes));
+  assert.equal(scriptProps.get('BOOTSTRAP_ACTIVE_DONE'), '1');
+  assert.equal(scriptProps.get('BOOTSTRAP_ACTIVE_RESUME_CURSOR'), '');
+
+  // A third run must not issue the active-Task query at all any more.
+  const beforeThirdRun = resumedCalls;
+  const firstAttemptPagesBefore = firstAttemptPages;
+  sandbox.pollTaskChanges();
+  assert.equal(resumedCalls, beforeThirdRun);
+  assert.equal(firstAttemptPages, firstAttemptPagesBefore);
+});
+
 test('overlap duplicates are skipped for free, so a dense duplicate cluster does not stall the unprocessed tail', () => {
   const cursor = '2026-08-30T06:00:00.000Z';
   const oldTasks = [];
@@ -801,4 +879,59 @@ test('backfillResultFingerprints_ stamps a legacy Done Task and the stamp then g
 
   assert.match(reopenOutcome, /^done_gate_rejected:/);
   assert.match(reopenOutcome, /stale_result/);
+});
+
+test('backfillResultFingerprints_ resumes past what it already backfilled when truncated, instead of restarting the same prefix', () => {
+  // Regression: a deployment with more Done Tasks than the pagination
+  // safety limit (5000 rows / 50 pages) previously had this simply re-issue
+  // the exact same unsorted query on every call — the same (truncated)
+  // prefix every time, so the tail past the limit could never be reached no
+  // matter how many times an operator re-ran it.
+  let pageCalls = 0;
+  const seenFilters = [];
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      pageCalls += 1;
+      seenFilters.push(body.filter);
+      // Force paginateNotionQuery_'s own truncation (QUERY_PAGE_SAFETY_LIMIT
+      // = 50 pages) by always claiming more exist, one Task per page —
+      // cheap to synthesize, exercises the exact truncation path.
+      const idx = pageCalls;
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43df' + String(idx).padStart(3, '0'), {
+        status: 'Done',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-01T00:' + String(idx).padStart(2, '0') + ':00.000Z',
+        startedAt: '2026-08-01T00:00:00.000Z',
+      });
+      task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+      task.properties['Completed At'] = { type: 'date', date: { start: '2026-08-01T00:30:00.000Z' } };
+      return { results: [task], has_more: true, next_cursor: 'cursor-' + idx };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  const firstRun = sandbox.backfillResultFingerprints_();
+
+  assert.equal(firstRun.truncated, true);
+  assert.equal(firstRun.scanned, 50); // QUERY_PAGE_SAFETY_LIMIT
+  assert.equal(seenFilters[0].property, 'Status'); // first call: no resume filter yet
+  const resumeCursor = scriptProps.get('BACKFILL_RESUME_CURSOR');
+  assert.ok(resumeCursor, 'expected a resume cursor to be persisted after a truncated backfill');
+
+  sandbox.backfillResultFingerprints_();
+
+  // The second call's query must be filtered to strictly after the persisted
+  // resume cursor — not the same bare Status filter as the first call, which
+  // would just return the identical 50-page prefix again.
+  const secondCallFilter = seenFilters[seenFilters.length - 50];
+  assert.ok(secondCallFilter.and, 'expected the resumed call to use a compound and-filter');
+  const afterClause = secondCallFilter.and.find((f) => f.timestamp === 'last_edited_time');
+  assert.equal(afterClause.last_edited_time.after, resumeCursor);
 });

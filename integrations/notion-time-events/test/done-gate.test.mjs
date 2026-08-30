@@ -303,6 +303,37 @@ test('Done is still rejected for a genuinely prior execution even when the curre
   assert.match(outcome, /stale_task_started_at/);
 });
 
+test('Done passes when a duplicate open event was closed mid-execution, even though its Ended At does not touch the surviving event', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // reconcileAuthoritativeTimeEvents_'s duplicate_reconciliation cleanup
+  // closes a stray second open event for the same actor at whatever moment
+  // the reconciler happens to notice it — not at the surviving event's own
+  // Started At, so the exact-adjacency chain-walk alone would not link it to
+  // the current execution. It must still not count as prior-execution
+  // evidence: it is Reason=duplicate_reconciliation, an artifact of THIS
+  // execution, not a separate earlier one.
+  const task = taskPage({
+    startedAt: '2026-08-29T03:00:00.000Z', // correctly fresh for this execution
+    result: 'shipped',
+    completedAt: '2026-08-29T04:00:00.000Z',
+  });
+  const duplicateEvent = eventPage('evt-duplicate', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    // Closed well after the surviving event opened, and its Ended At does
+    // NOT match any other event's Started At — no adjacency to chain from.
+    endedAt: '2026-08-29T03:30:00.000Z',
+    note: 'Reason=duplicate_reconciliation',
+  });
+  const survivingEvent = eventPage('evt-surviving', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [duplicateEvent, survivingEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
 test('Done is rejected when Completed At predates the current execution entirely (stale from a prior completion)', () => {
   const { sandbox } = harnessWithNotionStub();
   const task = taskPage({
@@ -358,4 +389,28 @@ test('Done passes when Completed At follows both Started At and the applicable e
   const outcome = sandbox.enforceDoneGate_(task, [currentEvent], []);
 
   assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
+test('appendNote_ never truncates the freshly written marker, dropping old history instead', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const longExistingNote = 'Old=' + 'x'.repeat(1790); // already right at the 1800-char limit
+  const marker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+
+  const combined = sandbox.appendNote_(longExistingNote, marker, 1800);
+
+  assert.ok(combined.length <= 1800, 'combined note must respect the 1800-char limit');
+  assert.ok(combined.endsWith(marker), 'the marker just written must survive intact, not be clipped');
+  assert.equal(sandbox.parseNoteMeta_(combined).resultFingerprint, sandbox.resultFingerprint_('shipped'));
+});
+
+test('appendNote_ fits the marker alone even when it alone exceeds maxLength budget after the existing note', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const existingNote = 'Reason=left_in_progress | Snapshot=abc123';
+  const marker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+
+  // A maxLength barely larger than the marker itself forces every existing
+  // segment to be dropped.
+  const combined = sandbox.appendNote_(existingNote, marker, marker.length + 2);
+
+  assert.equal(combined, marker);
 });
