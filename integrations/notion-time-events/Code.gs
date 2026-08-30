@@ -366,7 +366,17 @@ function backfillResultFingerprints_() {
         page_size: 100,
         filter: filter,
         sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
-      }
+      },
+      // Reserve half of MAX_RUN_DURATION_MS for pagination and leave the
+      // other half for actually processing and checkpointing whatever was
+      // retrieved — a large Done database or a slow Notion response can
+      // otherwise spend the entire wall-clock budget just fetching pages
+      // (up to QUERY_PAGE_SAFETY_LIMIT of them, each its own round trip)
+      // before the processing loop below ever runs its own MAX_RUN_
+      // DURATION_MS check, risking an uncaught Apps Script kill with
+      // nothing reconciled or checkpointed at all — the run would then
+      // repeat the identical pagination prefix forever, never progressing.
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2
     );
     let startIndex = 0;
     if (resumeCursor && tieOffset > 0) {
@@ -1110,13 +1120,25 @@ function notionRequest_(method, path, body) {
 // unretrieved data.
 const QUERY_PAGE_SAFETY_LIMIT = 50;
 
-function paginateNotionQuery_(path, baseBody) {
+function paginateNotionQuery_(path, baseBody, deadlineMs) {
   let cursor = null;
   let pageCount = 0;
   const results = [];
   let truncated = false;
 
   do {
+    // An optional wall-clock deadline (e.g. from backfillResultFingerprints_,
+    // which needs to reserve time to actually process and checkpoint
+    // whatever gets retrieved, not just spend its whole run fetching pages)
+    // stops pagination early rather than letting it run unbounded up to
+    // QUERY_PAGE_SAFETY_LIMIT — treated exactly like hitting that page-count
+    // limit: truncated, resumable via on_or_after next call. Never cuts off
+    // before the very first page: a caller needs at least one page's worth
+    // of results to make any progress at all this call.
+    if (typeof deadlineMs === 'number' && pageCount > 0 && Date.now() >= deadlineMs) {
+      truncated = true;
+      break;
+    }
     const body = Object.assign({}, baseBody);
     if (cursor) body.start_cursor = cursor;
 

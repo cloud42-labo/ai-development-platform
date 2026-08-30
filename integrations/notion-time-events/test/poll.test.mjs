@@ -1151,6 +1151,65 @@ test('backfillResultFingerprints_ resumes past what it already backfilled when t
   assert.equal(onOrAfterClause.last_edited_time.on_or_after, resumeCursor);
 });
 
+test('backfillResultFingerprints_ bounds its own pagination phase, reserving budget to still process and checkpoint what it fetched', () => {
+  // Codex-reported gap: paginateNotionQuery_ had no wall-clock bound of its
+  // own, only QUERY_PAGE_SAFETY_LIMIT (50 pages) — so a large Done database
+  // or a slow Notion response could spend this whole call's entire
+  // MAX_RUN_DURATION_MS budget just fetching pages, leaving the processing
+  // loop below no time to reconcile or checkpoint a single Task before an
+  // uncaught Apps Script kill, which would lose everything (nothing gets
+  // persisted mid-fetch) and repeat the identical pagination prefix forever.
+  // Reserving half the budget for pagination and leaving the rest for
+  // processing must still let a call fetched-but-cut-short make real,
+  // checkpointed progress.
+  let pageCalls = 0;
+  const routes = {
+    [TASKS_QUERY]: () => {
+      pageCalls += 1;
+      const idx = pageCalls;
+      const ts = '2026-08-01T00:' + String(idx).padStart(2, '0') + ':00.000Z';
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dn' + String(idx).padStart(3, '0'), {
+        status: 'Done', agent: 'Claude Opus', lastEdited: ts, startedAt: ts,
+      });
+      task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+      task.properties['Completed At'] = { type: 'date', date: { start: ts } };
+      // Far more pages available (20) than the fake clock below will let
+      // pagination actually reach — proves the deadline, not exhaustion of
+      // available data, is what stops it here.
+      return { results: [task], has_more: idx < 20, next_cursor: 'cursor-' + idx };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  // 25 simulated seconds per Date() read. Pagination's own deadline check
+  // (MAX_RUN_DURATION_MS / 2 = 120s past runStartedAt) lands partway
+  // through the run, well before all 20 available pages are fetched and
+  // well before MAX_RUN_DURATION_MS (240s) itself elapses — leaving real
+  // budget behind for the processing loop.
+  let ticks = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 25 * 1000;
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+    now,
+  });
+
+  const summary = sandbox.backfillResultFingerprints_();
+
+  assert.equal(summary.truncated, true);
+  assert.ok(pageCalls < 20, 'expected the deadline, not exhausting available pages, to stop pagination: fetched ' + pageCalls);
+  // The real point of the fix: budget reserved for processing must not be
+  // zero just because pagination itself got cut short.
+  assert.ok(summary.scanned > 0, 'expected the processing loop to still make progress after a bounded pagination phase');
+  const resumeCursor = scriptProps.get('BACKFILL_RESUME_CURSOR');
+  assert.ok(resumeCursor, 'expected a resume checkpoint to be persisted');
+});
+
 test('backfillResultFingerprints_ resumes past a tied timestamp instead of dropping its remainder', () => {
   // Regression: a strict `after: resumeCursor` filter would exclude every
   // unretrieved Task still sharing that exact timestamp once the pagination
