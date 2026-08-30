@@ -61,6 +61,20 @@ const MAX_TASKS_PER_RUN = 25;
 // already produces — rather than risking an unrecoverable mid-scan kill.
 const MAX_RUN_DURATION_MS = 4 * 60 * 1000;
 
+// How much of MAX_RUN_DURATION_MS backfillResultFingerprints_ always reserves
+// for actually processing and checkpointing whatever pagination retrieved,
+// even while its pagination phase is escalating past the primary half-budget
+// deadline to make progress against a large persisted tie offset (see the
+// comment on that escalation below). Without this, escalation's own outer
+// bound was the full run budget, so a call that only manages to fetch enough
+// to clear the tie offset right near that bound would exit pagination with
+// effectively zero wall-clock time left, process nothing, and — since a call
+// that processes nothing leaves persisted state untouched — repeat the exact
+// same expensive fetch-only round trip indefinitely. Kept well under half of
+// MAX_RUN_DURATION_MS so it never itself starves the primary pagination
+// phase down to nothing.
+const MIN_PROCESSING_RESERVE_MS = 20 * 1000;
+
 function setup() {
   const props = PropertiesService.getScriptProperties();
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -400,13 +414,17 @@ function backfillResultFingerprints_() {
     // time the first pass already spent, and could never net out ahead —
     // both passes share the same wall clock), extend this SAME continuous
     // pass past the half-budget deadline specifically while the tie-offset
-    // skip would still consume everything fetched so far, bounded by the
-    // full run budget as the outer, unconditional limit.
+    // skip would still consume everything fetched so far — but bounded by
+    // MIN_PROCESSING_RESERVE_MS short of the full run budget, not the full
+    // budget itself. Escalating all the way to the outer bound would let a
+    // call that only just manages to fetch past the tie offset right near
+    // that bound exit pagination with nothing left to actually process or
+    // checkpoint with — see MIN_PROCESSING_RESERVE_MS.
     const doneTasks = paginateNotionQuery_(
       queryPath,
       queryBody,
       runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
-      runStartedAt.getTime() + MAX_RUN_DURATION_MS,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS - MIN_PROCESSING_RESERVE_MS,
       function (results) { return tieOffsetStartIndex_(results) < results.length; }
     );
     const startIndex = tieOffsetStartIndex_(doneTasks.results);
@@ -437,9 +455,29 @@ function backfillResultFingerprints_() {
       const lastSeen = String(processed[processed.length - 1].last_edited_time || '');
       if (lastSeen) {
         props.setProperty('BACKFILL_RESUME_CURSOR', lastSeen);
+        // The offset must count only members of the tie that will still be
+        // returned by a FUTURE resumed query — i.e. still `Status = Done`.
+        // A `done_gate_rejected:*` outcome rolls the Task back to `Review`
+        // (updateTaskStatus_ above), which removes it from this query's own
+        // `Status = Done` filter from that point on: it will never appear in
+        // any later call's results again. Counting it toward the skip would
+        // inflate the offset past what the (now smaller) future result set
+        // actually contains for this tie, silently skipping a genuinely
+        // unprocessed valid Task forever — the same failure mode the
+        // cumulative carry-over below exists to avoid, just introduced from
+        // the other direction. A rejected member is therefore skipped over
+        // (it needs no further visit — reconcileTaskPage_ already ran it and
+        // Notion no longer considers it Done) without incrementing the
+        // count, but without resetting the count either: it does not break
+        // the contiguous tie the way a genuinely different timestamp does.
         let newTieOffset = 0;
         for (let i = 0; i < processed.length; i++) {
-          newTieOffset = String(processed[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
+          if (String(processed[i].last_edited_time || '') !== lastSeen) {
+            newTieOffset = 0;
+            continue;
+          }
+          if (outcomes[i].indexOf('done_gate_rejected:') === 0) continue;
+          newTieOffset++;
         }
         // If this call's own tail is still the exact same tied timestamp the
         // resume cursor already pointed at when this call started, the
@@ -784,25 +822,33 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const mostRecentClosedMeta = parseNoteMeta_(propertyText_(mostRecentClosed.properties.Note));
       const needsBoundary = mostRecentClosedMeta.reason === 'reassignment' || mostRecentClosedMeta.reason === 'duplicate_reconciliation';
       if (needsBoundary && mostRecentClosedMeta.boundary !== 'left_in_progress') {
-        // If this event predates the Execution= field entirely (legacy
-        // data), backfill it with the Task's own current Started At at the
-        // same time as the Boundary stamp — never overwrite an existing
-        // Execution= (mostRecentClosedMeta.execution is truthy exactly when
-        // one is already present). Without this, a legacy event that is
-        // actually this Task's ONLY (and therefore current) execution would
-        // get Boundary-marked with no Execution= to prove that, fall back to
-        // the legacy Reason/Boundary heuristic in enforceDoneGate_, and be
-        // wrongly excluded from current-execution membership — poisoning
-        // its own Ended At into looking like prior evidence against itself
-        // and permanently blocking Done. Backfilling here lets the new
-        // Execution=-based check correctly recognize it as current whenever
-        // the Task's Started At genuinely hasn't changed since.
-        let executionId = '';
-        if (!mostRecentClosedMeta.execution) {
-          const taskStartedAtForBoundary = propertyDate_(task.properties['Started At']);
-          executionId = taskStartedAtForBoundary ? taskStartedAtForBoundary.toISOString() : '';
-        }
-        stampExecutionBoundary_(mostRecentClosed, executionId);
+        // Deliberately never backfills Execution= here, even for a legacy
+        // event with none yet. An earlier version did — filling it in from
+        // the Task's own CURRENT Started At — to save exactly the case this
+        // whole branch exists for: a legacy event that is genuinely this
+        // Task's only (and therefore current) execution, which would
+        // otherwise fall back to the legacy Reason/Boundary heuristic and be
+        // wrongly excluded from current-execution membership. But this call
+        // site cannot tell that case apart from the one right next to it in
+        // the README's "Known limitations": a Task reopened and restarted
+        // entirely inside one poll window, whose new In Progress spell was
+        // never itself observed. There, by the time this branch runs, the
+        // Task's current Started At already reflects the NEW (invisible)
+        // execution, while `mostRecentClosed` is still evidence from the
+        // OLD one — backfilling Execution= from the Task's current Started
+        // At would tag that stale old event as belonging to the new
+        // execution it has nothing to do with, letting a Done with no valid
+        // Time Event for the new execution pass anyway. Both cases reach
+        // this exact branch with the exact same information available
+        // (a Reason-eligible closed event, no Execution= yet, and the
+        // Task's own current Started At); there is no way from here to know
+        // which one this is. Leaving Execution= unstamped reintroduces the
+        // narrower, already-documented self-poisoning gap for the first
+        // case (see README "Known limitations") rather than risk silently
+        // accepting a stale-Result reopen for the second — the Boundary=
+        // stamp alone (still applied below) is enough for the legacy
+        // heuristic to keep working for both.
+        stampExecutionBoundary_(mostRecentClosed, '');
         actions.push('boundary:' + mostRecentClosed.id);
       }
     }
@@ -1067,14 +1113,13 @@ function markResultValidated_(eventPage, result) {
 // touch the original Reason: both facts (why it closed, and that this is
 // also where its execution ended) are preserved side by side.
 //
-// `executionId`, when non-empty, backfills Execution= at the same time —
-// the caller passes one only when this event has no Execution= yet (legacy
-// data predating that field). Without it, a legacy event that is actually
-// the Task's own current (and only) execution would be Boundary-marked
-// with nothing to prove that to enforceDoneGate_'s Execution=-based check,
-// falling back to the legacy Reason/Boundary heuristic and getting excluded
-// from current-execution membership — poisoning its own Ended At into
-// looking like prior evidence against itself.
+// `executionId`, when non-empty, also backfills Execution= at the same
+// time — but the only call site deliberately always passes '' (see the
+// comment there for why: it cannot safely distinguish the one legacy-data
+// case backfilling would help from a stale-Started-At case it would
+// silently break). Kept as a parameter rather than dropped so a future,
+// genuinely safe backfill path (one with enough information to tell the
+// two cases apart) has an existing, tested hook to call into.
 function stampExecutionBoundary_(eventPage, executionId) {
   const existingNote = propertyText_(eventPage.properties.Note);
   const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId });
@@ -1567,11 +1612,28 @@ function appendNote_(existingNote, marker, maxLength) {
   const isFingerprintSegment = function (segment) {
     return segment.trim().indexOf('Result Fingerprint=') === 0;
   };
+  // Execution=/Boundary= identify which execution an event belongs to and
+  // whether it marks a genuine execution boundary — enforceDoneGate_'s
+  // current-execution classification (and thus taskStartedAtTrusted) reads
+  // them directly. Losing one is a materially worse failure than losing one
+  // old Result Fingerprint=: a fingerprint only narrows the already-bounded
+  // stale-Result detection window (see README "Known limitations"), while
+  // losing Execution=/Boundary= can flip an event's own current/prior
+  // classification outright. Protected even more than fingerprints:
+  // evicted only once every fingerprint segment is already gone.
+  const isExecutionOrBoundarySegment = function (segment) {
+    const trimmed = segment.trim();
+    return trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0;
+  };
   const segments = existingNote.split(separator);
   let combined = segments.concat([clippedMarker]).join(separator);
   while (segments.length && combined.length > maxLength) {
-    const dropIndex = segments.findIndex(function (segment) { return !isFingerprintSegment(segment); });
-    segments.splice(dropIndex >= 0 ? dropIndex : 0, 1);
+    let dropIndex = segments.findIndex(function (segment) {
+      return !isFingerprintSegment(segment) && !isExecutionOrBoundarySegment(segment);
+    });
+    if (dropIndex < 0) dropIndex = segments.findIndex(isFingerprintSegment);
+    if (dropIndex < 0) dropIndex = 0;
+    segments.splice(dropIndex, 1);
     combined = segments.length ? segments.concat([clippedMarker]).join(separator) : clippedMarker;
   }
   return combined;

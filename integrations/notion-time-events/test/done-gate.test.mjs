@@ -531,6 +531,50 @@ test('appendNote_ evicts non-fingerprint segments before ever touching an older 
   assert.equal(combined.indexOf('Snapshot='), -1, 'the non-fingerprint segment should have been dropped instead');
 });
 
+test('appendNote_ evicts an older Result Fingerprint before ever touching Execution=/Boundary=', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Execution=/Boundary= identify which execution an event belongs to and
+  // whether it marks a genuine boundary — enforceDoneGate_'s current/prior
+  // classification reads them directly, so losing one is worse than losing
+  // one old Result Fingerprint= (which only narrows the already-bounded
+  // stale-Result window). Both an ordinary segment AND an old fingerprint
+  // must be exhausted before Execution=/Boundary= is ever touched.
+  const execution = 'Execution=2026-08-01T00:00:00.000Z';
+  const boundary = 'Boundary=left_in_progress';
+  const oldFingerprint = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v1');
+  const existingNote = [execution, boundary, oldFingerprint, 'Snapshot=' + 'x'.repeat(1700)].join(' | ');
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v2');
+
+  // Small enough that even after the ordinary Snapshot= segment (the
+  // biggest, easiest target) is dropped, Execution= + Boundary= +
+  // oldFingerprint + newMarker together still exceed it — forcing a SECOND
+  // eviction round, which must reach for the old fingerprint next, not
+  // Execution=/Boundary=.
+  const maxLength = execution.length + boundary.length + newMarker.length + 20;
+
+  const combined = sandbox.appendNote_(existingNote, newMarker, maxLength);
+
+  assert.ok(combined.length <= maxLength);
+  assert.ok(combined.indexOf(execution) >= 0, 'Execution= must survive the eviction');
+  assert.ok(combined.indexOf(boundary) >= 0, 'Boundary= must survive the eviction');
+  assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
+  assert.equal(combined.indexOf(oldFingerprint), -1, 'the older fingerprint should have been dropped instead');
+});
+
+test('appendNote_ evicts Execution=/Boundary= only as an absolute last resort, once no fingerprint is left either', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const execution = 'Execution=2026-08-01T00:00:00.000Z';
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+
+  // A maxLength barely larger than the freshly written marker itself forces
+  // every existing segment — including Execution= — to be dropped: the
+  // marker just written must never be the thing that gets clipped or
+  // dropped.
+  const combined = sandbox.appendNote_(execution, newMarker, newMarker.length + 2);
+
+  assert.equal(combined, newMarker);
+});
+
 test('Done passes when multiple events close simultaneously on first observing the Task leaving In Progress', () => {
   const { sandbox } = harnessWithNotionStub();
   // A Task with two open events (e.g. an unresolved duplicate) is first

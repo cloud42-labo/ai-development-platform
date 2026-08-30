@@ -211,23 +211,27 @@ test('leaving In Progress with nothing open retroactively stamps the last closed
   const note = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
   assert.match(note, /Reason=reassignment/);
   assert.match(note, /Boundary=left_in_progress/);
-  // The event predated Execution= (no marker on the fixture above), so the
-  // boundary stamp must backfill it from the Task's own Started At — see
-  // the dedicated legacy-boundary-backfill test below for why.
-  assert.match(note, /Execution=2026-08-30T05:10:00\.000Z/);
+  // The event predated Execution= (no marker on the fixture above). The
+  // boundary stamp deliberately never backfills it — see the dedicated
+  // tests below for why (an earlier version did, and why that was unsafe).
+  assert.doesNotMatch(note, /Execution=/);
 });
 
-test('boundary-stamping a legacy event backfills Execution= so it is not wrongly excluded from its own current execution', () => {
-  // Codex-reported gap: a legacy (pre-Execution=) event that closes via
-  // reassignment and is later retroactively Boundary-marked (the test
-  // above) had no Execution= to inherit or backfill until now. Without the
-  // backfill, enforceDoneGate_'s legacy Reason/Boundary heuristic would
-  // treat this Boundary-marked event as prior evidence — even when it is
-  // actually the Task's ONLY (and therefore current) execution — poisoning
-  // its own Ended At into looking like evidence against itself and
-  // permanently rejecting Done. This test drives the full sequence:
-  // boundary-stamp via pollTaskChanges, then simulate the stamp landing and
-  // verify enforceDoneGate_ now accepts it as current.
+test('boundary-stamping a legacy event never backfills Execution=, even when it is this Task\'s own only execution', () => {
+  // Codex-reported gap in an EARLIER version of this boundary-stamp: it used
+  // to backfill Execution= from the Task's own CURRENT Started At whenever
+  // the event had none yet, specifically to save this exact case (a legacy
+  // event that is genuinely the Task's only, current execution) from being
+  // wrongly excluded by the legacy Reason/Boundary heuristic. That backfill
+  // was itself later found unsafe: this call site cannot tell this case
+  // apart from a Task reopened and restarted entirely inside one poll
+  // window (see the "stale Started At" test below), where the same backfill
+  // would tag a genuinely STALE old event as belonging to a new execution it
+  // has nothing to do with. The safe fix removed the backfill outright — the
+  // Boundary= marker still gets stamped (still useful to the legacy
+  // heuristic), but Execution= is deliberately left absent, reintroducing
+  // this narrower, documented limitation (see README "Known limitations")
+  // rather than risk the other, worse failure mode.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa05';
   const legacyEvent = eventPage('evt-legacy-only-execution', {
     actor: 'Claude',
@@ -247,10 +251,14 @@ test('boundary-stamping a legacy event backfills Execution= so it is not wrongly
   assert.match(summary.outcomes[0], /boundary:evt-legacy-only-execution/);
   const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-only-execution');
   const note = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
-  assert.match(note, /Execution=2026-08-30T05:00:00\.000Z/);
+  assert.match(note, /Boundary=left_in_progress/);
+  assert.doesNotMatch(note, /Execution=/, 'expected no Execution= backfill from this call site');
 
   // Simulate the stamp having landed, then attempt Done for this same
-  // (only) execution.
+  // (only) execution: the accepted regression — this now falls back to the
+  // legacy Reason/Boundary heuristic (no Execution= to short-circuit it)
+  // and is rejected, exactly the pre-existing "Known limitations" gap this
+  // fix intentionally reopened in exchange for closing the worse one.
   legacyEvent.properties.Note = {
     type: 'rich_text',
     rich_text: [{ plain_text: note }],
@@ -265,7 +273,68 @@ test('boundary-stamping a legacy event backfills Execution= so it is not wrongly
   doneTask.properties['Completed At'] = { type: 'date', date: { start: '2026-08-30T05:35:00.000Z' } };
   const outcome = sandbox.enforceDoneGate_(doneTask, [legacyEvent], []);
 
-  assert.equal(outcome, 'done_gate_passed:stamped');
+  assert.match(outcome, /^done_gate_rejected:/);
+});
+
+test('a Started At that predates a boundary-marked prior close is correctly rejected, not wrongly trusted from a backfilled Execution=', () => {
+  // The failure mode the Execution= backfill removal above exists to
+  // prevent. taskStartedAtTrusted (enforceDoneGate_) exists specifically to
+  // catch a Started At that was not genuinely advanced past every
+  // prior-execution event already on file — here, Started At (07:00) is
+  // actually EARLIER than a boundary-marked prior close's own Started/Ended
+  // At (07:50/08:00), the exact anomaly that check exists to catch. A
+  // backfill that instead trusted this (unreliable) current Started At to
+  // retroactively tag that same prior-execution event as Execution=07:00
+  // would flip it from "prior" to "current" in enforceDoneGate_'s own
+  // classification — silently erasing the one signal that would have
+  // flagged Started At as stale, AND making that same event eligible as the
+  // applicable closed event for Done (its own Started At, 07:50, is at or
+  // after the now-"trusted" 07:00) — wrongly passing Done on an execution
+  // that was never actually timed.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa06';
+  const staleEvent = eventPage('evt-stale-old-execution', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T07:50:00.000Z',
+    endedAt: '2026-08-30T08:00:00.000Z',
+    note: 'Reason=reassignment', // legacy: predates Execution=
+  });
+  const reopenedTask = taskPage(taskId, {
+    status: 'Review',
+    agent: 'Human',
+    lastEdited: '2026-08-30T08:10:00.000Z',
+    // Claims a fresh restart, but is actually EARLIER than evidence already
+    // on file for what should be a finished prior execution.
+    startedAt: '2026-08-30T07:00:00.000Z',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [reopenedTask], events: [staleEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+  assert.match(summary.outcomes[0], /boundary:evt-stale-old-execution/);
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-stale-old-execution');
+  const note = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.doesNotMatch(note, /Execution=/, 'expected no Execution= backfilled from the Task\'s (unreliable) current Started At');
+
+  // Simulate the stamp having landed, then attempt Done with an unchanged,
+  // never-re-timed Result for the (invisible) new execution.
+  staleEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: note }],
+  };
+  const doneTask = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Human',
+    lastEdited: '2026-08-30T08:15:00.000Z',
+    startedAt: '2026-08-30T07:00:00.000Z',
+  });
+  doneTask.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+  doneTask.properties['Completed At'] = { type: 'date', date: { start: '2026-08-30T08:15:00.000Z' } };
+  const outcome = sandbox.enforceDoneGate_(doneTask, [staleEvent], []);
+
+  // Correctly rejected as stale — the prior-execution close's own timing
+  // out-dates the claimed Started At, and must still be visible as prior
+  // evidence rather than laundered into looking like current-execution
+  // proof.
+  assert.match(outcome, /^done_gate_rejected:stale_task_started_at/);
 });
 
 test('re-observing a Task already closed normally does not retroactively stamp its ordinary close as a boundary', () => {
@@ -1374,7 +1443,17 @@ test('backfillResultFingerprints_ escalates past the reserved pagination budget 
       task.properties['Completed At'] = { type: 'date', date: { start: tiedTimestamp } };
       return { results: [task], has_more: cursor + 1 < totalRows, next_cursor: String(cursor + 1) };
     },
-    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    // Every row gets a matching, unstamped closing event so it genuinely
+    // passes (and stays Done, visible to a later query) — this test is
+    // about pagination/escalation mechanics, not the Done gate itself, and
+    // a rejected Task would roll back to Review and drop out of every
+    // future Status = Done query, which would make the tie-offset math this
+    // test asserts on meaningless.
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      const endedAt = tiedTimestamp;
+      return { results: [eventPage('evt-' + requestedTaskId, { actor: 'Claude', startedAt: tiedTimestamp, endedAt })], has_more: false };
+    },
     'POST /v1/pages': () => ({ id: 'evt-created' }),
     'PATCH *': () => ({}),
     'GET *': () => ({}),
@@ -1510,7 +1589,17 @@ test('backfillResultFingerprints_ resumes past a tied timestamp instead of dropp
       if (!task) return { results: [], has_more: false };
       return { results: [task], has_more: pageIndex + 1 < allTasks.length, next_cursor: String(pageIndex + 1) };
     },
-    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    // Every row gets a matching, unstamped closing event so it genuinely
+    // passes and stays Done — a rejected Task would roll back to Review and
+    // drop out of the resumed Status = Done query, which is not what this
+    // test (pagination/resume mechanics, not the Done gate) is exercising.
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      const task = allTasks.find((t) => t.id === requestedTaskId);
+      const startedAt = task ? task.last_edited_time : tiedTimestamp;
+      const endedAt = startedAt;
+      return { results: [eventPage('evt-' + requestedTaskId, { actor: 'Claude', startedAt, endedAt })], has_more: false };
+    },
     'POST /v1/pages': () => ({ id: 'evt-created' }),
     'PATCH *': () => ({}),
     'GET *': () => ({}),
@@ -1617,7 +1706,18 @@ test('backfillResultFingerprints_ bails out on wall-clock time within a single p
         : tasks;
       return { results: filtered, has_more: false };
     },
-    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    // Every row gets a matching, unstamped closing event so it genuinely
+    // passes and stays Done — this test is about the wall-clock bail-out and
+    // resume, not the Done gate, and a rejected Task would drop out of the
+    // resumed Status = Done query and make the scanned-count assertions
+    // below meaningless.
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      const task = tasks.find((t) => t.id === requestedTaskId);
+      const startedAt = task ? task.last_edited_time : tasks[0].last_edited_time;
+      const endedAt = startedAt;
+      return { results: [eventPage('evt-' + requestedTaskId, { actor: 'Claude', startedAt, endedAt })], has_more: false };
+    },
     'POST /v1/pages': () => ({ id: 'evt-created' }),
     'PATCH *': () => ({}),
     'GET *': () => ({}),
@@ -1685,7 +1785,16 @@ test('a wall-clock bail-out mid-tie accumulates onto the tie offset a prior call
     // the leading members a prior call already handled, mirroring genuine
     // Notion `on_or_after` semantics for an exact-match tie.
     [TASKS_QUERY]: () => ({ results: tasks, has_more: false }),
-    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    // Every row gets a matching, unstamped closing event so it genuinely
+    // passes and stays Done — this test is about the cumulative tie-offset
+    // arithmetic across wall-clock-bounded calls, not the Done gate, and a
+    // rejected Task would drop out of the resumed Status = Done query and
+    // make the offset assertions below meaningless.
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      const endedAt = tiedTimestamp;
+      return { results: [eventPage('evt-' + requestedTaskId, { actor: 'Claude', startedAt: tiedTimestamp, endedAt })], has_more: false };
+    },
     'POST /v1/pages': () => ({ id: 'evt-created' }),
     'PATCH *': () => ({}),
     'GET *': () => ({}),
@@ -1715,4 +1824,178 @@ test('a wall-clock bail-out mid-tie accumulates onto the tie offset a prior call
   // The bug: this would be String(summary.scanned) alone, discarding the 10
   // a prior call already accounted for.
   assert.equal(scriptProps.get('BACKFILL_RESUME_TIE_OFFSET'), String(alreadyProcessed + summary.scanned));
+});
+
+test('backfillResultFingerprints_ does not count a rejected Task toward the tie offset it persists', () => {
+  // Regression: a rejected Done ('done_gate_rejected:...') is rolled back to
+  // Status = Review by enforceDoneGate_, which removes it from every FUTURE
+  // call of this same Status = Done query — it can never come back. The old
+  // newTieOffset loop counted any processed Task sharing the tail timestamp
+  // regardless of outcome, so a rejected member of a tied cohort inflated
+  // the persisted offset past what the resumed query's (now smaller) result
+  // set actually contains, silently skipping a genuinely unprocessed valid
+  // Task forever. Models 47 distinct Tasks (filling the pagination safety
+  // limit up to the tie) followed by a 5-member tied group whose middle
+  // member is rejected: pass, reject, pass | pass, pass — split by
+  // truncation so the first call sees only the first three.
+  const distinctCount = 47;
+  const tiedTimestamp = '2026-08-01T02:00:00.000Z';
+
+  function passingTask(id, lastEdited) {
+    const t = taskPage(id, { status: 'Done', agent: 'Claude Opus', lastEdited, startedAt: lastEdited });
+    t.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+    t.properties['Completed At'] = { type: 'date', date: { start: lastEdited } };
+    return t;
+  }
+
+  const distinctTasks = [];
+  for (let i = 1; i <= distinctCount; i++) {
+    const ts = '2026-08-01T00:' + String(i).padStart(2, '0') + ':00.000Z';
+    distinctTasks.push(passingTask('3cafbd82-6f3b-8158-9622-d795b43dk' + String(i).padStart(3, '0'), ts));
+  }
+
+  const tiePass1 = passingTask('3cafbd82-6f3b-8158-9622-d795b43dpass1', tiedTimestamp);
+  const tieReject = passingTask('3cafbd82-6f3b-8158-9622-d795b43drej1', tiedTimestamp);
+  const tiePass2 = passingTask('3cafbd82-6f3b-8158-9622-d795b43dpass2', tiedTimestamp);
+  const tiePass3 = passingTask('3cafbd82-6f3b-8158-9622-d795b43dpass3', tiedTimestamp);
+  const tiePass4 = passingTask('3cafbd82-6f3b-8158-9622-d795b43dpass4', tiedTimestamp);
+  const tiedGroup = [tiePass1, tieReject, tiePass2, tiePass3, tiePass4];
+  const allTasks = distinctTasks.concat(tiedGroup);
+
+  // Every passing Task gets a matching, unstamped closing event (passes and
+  // gets stamped on first sight, same as the legacy-backfill test above).
+  // The rejected Task deliberately gets no event at all — the simplest
+  // route to `missing_applicable_time_event`.
+  const eventsByTaskId = {};
+  allTasks.forEach(function (task) {
+    if (task.id === tieReject.id) {
+      eventsByTaskId[task.id] = [];
+      return;
+    }
+    const startedAt = task.last_edited_time;
+    const endedAt = startedAt;
+    eventsByTaskId[task.id] = [eventPage('evt-' + task.id, { actor: 'Claude', startedAt, endedAt })];
+  });
+
+  const rejectedIds = new Set();
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const resumed = Boolean(body.filter && body.filter.and);
+      const visible = allTasks.filter((t) => !rejectedIds.has(t.id));
+      const pool = resumed ? visible.filter((t) => t.last_edited_time >= tiedTimestamp) : visible;
+      const pageIndex = body.start_cursor ? Number(body.start_cursor) : 0;
+      const task = pool[pageIndex];
+      if (!task) return { results: [], has_more: false };
+      return { results: [task], has_more: pageIndex + 1 < pool.length, next_cursor: String(pageIndex + 1) };
+    },
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      return { results: eventsByTaskId[requestedTaskId] || [], has_more: false };
+    },
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    ['PATCH /v1/pages/' + encodeURIComponent(tieReject.id)]: () => {
+      rejectedIds.add(tieReject.id);
+      return {};
+    },
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  const firstRun = sandbox.backfillResultFingerprints_();
+  // QUERY_PAGE_SAFETY_LIMIT (50) lands exactly after the 47 distinct Tasks
+  // plus the first 3 tied ones: pass, reject, pass.
+  assert.equal(firstRun.truncated, true);
+  assert.equal(firstRun.scanned, 50);
+  assert.ok(rejectedIds.has(tieReject.id), 'expected the reject Task to have been rolled back this run');
+  // The fix: only the 2 passing members of the trailing tie (tiePass1,
+  // tiePass2) count toward the resume offset — not the rejected one sitting
+  // between them, which will never be returned by a future Status = Done
+  // query again. The bug would persist '3' here instead.
+  assert.equal(scriptProps.get('BACKFILL_RESUME_TIE_OFFSET'), '2');
+
+  const secondRun = sandbox.backfillResultFingerprints_();
+
+  // With the offset correctly at 2, the resumed query's own results —
+  // tiePass1, tiePass2, tiePass3, tiePass4 (tieReject no longer visible) —
+  // skip the first 2 (tiePass1, tiePass2, already reconciled last run) and
+  // this call reaches the remaining 2 (tiePass3, tiePass4). The bug (offset
+  // '3') would skip 3 of these 4 and silently drop tiePass3 forever,
+  // scanning only 1 Task here instead of 2.
+  assert.equal(secondRun.scanned, 2);
+  assert.equal(secondRun.truncated, false);
+  assert.equal(secondRun.timedOut, false);
+  // Fully drained: no resume state left behind.
+  assert.equal(scriptProps.get('BACKFILL_RESUME_CURSOR'), '');
+  assert.equal(scriptProps.get('BACKFILL_RESUME_TIE_OFFSET'), '');
+});
+
+test('backfillResultFingerprints_ reserves processing time even while its pagination phase is escalating', () => {
+  // Regression: the escalation above (past the half-budget deadline, while
+  // a persisted tie offset still consumes everything fetched so far) used
+  // to be bounded only by the full run budget — MAX_RUN_DURATION_MS itself,
+  // with nothing held back for the processing loop that runs after it. A
+  // persisted offset that pagination can only just barely fetch past, right
+  // near that outer bound, would cross it (escaping the "no progress" check
+  // and returning a non-empty toProcess) only after consuming the ENTIRE
+  // budget doing so — leaving the processing loop's own MAX_RUN_DURATION_MS
+  // check already tripped before it runs even once. The call would then
+  // scan nothing (wasting every one of those fetches for nothing) and, per
+  // the "no progress, don't touch persisted state" rule below, leave
+  // BACKFILL_RESUME_TIE_OFFSET untouched — so the next call repeats the
+  // identical expensive fetch-only round trip, forever. Modeled directly
+  // against the real wall clock (one simulated tick per Date() read, same
+  // convention as the escalation test above): a persisted offset (29) that
+  // this exact tick cost model can only just cross on the 30th page fetch —
+  // one page later than the reserved deadline alone would ever allow.
+  const tiedTimestamp = '2026-08-01T00:00:00.000Z';
+  const totalRows = 300;
+  const alreadyProcessed = 29;
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const cursor = body.start_cursor ? Number(body.start_cursor) : 0;
+      if (cursor >= totalRows) return { results: [], has_more: false };
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dq' + String(cursor + 1).padStart(3, '0'), {
+        status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp,
+      });
+      task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+      task.properties['Completed At'] = { type: 'date', date: { start: tiedTimestamp } };
+      return { results: [task], has_more: cursor + 1 < totalRows, next_cursor: String(cursor + 1) };
+    },
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      return { results: [eventPage('evt-' + requestedTaskId, { actor: 'Claude', startedAt: tiedTimestamp, endedAt: tiedTimestamp })], has_more: false };
+    },
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  let ticks = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 6 * 1000;
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      BACKFILL_RESUME_CURSOR: tiedTimestamp,
+      BACKFILL_RESUME_TIE_OFFSET: String(alreadyProcessed),
+    },
+    fetch: notionFetchStub(routes),
+    now,
+  });
+
+  const summary = sandbox.backfillResultFingerprints_();
+
+  // The bug's exact signature: pagination alone burns the whole run
+  // (`timedOut === true`) with nothing scanned at all. The reserve must
+  // make the processing loop's own deadline check unreachable — pagination
+  // itself gives up first, on the safe (bounded, no-progress) side, never
+  // handing the processing loop a batch it has no time left to touch.
+  assert.equal(summary.timedOut, false, 'expected pagination to yield to the processing loop before the run\'s own deadline, not exhaust it first');
 });
