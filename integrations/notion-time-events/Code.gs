@@ -1,19 +1,32 @@
 const DEFAULTS = {
   TIME_EVENTS_SHEET: 'Time Events',
-  WEBHOOK_LOG_SHEET: 'Webhook Log',
+  SYNC_LOG_SHEET: 'Sync Log',
   TASKS_DATA_SOURCE_ID: 'fc5e770f-c68e-4799-afe7-ec4bff0dab59',
   TIME_EVENTS_DATA_SOURCE_ID: '544b9a17-2653-47aa-b62c-bb52425b3bf2',
   START_STATUS: 'In Progress',
   REVIEW_STATUS: 'Review',
   DONE_STATUS: 'Done',
   NOTION_VERSION: '2026-03-11',
+  POLL_INTERVAL_MINUTES: 5,
 };
 
-// Maximum age (either direction) a Worker -> Apps Script relay envelope may
-// have before it is treated as expired rather than a live delivery. Wide
-// enough to absorb Notion/Worker retry latency and modest clock skew, narrow
-// enough to keep a captured envelope from being replayed long after the fact.
-const RELAY_TIMESTAMP_WINDOW_MS = 5 * 60 * 1000;
+// Apps Script time-driven triggers only accept these minute intervals.
+const ALLOWED_POLL_INTERVALS = [1, 5, 10, 15, 30];
+
+// Every poll re-reads a little further back than the last cursor. Notion
+// reports `last_edited_time` at minute granularity and a page can be indexed
+// fractionally after it is written, so a strict `> cursor` window can skip an
+// edit that landed in the same minute the previous run finished. Re-reading is
+// free: hasProcessedSnapshot_ drops anything already reconciled.
+const SYNC_OVERLAP_MS = 2 * 60 * 1000;
+
+// How far back the very first poll looks when no cursor exists yet.
+const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
+
+// Upper bound on Tasks reconciled in one trigger run, so a large backlog can
+// never push a single execution past the Apps Script runtime limit. Anything
+// left over is picked up by the next run from the un-advanced cursor.
+const MAX_TASKS_PER_RUN = 25;
 
 function setup() {
   const props = PropertiesService.getScriptProperties();
@@ -26,88 +39,175 @@ function setup() {
     SPREADSHEET_ID: spreadsheet.getId(),
     TASKS_DATA_SOURCE_ID: props.getProperty('TASKS_DATA_SOURCE_ID') || DEFAULTS.TASKS_DATA_SOURCE_ID,
     TIME_EVENTS_DATA_SOURCE_ID: props.getProperty('TIME_EVENTS_DATA_SOURCE_ID') || DEFAULTS.TIME_EVENTS_DATA_SOURCE_ID,
+    POLL_INTERVAL_MINUTES: props.getProperty('POLL_INTERVAL_MINUTES') || String(DEFAULTS.POLL_INTERVAL_MINUTES),
   }, false);
 
   ensureProjectionHeaders_();
-  ensureWebhookLogSheet_();
-  Logger.log('Setup complete. No webhook signing secret is stored in Apps Script.');
+  ensureSyncLogSheet_();
+  installSyncTrigger();
+  Logger.log('Setup complete. This project has no public endpoint and stores only NOTION_TOKEN.');
 }
 
 function showSetupInfo() {
   const props = PropertiesService.getScriptProperties();
   Logger.log(JSON.stringify({
     spreadsheetId: props.getProperty('SPREADSHEET_ID'),
-    tasksDataSourceId: props.getProperty('TASKS_DATA_SOURCE_ID'),
-    timeEventsDataSourceId: props.getProperty('TIME_EVENTS_DATA_SOURCE_ID'),
+    tasksDataSourceId: tasksDataSourceId_(),
+    timeEventsDataSourceId: timeEventsDataSourceId_(),
+    // Presence only. The token value is never logged.
     notionTokenConfigured: Boolean(props.getProperty('NOTION_TOKEN')),
-    // Presence only. Never log the relay secret value itself; it must be
-    // pasted directly into Script Properties by an authenticated operator.
-    relaySecretConfigured: Boolean(props.getProperty('APPS_SCRIPT_RELAY_SECRET')),
+    pollIntervalMinutes: pollIntervalMinutes_(),
+    syncTriggersInstalled: syncTriggers_().length,
+    lastSyncCursor: props.getProperty('LAST_SYNC_CURSOR') || '(never run)',
   }, null, 2));
 }
 
-function doGet() {
-  return json_({ ok: true, service: 'cloud42-notion-time-events-reconciler' });
+// Installs (or reinstalls) the time-driven trigger that drives reconciliation.
+// This project deliberately exposes no doGet/doPost Web App endpoint: the only
+// caller of the reconciler is this trigger, running as the project owner, so
+// there is no inbound request to authenticate and no receiver credential to
+// store, rotate, or leak.
+function installSyncTrigger() {
+  removeSyncTriggers();
+  const minutes = pollIntervalMinutes_();
+  ScriptApp.newTrigger('pollTaskChanges').timeBased().everyMinutes(minutes).create();
+  Logger.log('Installed pollTaskChanges trigger: every ' + minutes + ' minute(s).');
 }
 
-function doPost(e) {
-  const raw = e && e.postData ? e.postData.contents : '';
-  if (!raw) return json_({ ok: false, error: 'empty_body' });
+function removeSyncTriggers() {
+  syncTriggers_().forEach(function (trigger) {
+    ScriptApp.deleteTrigger(trigger);
+  });
+}
 
-  let request;
-  try {
-    request = JSON.parse(raw);
-  } catch (err) {
-    return json_({ ok: false, error: 'invalid_json' });
-  }
+function syncTriggers_() {
+  return ScriptApp.getProjectTriggers().filter(function (trigger) {
+    return trigger.getHandlerFunction() === 'pollTaskChanges';
+  });
+}
 
-  // Verify the Worker -> Apps Script relay envelope (HMAC over pageId+timestamp,
-  // a bounded timestamp window, and single-use replay protection) before this
-  // handler touches Notion in any way. {pageId} alone must never be enough to
-  // trigger reconciliation; a request missing or failing this check is rejected
-  // here, before retrieveNotionPage_ or any privileged mutation runs below.
-  const verification = verifyRelayRequest_(request);
-  if (!verification.ok) return json_({ ok: false, error: verification.error });
-  const pageId = verification.pageId;
+function pollIntervalMinutes_() {
+  const raw = Number(PropertiesService.getScriptProperties().getProperty('POLL_INTERVAL_MINUTES'));
+  return ALLOWED_POLL_INTERVALS.indexOf(raw) >= 0 ? raw : DEFAULTS.POLL_INTERVAL_MINUTES;
+}
 
-  // pageId is still deliberately treated as untrusted *content*. No status,
-  // actor, timestamp, author, completion evidence or event fields are accepted
-  // from the caller. The endpoint re-fetches the page using the private Notion
-  // token, validates the authoritative parent data source, and derives every
-  // mutation from that Notion state. An authenticated relay caller can
-  // therefore only request an idempotent reconciliation of a Task that already
-  // exists in Notion.
-  return withLock_(function () {
-    const task = retrieveNotionPage_(pageId);
-    if (!isConfiguredTask_(task)) {
-      return json_({ ok: true, ignored: 'not_configured_task' });
+// Trigger entry point. Asks Notion which Tasks changed since the last cursor
+// and reconciles each one against authoritative Notion state. Nothing outside
+// this project can invoke it, and no request payload is involved at all: the
+// Task list and every field driving a mutation come from Notion over an
+// authenticated API call using the private NOTION_TOKEN.
+function pollTaskChanges() {
+  return withPollLock_(function () {
+    const props = PropertiesService.getScriptProperties();
+    const runStartedAt = new Date();
+    const cursor = props.getProperty('LAST_SYNC_CURSOR');
+    const sinceMs = (cursor ? parseTimestamp_(cursor).getTime() : runStartedAt.getTime() - INITIAL_LOOKBACK_MS)
+      - SYNC_OVERLAP_MS;
+
+    const changed = queryChangedTasks_(new Date(sinceMs));
+    const outcomes = [];
+    let lastProcessedEdit = '';
+
+    for (let i = 0; i < changed.length && i < MAX_TASKS_PER_RUN; i++) {
+      outcomes.push(reconcileTaskPage_(changed[i]));
+      lastProcessedEdit = String(changed[i].last_edited_time || '');
     }
 
-    const currentStatus = propertyText_(task.properties.Status);
-    const assignedAgent = propertyText_(task.properties['Assigned Agent']);
-    const desiredActor = mapActor_(assignedAgent);
-    const title = propertyText_(task.properties.Title) || pageId;
-    const when = authoritativeEditTime_(task);
-    const changedBy = editorLabel_(task.last_edited_by);
-    const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent);
-
-    if (hasProcessedSnapshot_(snapshotId)) {
-      return json_({ ok: true, duplicate: true });
-    }
-
-    const outcome = reconcileAuthoritativeTimeEvents_(
-      task,
-      currentStatus,
-      desiredActor,
-      changedBy,
-      snapshotId,
-      when
+    // If the batch was capped, the cursor must stay at the last Task actually
+    // reconciled rather than jumping to now — otherwise the untouched tail of
+    // this window would be skipped permanently. An uncapped run advances to
+    // the moment the query was issued, so edits made while it ran are still
+    // inside the next run's overlap.
+    const capped = changed.length > MAX_TASKS_PER_RUN;
+    props.setProperty(
+      'LAST_SYNC_CURSOR',
+      capped && lastProcessedEdit ? lastProcessedEdit : runStartedAt.toISOString()
     );
 
-    syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
-    logSnapshot_(snapshotId, 'notion_reconcile', pageId, currentStatus, when, outcome);
-    return json_({ ok: true, outcome: outcome });
+    return {
+      scanned: changed.length,
+      processed: Math.min(changed.length, MAX_TASKS_PER_RUN),
+      capped: capped,
+      outcomes: outcomes,
+    };
   });
+}
+
+// Operator escape hatch for E2E and debugging: reconcile one Task on demand.
+// Runs only from the Apps Script editor, as the project owner.
+function reconcileTaskById(pageId) {
+  const normalized = normalizeUuid_(pageId);
+  if (!normalized) throw new Error('reconcileTaskById requires a Notion page ID.');
+  return withPollLock_(function () {
+    return reconcileTaskPage_(retrieveNotionPage_(normalized));
+  });
+}
+
+// Reconciles a single authoritative Notion Task page. Status, assignment,
+// timing and completion evidence are read from the page Notion returned; the
+// reconciler only ever moves Task Time Events toward the state Notion already
+// holds, so a repeated pass over the same page is a no-op.
+function reconcileTaskPage_(task) {
+  if (!isConfiguredTask_(task)) return 'ignored:not_configured_task';
+
+  const pageId = task.id;
+  const currentStatus = propertyText_(task.properties.Status);
+  const assignedAgent = propertyText_(task.properties['Assigned Agent']);
+  const desiredActor = mapActor_(assignedAgent);
+  const title = propertyText_(task.properties.Title) || pageId;
+  const when = authoritativeEditTime_(task);
+  const changedBy = editorLabel_(task.last_edited_by);
+  const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent);
+
+  if (hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
+
+  const outcome = reconcileAuthoritativeTimeEvents_(
+    task,
+    currentStatus,
+    desiredActor,
+    changedBy,
+    snapshotId,
+    when
+  );
+
+  syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
+  logSnapshot_(snapshotId, 'notion_poll', pageId, currentStatus, when, outcome);
+  return outcome;
+}
+
+// Tasks whose last_edited_time is at or after `since`, oldest first, so a
+// capped run leaves a contiguous unprocessed tail behind the cursor.
+function queryChangedTasks_(since) {
+  let cursor = null;
+  let pageCount = 0;
+  const results = [];
+
+  do {
+    const body = {
+      page_size: 100,
+      filter: {
+        timestamp: 'last_edited_time',
+        last_edited_time: { on_or_after: since.toISOString() },
+      },
+      sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+    };
+    if (cursor) body.start_cursor = cursor;
+
+    const response = notionRequest_(
+      'post',
+      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+      body
+    );
+
+    (response.results || []).forEach(function (item) {
+      if (item && item.object === 'page') results.push(item);
+    });
+
+    cursor = response.has_more ? response.next_cursor : null;
+    pageCount++;
+  } while (cursor && pageCount < 5);
+
+  return results;
 }
 
 function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
@@ -181,11 +281,13 @@ function enforceDoneGate_(task, allEvents, openEvents) {
 
   // A closed Time Event must apply to the *current* execution, not merely
   // exist somewhere in the Task's history. Reopen -> restart cases can leave
-  // an old closed event on the Task while the restart's own In Progress
-  // webhook is aggregated away by Notion (see README "Known limitations"),
-  // so counting any historical closed event would let a stale interval from
-  // a previous completed execution satisfy Done for work that was never
-  // timed. `Started At` on the Task itself is the current-execution marker:
+  // an old closed event on the Task while the restart's own In Progress spell
+  // never surfaces to the reconciler — a Task edited into and back out of
+  // In Progress inside one poll window is only ever observed in its final
+  // state (see README "Known limitations"). Counting any historical closed
+  // event would then let a stale interval from a previous completed execution
+  // satisfy Done for work that was never timed. `Started At` on the Task
+  // itself is the current-execution marker:
   // governance requires it to be (re)recorded whenever a fresh execution
   // begins. A closed event only counts if it started at or after that
   // marker.
@@ -216,79 +318,6 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     : DEFAULTS.REVIEW_STATUS;
   updateTaskStatus_(task.id, rollbackStatus);
   return 'done_gate_rejected:' + failures.join('+') + ':rollback=' + rollbackStatus;
-}
-
-// Verifies the Worker -> Apps Script relay envelope: HMAC-SHA256 over
-// "pageId|relayTimestamp" using the shared APPS_SCRIPT_RELAY_SECRET, a
-// bounded timestamp window, and single-use replay protection via
-// CacheService. Returns { ok: true, pageId } only when every check passes;
-// otherwise { ok: false, error }. Must run, and must pass, before any Notion
-// fetch or mutation.
-function verifyRelayRequest_(request) {
-  const secret = PropertiesService.getScriptProperties().getProperty('APPS_SCRIPT_RELAY_SECRET');
-  if (!secret) return { ok: false, error: 'relay_secret_not_configured' };
-
-  // Sign/verify against the exact raw pageId string the Worker put in the
-  // envelope, not a normalized form. The Worker signs payload.entity.id
-  // verbatim, so recomputing the HMAC over anything else (e.g. a
-  // dash-normalized copy) would make a legitimate signature fail to match on
-  // the rare page ID whose raw formatting differs from normalizeUuid_'s
-  // canonical output.
-  const rawPageId = typeof (request && request.pageId) === 'string' ? request.pageId : '';
-  const pageId = normalizeUuid_(rawPageId);
-  if (!pageId) return { ok: false, error: 'missing_or_invalid_page_id' };
-
-  const relayTimestamp = request && request.relayTimestamp;
-  if (typeof relayTimestamp !== 'string' || !/^\d+$/.test(relayTimestamp)) {
-    return { ok: false, error: 'missing_or_invalid_relay_timestamp' };
-  }
-
-  const relaySignature = request && request.relaySignature;
-  if (typeof relaySignature !== 'string' || !relaySignature) {
-    return { ok: false, error: 'missing_relay_signature' };
-  }
-
-  const timestampMs = Number(relayTimestamp);
-  if (!isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > RELAY_TIMESTAMP_WINDOW_MS) {
-    return { ok: false, error: 'relay_timestamp_out_of_window' };
-  }
-
-  const expectedSignature = computeRelayHmacHex_(rawPageId + '|' + relayTimestamp, secret);
-  if (!constantTimeEqual_(expectedSignature, relaySignature)) {
-    return { ok: false, error: 'invalid_relay_signature' };
-  }
-
-  // A valid, in-window signature is still only good for one use: cache it for
-  // (at least) twice the acceptance window so a captured envelope cannot be
-  // replayed anywhere inside the window either side of its first use.
-  const cache = CacheService.getScriptCache();
-  const nonceKey = 'relay_nonce:' + relaySignature;
-  if (cache.get(nonceKey)) return { ok: false, error: 'relay_replay_detected' };
-  const cacheSeconds = Math.min(21600, Math.ceil((RELAY_TIMESTAMP_WINDOW_MS * 2) / 1000) + 30);
-  cache.put(nonceKey, '1', cacheSeconds);
-
-  return { ok: true, pageId: pageId };
-}
-
-// HMAC-SHA256 of `message` under `secret`, returned as lowercase hex. Must
-// stay byte-for-byte compatible with the Worker's own `rawHmac` (which signs
-// the same "pageId|relayTimestamp" message and hex-encodes the raw digest)
-// since both sides compute this independently and must agree.
-function computeRelayHmacHex_(message, secret) {
-  const rawSignature = Utilities.computeHmacSha256Signature(message, secret, Utilities.Charset.UTF_8);
-  return rawSignature.map(function (byte) {
-    const hex = (byte < 0 ? byte + 256 : byte).toString(16);
-    return hex.length === 1 ? '0' + hex : hex;
-  }).join('');
-}
-
-function constantTimeEqual_(a, b) {
-  a = String(a || '');
-  b = String(b || '');
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
 }
 
 function updateTaskStatus_(taskId, statusName) {
@@ -455,9 +484,13 @@ function notionRequest_(method, path, body) {
 }
 
 function isConfiguredTask_(page) {
-  const configured = normalizeId_(PropertiesService.getScriptProperties().getProperty('TASKS_DATA_SOURCE_ID') || DEFAULTS.TASKS_DATA_SOURCE_ID);
+  const configured = normalizeId_(tasksDataSourceId_());
   const actual = normalizeId_(page && page.parent && page.parent.data_source_id);
   return Boolean(actual && actual === configured);
+}
+
+function tasksDataSourceId_() {
+  return PropertiesService.getScriptProperties().getProperty('TASKS_DATA_SOURCE_ID') || DEFAULTS.TASKS_DATA_SOURCE_ID;
 }
 
 function timeEventsDataSourceId_() {
@@ -543,14 +576,14 @@ function editorLabel_(user) {
 
 function hasProcessedSnapshot_(snapshotId) {
   if (!snapshotId) return false;
-  const sheet = ensureWebhookLogSheet_();
+  const sheet = ensureSyncLogSheet_();
   if (sheet.getLastRow() < 2) return false;
   return Boolean(sheet.getRange(2, 1, sheet.getLastRow() - 1, 1)
     .createTextFinder(snapshotId).matchEntireCell(true).findNext());
 }
 
 function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
-  const sheet = ensureWebhookLogSheet_();
+  const sheet = ensureSyncLogSheet_();
   sheet.appendRow([id || '', type || '', taskId || '', status || '', receivedAt || new Date(), outcome || '']);
 }
 
@@ -564,15 +597,15 @@ function ensureProjectionHeaders_() {
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
 }
 
-function ensureWebhookLogSheet_() {
+function ensureSyncLogSheet_() {
   const ss = spreadsheet_();
-  let sheet = ss.getSheetByName(DEFAULTS.WEBHOOK_LOG_SHEET);
+  let sheet = ss.getSheetByName(DEFAULTS.SYNC_LOG_SHEET);
   if (!sheet) {
-    sheet = ss.insertSheet(DEFAULTS.WEBHOOK_LOG_SHEET);
+    sheet = ss.insertSheet(DEFAULTS.SYNC_LOG_SHEET);
     sheet.hideSheet();
   }
   sheet.getRange(1, 1, 1, 6).setValues([[
-    'Snapshot ID', 'Type', 'Task ID', 'Status', 'Received At', 'Outcome'
+    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome'
   ]]);
   return sheet;
 }
@@ -613,17 +646,16 @@ function clip_(value, maxLength) {
   return value.length <= maxLength ? value : value.substring(0, maxLength);
 }
 
-function withLock_(fn) {
+// A poll that is still running keeps the lock; the next trigger tick simply
+// steps aside rather than queueing up behind it. Skipping is safe because the
+// cursor is only advanced by a run that completes, so the skipped window is
+// re-read by the following tick.
+function withPollLock_(fn) {
   const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  if (!lock.tryLock(5000)) return { skipped: 'poll_already_running' };
   try {
     return fn();
   } finally {
     lock.releaseLock();
   }
-}
-
-function json_(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
 }

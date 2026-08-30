@@ -1,16 +1,16 @@
-name: Notion Time Events Worker
+name: Notion Time Events
 
 on:
   pull_request:
     paths:
       - 'integrations/notion-time-events/**'
-      - '.github/workflows/notion-time-events-worker.yml'
+      - '.github/workflows/notion-time-events.yml'
   push:
     branches:
       - main
     paths:
       - 'integrations/notion-time-events/**'
-      - '.github/workflows/notion-time-events-worker.yml'
+      - '.github/workflows/notion-time-events.yml'
 
 permissions:
   contents: read
@@ -26,9 +26,6 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: Run Cloudflare Worker tests
-        working-directory: integrations/notion-time-events/worker
-        run: npm test
-      - name: Run Apps Script relay/Done-gate tests
+      - name: Run Apps Script reconciler tests
         working-directory: integrations/notion-time-events
         run: node --test test/*.test.mjs

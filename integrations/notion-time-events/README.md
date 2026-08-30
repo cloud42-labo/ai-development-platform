@@ -12,18 +12,21 @@ Automate Task-level effort recording without creating a second operational sourc
 
 Flow:
 
-`Notion Stories & Tasks change` → `Notion webhook` → `Cloudflare Worker (signature validation)` → `Apps Script zero-trust reconcile trigger` → `Notion Task Time Events (authoritative)` → `Google Sheets projection`
+`Notion Stories & Tasks change` → `Apps Script time-driven poll (last_edited_time cursor)` → `Notion Task Time Events (authoritative)` → `Google Sheets projection`
+
+There is **no webhook, no public endpoint, and no receiver credential** anywhere in this integration. The reconciler is driven by a time-based trigger inside the bound Apps Script project and reads Notion over the authenticated API. See **Why there is no webhook receiver** below for the reasoning and the constraint it comes from.
 
 ## Behavior
 
+- Each run asks Notion for `Stories & Tasks` pages whose `last_edited_time` is at or after the stored cursor (minus a fixed overlap), oldest first, and reconciles each one.
 - `Status = In Progress` ensures exactly one authoritative open Task Time Event for the currently mapped `Assigned Agent`.
 - Moving from `In Progress` to `Review`, `Blocked`, `Ready`, or `Backlog` closes every authoritative open event for the Task, regardless of current assignee.
 - Changing or clearing `Assigned Agent` while the Task remains `In Progress` closes the old Actor event and opens the new Actor event when the new assignment maps to a supported Actor.
 - Duplicate open events for the same Task/Actor are reconciled to one open event.
-- `Done` is a **completion gate, not a stop trigger**. A Done webhook never closes a Time Event after completion.
+- `Done` is a **completion gate, not a stop trigger**. Reconciling a Done Task never closes a Time Event after completion.
 - Done with an open Time Event is rejected by restoring `In Progress`; Done with closed timing but missing an applicable Time Event, `Result`, or `Completed At` is rejected by restoring `Review`. "Applicable" means a closed Time Event whose `Started At` is at or after the Task's current `Started At` — a closed event left over from a prior, already-completed execution does not, by itself, satisfy Done for a later reopen.
 - Valid completion order is: finish work → `Review` (time event closes) → record `Result` + `Completed At` → `Done`.
-- Reconciliation snapshots are derived from the authoritative Notion page (`last_edited_time`, Status, Assigned Agent), not webhook-supplied status/actor/timestamp values.
+- Reconciliation snapshots are derived from the authoritative Notion page (`last_edited_time`, Status, Assigned Agent). Recorded interval timestamps come from `last_edited_time` on the Task, **not** from when the poll happened, so a poll interval does not distort recorded effort.
 - Sheet rows are upserted by the authoritative Notion Task Time Event page ID.
 
 Actor mapping:
@@ -35,37 +38,33 @@ Actor mapping:
 
 Normal conversation and non-Task activity are outside this integration because no managed Task state is reconciled.
 
+## Why there is no webhook receiver
+
+The earlier design in this directory used a Notion webhook subscription. Notion proves a webhook delivery's authenticity **only** through the `X-Notion-Signature` request header, computed as HMAC-SHA256 of the raw body under the subscription's verification token.
+
+A Google Apps Script Web App **cannot read request headers**. `doPost(e)` exposes the body, query parameters, and content type; the request headers are not in the event object, and Google has stated this will not be added. Consequently:
+
+- Apps Script can never verify a Notion signature itself.
+- The only credential an Apps Script endpoint can check is one placed in the URL or the body — a static bearer secret, which is exactly what Codex flagged as a P1 (the URL becomes a bearer credential retained in Notion configuration and browser history).
+- Keeping webhooks therefore requires a **separate relay service** that can read headers, plus a second shared secret to authenticate the relay's own hop into Apps Script.
+
+The relay was real work solving a real constraint, but the constraint only exists because of the webhook. This integration's reconciler never trusted webhook content in the first place: the delivery was reduced to a page ID, and every field driving a mutation was re-fetched from Notion. A delivery was only ever a "something changed, go look" ping — and Apps Script can generate that ping locally from a time-driven trigger over `last_edited_time`.
+
+Removing the webhook removes the header problem, the relay, the relay secret, the verification-token enrollment dance, and the public endpoint, without changing what gets recorded.
+
+Trade-off, stated plainly: reconciliation is no longer near-instant. A change is picked up within one poll interval (5 minutes by default, tunable to 1). This delays a Done-gate rollback by up to that interval; it does **not** shift recorded `Started At` / `Ended At` values, which are read from Notion's own `last_edited_time`.
+
 ## Security model
 
-### Notion → Worker
+The integration has no inbound attack surface: nothing outside the Apps Script project can invoke the reconciler, so there is no request to authenticate.
 
-The Notion subscription URL contains **no bearer key or credential**. Normal webhook deliveries are accepted by the Worker only after `X-Notion-Signature` validates against the exact raw request body with the operator-promoted Worker secret `NOTION_WEBHOOK_VERIFICATION_TOKEN`.
+- **One secret, one place.** `NOTION_TOKEN` lives only in Apps Script Script Properties. There is no webhook verification token and no relay secret to generate, duplicate across systems, rotate in lockstep, or leak. Never put the token in source code, GitHub, the Sheet, a URL, or logs.
+- **No public endpoint.** The project defines no `doGet` / `doPost`, and the Web App deployment is removed. An attacker who learns the script ID has nothing to call.
+- **No credential in any URL.** Satisfied by construction rather than by mitigation — there is no receiver URL.
+- **Notion remains the only source of operational truth.** Every mutation is derived from a page Notion returned over an authenticated call; the reconciler can only move Task Time Events toward the state Notion already holds, and repeating a pass over the same page is a no-op.
+- **Least privilege on the Notion side.** The connection needs access to `Stories & Tasks` and `Task Time Events` only.
 
-The initial verification request is not treated as authenticated identity because its body carries the future HMAC token. The Worker stores that value only as `notion_webhook_pending_token` in the `WEBHOOK_STATE` KV namespace. It is not active and is not forwarded downstream. An authenticated operator must first paste the pending token into Notion's verification UI and see Notion accept it; only then is the same value promoted to the Worker secret.
-
-A forged handshake can at most replace the pending candidate. Without operator promotion it cannot authenticate normal events.
-
-### Worker → Apps Script
-
-The Worker relays **`{pageId, relayTimestamp, relaySignature}`**. It does not forward webhook status, actor, author, event timestamp, property values, the Notion verification token, or the Notion signature — those all stay at the Worker. `relaySignature` is `HMAC-SHA256(pageId + '|' + relayTimestamp, APPS_SCRIPT_RELAY_SECRET)`, hex-encoded; `APPS_SCRIPT_RELAY_SECRET` is a **separate** shared secret from the Notion webhook token, configured identically in both Cloudflare and Apps Script (see **Relay secret provisioning** below).
-
-Before `doPost` does anything else — before it fetches or mutates Notion in any way — it calls `verifyRelayRequest_`, which:
-
-1. rejects the request outright if `APPS_SCRIPT_RELAY_SECRET` is not configured in Apps Script Script Properties (fails closed rather than falling back to trusting an unauthenticated `pageId`);
-2. recomputes the expected HMAC over `pageId + '|' + relayTimestamp` and rejects on any mismatch;
-3. rejects if `relayTimestamp` is missing, malformed, or outside a bounded window (currently 5 minutes) of the current time in either direction;
-4. rejects if the exact `relaySignature` has already been seen, using `CacheService` to record each accepted signature for the life of the window — a captured, valid envelope cannot be replayed.
-
-Only once all four checks pass does Apps Script treat `pageId` as an *authenticated* — but still content-untrusted — request to reconcile that Task. `{pageId}` on its own, without a valid `relayTimestamp`/`relaySignature`, can never reach `retrieveNotionPage_` or any privileged mutation. From there Apps Script:
-
-1. fetches that page from Notion using the existing private `NOTION_TOKEN`;
-2. verifies the page belongs to the configured `Stories & Tasks` data source;
-3. derives Status, Assigned Agent, editor and timing from the authoritative Notion page;
-4. performs an idempotent reconciliation that can only move Task Time Events toward the state already represented in Notion.
-
-This means a caller cannot submit an arbitrary actor/status/timestamp or forge operational evidence even after clearing the relay check — Notion, not the request body, remains the source of truth for *what* changed. The relay check instead establishes *who* may ask for reconciliation at all: only a caller holding `APPS_SCRIPT_RELAY_SECRET` (in practice, only the Worker) can trigger one.
-
-The Notion webhook verification token is never copied into Apps Script, and `APPS_SCRIPT_RELAY_SECRET` is never copied into Notion or logged anywhere. This avoids cross-system secret duplication and keeps each secret scoped to the single hop it authenticates.
+`reconcileTaskById(pageId)` exists as an operator escape hatch for E2E and debugging. It runs only from the Apps Script editor, as the project owner, and is not reachable from outside.
 
 ## Google Sheet
 
@@ -78,7 +77,7 @@ Tabs:
 - `Time Events` — derived projection of Notion Task Time Events.
 - `Summary` — Actor totals and open-event counts derived from the projection.
 - `Config` — non-secret configuration reference.
-- `Webhook Log` — hidden reconciliation snapshot diagnostics; contains no secrets.
+- `Sync Log` — hidden reconciliation snapshot diagnostics; contains no secrets.
 
 Spreadsheet timezone must remain `Asia/Tokyo`.
 
@@ -94,58 +93,38 @@ The Notion connection used by Apps Script must have access to both `Stories & Ta
 - create Task Time Events; and
 - update `Ended At` / `Note` on Task Time Events.
 
-Creating Task Time Events through the Notion API requires **Insert Content** capability. Do not continue to secure E2E if the connection is read/update-only.
+Creating Task Time Events through the Notion API requires **Insert Content** capability. Do not continue to E2E if the connection is read/update-only.
 
-`NOTION_TOKEN` remains only in Apps Script Script Properties; never put it in source code, GitHub, the Sheet, a URL, or logs.
-
-## Apps Script setup
+## Setup
 
 1. Open the PoC Google Sheet → **Extensions → Apps Script**.
 2. Replace `Code.gs` with the current version from this directory.
-3. Run `setup()` once. Existing `NOTION_TOKEN` is preserved; no webhook or relay secret is added by `setup()` itself.
-4. Redeploy the Web App as a new version. Execute as yourself and permit the Cloudflare Worker to POST without Google sign-in.
-5. Keep the `/exec` URL private and configure it only as Cloudflare `APPS_SCRIPT_URL`.
+3. Confirm `NOTION_TOKEN` is present under **Project Settings → Script Properties**. Add it there through the editor UI if it is missing; never set it from committed code.
+4. Run `setup()` once. It records the spreadsheet/data-source IDs, ensures the `Time Events` and `Sync Log` tabs, and installs the `pollTaskChanges` time-driven trigger. Authorize the script when prompted.
+5. Run `showSetupInfo()` and confirm `notionTokenConfigured: true`, `syncTriggersInstalled: 1`, and the expected `pollIntervalMinutes`.
 
-The Apps Script endpoint is **not** the Notion subscription URL.
+There is nothing to deploy: the project is not a Web App. If a Web App deployment from the earlier webhook design still exists, archive it (**Deploy → Manage deployments → Archive**) so no public endpoint remains.
 
-## Cloudflare Worker setup
+### Poll interval
 
-Worker source is under `worker/`.
+`POLL_INTERVAL_MINUTES` (Script Property) accepts `1`, `5`, `10`, `15`, or `30`; anything else falls back to `5`. Change it and re-run `installSyncTrigger()` to apply.
 
-1. Create/bind a Workers KV namespace named `WEBHOOK_STATE`. With current Wrangler, `npx wrangler kv namespace create WEBHOOK_STATE --update-config` can add the binding to `wrangler.jsonc`.
-2. Configure `APPS_SCRIPT_URL` in Cloudflare environment/secret storage with the Apps Script `/exec` URL. Do not commit it.
-3. Deploy the Worker. `NOTION_WEBHOOK_VERIFICATION_TOKEN` is intentionally left unset for the enrollment phase below. `APPS_SCRIPT_RELAY_SECRET` may also still be unset at this point — the Worker's initial Notion verification handshake (the pending-token path) succeeds without it; only the privileged relay hop to Apps Script, which happens after a normal signed event, requires it. Provision the relay secret (next section) before relying on normal event delivery, and in any case before promoting the verification token in step 6 of enrollment.
-4. Use only the Worker's public HTTPS URL as the Notion webhook URL. Do not append authentication query parameters.
+`5` is the default because Apps Script caps total trigger runtime per day (90 minutes on a consumer account, 6 hours on Workspace) and a 1-minute trigger burns roughly five times the budget for reconciliation that is measured in hours. Use `1` only on a Workspace account, or after confirming headroom in the Apps Script execution dashboard.
 
-The Worker requires no Notion API token.
+## Behavior of the cursor
 
-## Relay secret provisioning (`APPS_SCRIPT_RELAY_SECRET`)
+`LAST_SYNC_CURSOR` (Script Property) holds the timestamp the next poll starts from. Each run:
 
-This secret authenticates only the Worker → Apps Script hop; it is unrelated to `NOTION_WEBHOOK_VERIFICATION_TOKEN` and unrelated to `NOTION_TOKEN`. It must be set to the **same value** in both Cloudflare and Apps Script, generated once by a Human/authenticated operator, and never committed, logged, or pasted into Notion/GitHub/the Sheet.
+- queries from `cursor - 2 minutes`, because Notion reports `last_edited_time` at minute granularity and a page can be indexed fractionally after it is written;
+- re-reads are free — the reconciler's snapshot hash (`page id | last_edited_time | Status | Assigned Agent`) drops anything already processed;
+- advances the cursor to the moment the query was issued, but only for a run that completes. A failed or skipped run leaves the cursor alone, so the window is retried;
+- reconciles at most 25 Tasks per run so a large backlog cannot exceed the Apps Script runtime limit; a capped run leaves the cursor on the last Task it actually reconciled, and the next run continues from there.
 
-1. Generate a high-entropy value, e.g. `openssl rand -hex 32`. Copy it only into the two places below, then discard the terminal scrollback/clipboard.
-2. **Cloudflare**: `npx wrangler secret put APPS_SCRIPT_RELAY_SECRET` from `worker/`, and paste the value at the interactive prompt (or set it via the authenticated Cloudflare dashboard's Worker secret UI). Wrangler's secret prompt does not echo or log the value.
-3. **Apps Script**: open the bound project → gear icon **Project Settings** → **Script Properties** → **Add script property**, name `APPS_SCRIPT_RELAY_SECRET`, and paste the same value. Do this through the Apps Script editor UI directly; do not add a call like `setProperty('APPS_SCRIPT_RELAY_SECRET', '...')` to any committed script, since that would put the secret in source history.
-4. Confirm both sides are set: `showSetupInfo()` in Apps Script logs `relaySecretConfigured: true` (presence only, never the value); the Cloudflare dashboard's Worker secrets list shows `APPS_SCRIPT_RELAY_SECRET` as set.
-5. Rotation: repeat steps 1–4 with a new value. Update both sides in the same operator session — a mismatch makes every relay request fail closed (`invalid_relay_signature`) rather than silently degrade, so there is no window where a stale value is accepted on one side only.
+To re-run a window deliberately, clear `LAST_SYNC_CURSOR` (the next poll then looks back one hour) or call `reconcileTaskById(pageId)` for a single Task.
 
-## Trusted subscription enrollment
+## E2E
 
-1. Keep the old direct-to-Apps-Script subscription paused while migrating.
-2. Create a new Notion subscription whose URL is the Cloudflare Worker URL and event is `page.properties_updated`.
-3. Notion sends the verification request. The Worker stores its token only as KV key `notion_webhook_pending_token` and does not relay or activate it. This step succeeds regardless of whether `APPS_SCRIPT_RELAY_SECRET` has been provisioned yet — the pending-token path never reaches the relay-secret check.
-4. In an authenticated Cloudflare dashboard session, read the pending KV value. Do not place it in chat, screenshots, GitHub, Sheets, URLs, or logs.
-5. Paste that pending value directly into Notion's verification UI.
-6. **Only after Notion reports the subscription verified**, promote the accepted value into Cloudflare secret `NOTION_WEBHOOK_VERIFICATION_TOKEN` using the authenticated dashboard or Wrangler's interactive secret prompt (`npx wrangler secret put NOTION_WEBHOOK_VERIFICATION_TOKEN`). Before this point, also confirm **Relay secret provisioning** above is complete — the first normal signed event that arrives right after promotion will fail closed with `missing_apps_script_relay_secret` if `APPS_SCRIPT_RELAY_SECRET` is not yet set on both sides.
-7. Delete the pending KV key after promotion.
-8. Normal signed events now validate at the Worker and produce authenticated, relay-signed `{pageId, relayTimestamp, relaySignature}` reconciliation requests to Apps Script, which independently verifies that envelope before touching Notion.
-9. After secure E2E passes, delete the old paused direct subscription.
-
-The Notion verification token is not configured in Apps Script at any point. `APPS_SCRIPT_RELAY_SECRET` is not configured in Notion at any point.
-
-## Secure E2E
-
-Use non-production test Tasks.
+Use non-production test Tasks. Allow up to one poll interval for each step, or call `reconcileTaskById(pageId)` from the editor to reconcile immediately.
 
 ### Status start/stop
 
@@ -157,12 +136,12 @@ Use non-production test Tasks.
 
 ### Done gate
 
-1. While a Task still has an open Time Event, attempt `In Progress → Done`.
+1. While a Task still has an open Time Event, set it to `Done`.
 2. Confirm the integration restores `In Progress` and leaves the Time Event open; Done is not allowed to persist.
 3. Move `In Progress → Review` and confirm the Time Event closes.
-4. Attempt Done without a prior Time Event, `Result`, or `Completed At`; confirm the Task is restored to `Review`.
+4. Set Done without a prior Time Event, `Result`, or `Completed At`; confirm the Task is restored to `Review`.
 5. Provide required evidence and then move to Done; confirm Done persists with an existing closed Time Event.
-6. **Reopen correlation**: complete a Task through Done once (closed Time Event, `Result`, `Completed At` all present). Reopen it (`Done → Backlog` or `Ready`), then move it back to `In Progress` and immediately to `Done` again *without* letting a new Time Event open for this second execution (e.g. by editing Status directly rather than via the normal start/stop flow, so the intermediate `In Progress` webhook is skipped or aggregated). Confirm Done is rejected and the Task is restored to `Review`/`In Progress` — the old, pre-reopen closed event must not satisfy the gate for the new execution. Then run the normal start/stop flow for the new execution and confirm Done then persists.
+6. **Reopen correlation**: complete a Task through Done once (closed Time Event, `Result`, `Completed At` all present). Reopen it (`Done → Backlog` or `Ready`), then move it back to `In Progress` and immediately to `Done` again within a single poll interval, so no new Time Event opens for this second execution. Confirm Done is rejected and the Task is restored to `Review`/`In Progress` — the old, pre-reopen closed event must not satisfy the gate for the new execution. Then run the normal start/stop flow for the new execution and confirm Done then persists.
 
 ### Reassignment
 
@@ -171,43 +150,38 @@ Use non-production test Tasks.
 3. Confirm the original Actor's Notion Time Event closes and the new Actor receives a new open Time Event.
 4. Clear the assignment while still `In Progress`; confirm any remaining open event closes rather than becoming orphaned.
 
-### Retry/idempotency
+### Idempotency
 
-Cause/replay a webhook retry and confirm no duplicate authoritative Task Time Event is created. Repeat the same `{pageId}` reconciliation request directly and confirm it produces no extra operational mutation.
+1. Call `reconcileTaskById(pageId)` twice in a row for an unchanged Task and confirm the second call reports `duplicate:` and makes no Notion mutation.
+2. Confirm the overlapping poll window (a Task edited within the last 2 minutes is re-read on the next run) creates no duplicate authoritative Time Event.
 
-### Enrollment attack
+### No public endpoint
 
-1. With no active Worker secret configured, submit a self-signed fake handshake token.
-2. Confirm it is stored only as pending.
-3. Submit a normal event signed with that fake pending token and confirm the Worker rejects it because no operator-promoted active credential exists.
-
-### Relay authentication
-
-1. Submit `{pageId}` directly to the Apps Script `/exec` URL with no `relayTimestamp`/`relaySignature`. Confirm it is rejected and no Notion request is made.
-2. Submit a correctly shaped envelope signed with the wrong secret. Confirm `invalid_relay_signature` and no Notion request.
-3. Submit a correctly signed envelope with a `relayTimestamp` well outside the window (e.g. 30 minutes old). Confirm `relay_timestamp_out_of_window` and no Notion request.
-4. Capture one genuine relay request (e.g. from Worker logs during a real event) and resubmit the identical body to Apps Script. Confirm the second submission is rejected as a replay.
-5. Temporarily clear `APPS_SCRIPT_RELAY_SECRET` from Apps Script Script Properties and confirm requests fail closed (`relay_secret_not_configured`) rather than falling back to trusting `pageId` alone. Restore the value afterward.
+1. Confirm **Deploy → Manage deployments** lists no active Web App deployment for this project.
+2. Confirm `Code.gs` defines no `doGet` / `doPost`.
 
 ## Known limitations
 
-Notion may aggregate `page.properties_updated` deliveries. The reconciler intentionally uses the Task's **current authoritative state** rather than intermediate webhook property claims. This prevents orphan/duplicate intervals but means extremely rapid intermediate Status/Actor transitions may be collapsed before reconciliation. The PoC must evaluate whether those transitions matter at real Cloud42 task timescales.
+The reconciler intentionally uses the Task's **current authoritative state** rather than a change history. A Task edited into and back out of `In Progress` inside a single poll interval is only ever observed in its final state, so that intermediate spell is not recorded. This is the same property the webhook design had — Notion aggregates `page.properties_updated` deliveries — and the PoC must evaluate whether those transitions matter at real Cloud42 task timescales.
 
-The Done gate is reactive because Notion webhooks are post-change notifications. An invalid Done may exist briefly before the receiver rolls it back, but it cannot remain Done once the event is processed. Durable completion still requires the Time Event and completion evidence first.
+The Done gate is reactive: it observes a Status that has already been set. An invalid Done may exist for up to one poll interval before the reconciler rolls it back, but it cannot remain Done once the Task is reconciled. Durable completion still requires the Time Event and completion evidence first.
+
+`last_edited_time` is minute-granular, so two distinct edits to the same Task within one minute produce the same reconciliation snapshot and are reconciled once, against the later state.
 
 ## Success criteria
 
 - Notion remains authoritative for Task state and Task Time Events.
 - Sheet rows are reproducible projections of Notion events for touched Tasks.
-- No bearer credential appears in the webhook URL.
-- Handshake tokens remain pending until an authenticated operator verifies them in Notion and explicitly promotes them in Cloudflare.
-- The Notion webhook signing secret exists only in Cloudflare and never appears in Apps Script or execution logs.
-- The Worker → Apps Script relay is authenticated: Apps Script verifies an HMAC-signed, timestamp-bounded, single-use `{pageId, relayTimestamp, relaySignature}` envelope before any Notion fetch or mutation. `{pageId}` alone is never sufficient to trigger reconciliation.
-- `APPS_SCRIPT_RELAY_SECRET` is configured identically in Cloudflare and Apps Script Script Properties, never committed, never logged, and never placed in Notion.
-- A missing `APPS_SCRIPT_RELAY_SECRET` fails closed on both sides (Worker: only after the Notion verification handshake path, so a fresh deploy doesn't 500 on enrollment; Apps Script: on every relay request) rather than silently accepting an unauthenticated request.
-- Beyond the authenticated `pageId`, Apps Script accepts no externally supplied operational claims and re-fetches all authority from Notion.
+- No credential appears in any URL, and no public endpoint exists to hold one.
+- `NOTION_TOKEN` is the only secret, held only in Apps Script Script Properties, and never logged.
+- The reconciler is reachable only from inside the Apps Script project (time-driven trigger, or an operator running `reconcileTaskById` from the editor).
+- Beyond the Notion API responses it fetches itself, the reconciler accepts no externally supplied operational claims.
 - Human / Chris / Claude / Codex Task activity uses the same state-driven mechanism.
 - In-progress reassignment/clearing cannot leave the original Actor event open indefinitely.
 - Done cannot persist without a closed Time Event **applicable to the current execution** (started at or after the Task's current `Started At`), `Result`, and `Completed At`. A closed event left over from a prior, already-completed execution does not satisfy a later reopen's Done gate.
-- Duplicate webhook retries/reconciliation triggers do not duplicate authoritative events.
+- Repeated reconciliation of an unchanged Task does not duplicate authoritative events.
 - Normal conversation and non-Task activity create no event.
+
+## Tests
+
+`node --test test/*.test.mjs` from this directory. `test/support/gas-sandbox.mjs` runs `Code.gs` under a Node `vm` with a minimal Apps Script shim (Properties, Lock, Utilities, Spreadsheet, ScriptApp, UrlFetch), so the polling cursor, batching, trigger installation, reconciliation and Done gate are all covered without a live Apps Script project. CI runs the same command (`.github/workflows/notion-time-events.yml`).

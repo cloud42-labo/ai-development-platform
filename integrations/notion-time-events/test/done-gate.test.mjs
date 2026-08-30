@@ -45,9 +45,9 @@ function harnessWithNotionStub() {
 test('Done is rejected when only a past execution left a closed Time Event', () => {
   const { sandbox, fetchLog } = harnessWithNotionStub();
   // The Task was reopened and restarted at 03:00, but per README "Known
-  // limitations" the restart's own In Progress webhook can be aggregated
-  // away by Notion, so no new event opened for this execution. The only
-  // closed event on file is from the *previous*, already-completed run.
+  // limitations" the restart's own In Progress spell was never observed by a
+  // poll, so no new event opened for this execution. The only closed event on
+  // file is from the *previous*, already-completed run.
   const task = taskPage({
     startedAt: '2026-08-29T03:00:00.000Z',
     result: 'shipped',
