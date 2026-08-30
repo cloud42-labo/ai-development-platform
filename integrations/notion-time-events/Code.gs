@@ -702,7 +702,25 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
             return parseNoteMeta_(propertyText_(eventPage.properties.Note)).execution;
           }).find(Boolean) || '')
         : '';
-      const executionId = outgoingExecutionId || startAt.toISOString();
+      // A reassignment (otherActor.length) replacing a *legacy* outgoing
+      // event — one that predates this field and so has no Execution= to
+      // inherit — must NOT fall back to `startAt` here: `startAt` is
+      // deliberately the reassignment boundary in this exact branch (see
+      // above and Finding 1), not the execution's true start, so stamping
+      // it as the identity would tag the replacement with a value that will
+      // almost never match the Task's own (unchanged, still-correct)
+      // Started At once this closes — permanently misclassifying a
+      // genuinely current event as prior and blocking Done forever after
+      // an upgrade mid-execution. The Task's raw Started At is the correct
+      // fallback specifically here: unlike the first-ever-open case above,
+      // this Task is already, currently open — its Started At already
+      // identifies this same ongoing execution (whatever separately
+      // determines whether that itself is trustworthy is unrelated to this
+      // reassignment). Only the true first-ever-open case (no otherActor at
+      // all) needs `startAt`'s own stale-Started-At fallback behavior.
+      const executionId = outgoingExecutionId
+        || (otherActor.length && taskStartedAt ? taskStartedAt.toISOString() : '')
+        || startAt.toISOString();
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId);
       actions.push('opened:' + created.id);
     }

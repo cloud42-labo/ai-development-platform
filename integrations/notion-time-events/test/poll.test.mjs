@@ -1021,6 +1021,44 @@ test('a reassignment replacement inherits the outgoing event\'s own Execution= m
   assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:20:00.000Z');
 });
 
+test('a reassignment replacing a legacy (pre-Execution=) outgoing event falls back to the Task\'s own Started At, not the reassignment boundary', () => {
+  // Codex-reported gap: when the outgoing event predates this field
+  // entirely (a live deployment upgraded mid-execution), outgoingExecutionId
+  // is empty and the replacement must NOT fall back to `startAt` — `startAt`
+  // is deliberately the reassignment boundary in this branch (Finding 1),
+  // not the execution's true start. Stamping that as the identity would tag
+  // the replacement with a value that (almost) never matches the Task's own
+  // unchanged Started At once it closes, permanently misclassifying a
+  // genuinely current event as prior and blocking Done forever after an
+  // upgrade mid-execution. The Task's raw Started At — which already
+  // identifies this same ongoing execution, since the Task is currently
+  // open — is the correct fallback here instead.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa04';
+  const legacyOutgoingEvent = eventPage('evt-legacy-outgoing', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: null,
+    // No Execution= at all: this event predates the field.
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Human', // reassigned away from Claude
+    lastEdited: '2026-08-30T05:20:00.000Z', // the reassignment moment
+    startedAt: '2026-08-30T05:00:00.000Z', // the execution's true, unchanged start
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [legacyOutgoingEvent] });
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  const note = creates[0].properties.Note.rich_text[0].text.content;
+  // The Task's own Started At (05:00) — NOT the reassignment boundary
+  // (05:20) that this same replacement event's own Started At correctly is.
+  assert.match(note, /Execution=2026-08-30T05:00:00\.000Z/);
+  assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:20:00.000Z');
+});
+
 test('a query that hits the pagination safety limit does not let the cursor advance past unretrieved data', () => {
   const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d1f01', {
     status: 'Ready',
