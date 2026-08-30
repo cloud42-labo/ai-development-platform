@@ -272,6 +272,49 @@ test('overlap duplicates are skipped for free, so a dense duplicate cluster does
   assert.ok(new Date(scriptProps.get('LAST_SYNC_CURSOR')).getTime() >= new Date('2026-08-30T06:00:19.000Z').getTime());
 });
 
+test('25+ already-valid Done Tasks inside the overlap do not exhaust the batch and starve a later changed Task', () => {
+  // A single shared closed Time Event that satisfies every Done Task below
+  // (all share the same Started At, so it counts as "applicable" for each).
+  const sharedEvent = eventPage('evt-shared', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: '2026-08-30T05:05:00.000Z',
+  });
+
+  const doneTasks = [];
+  for (let i = 0; i < 26; i++) {
+    const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d3' + String(i).padStart(3, '0'), {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T05:20:' + String(i).padStart(2, '0') + '.000Z',
+      startedAt: '2026-08-30T05:00:00.000Z',
+    });
+    task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+    task.properties['Completed At'] = { type: 'date', date: { start: '2026-08-30T05:10:00.000Z' } };
+    doneTasks.push(task);
+  }
+
+  const laterChangedTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43d4001', {
+    status: 'Ready',
+    agent: 'Human',
+    lastEdited: '2026-08-30T06:00:00.000Z',
+  });
+
+  const { sandbox } = harness({
+    tasks: doneTasks.concat([laterChangedTask]),
+    events: [sharedEvent],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  const passingDoneOutcomes = summary.outcomes.filter((outcome) => outcome === 'done_gate_passed');
+  assert.equal(passingDoneOutcomes.length, 26);
+  // The Task sorted after all 26 valid Done outcomes still got reconciled in
+  // the same run, rather than being left behind an exhausted budget.
+  assert.equal(summary.outcomes[summary.outcomes.length - 1], 'no_change:Ready');
+  assert.equal(summary.capped, false);
+});
+
 test('a Done state is always re-verified by the gate, even if its snapshot hash collides with an already-processed one', () => {
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f77';
   const task = taskPage(taskId, {

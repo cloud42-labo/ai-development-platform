@@ -23,12 +23,12 @@ const SYNC_OVERLAP_MS = 2 * 60 * 1000;
 // How far back the very first poll looks when no cursor exists yet.
 const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 
-// Upper bound on *genuine* reconciliations (an outcome that is not a free
-// duplicate/ignored re-read) performed in one trigger run, so a large backlog
-// of real work can never push a single execution past the Apps Script
-// runtime limit. Anything left over is picked up by the next run from the
-// un-advanced cursor. A duplicate/ignored outcome does not count against
-// this — see isFreeOutcome_.
+// Upper bound on *genuine* reconciliations (an outcome that made a real
+// Notion write) performed in one trigger run, so a large backlog of real
+// work can never push a single execution past the Apps Script runtime limit.
+// Anything left over is picked up by the next run from the un-advanced
+// cursor. A free outcome (duplicate/ignored re-read, or an already-valid
+// Done needing no change) does not count against this — see isFreeOutcome_.
 const MAX_TASKS_PER_RUN = 25;
 
 // Separate, much larger bound on how many Tasks a single run will even look
@@ -142,12 +142,14 @@ function pollTaskChanges() {
       outcomes.push(outcome);
       lastScannedEdit = String(task.last_edited_time || '');
       iterated++;
-      // A duplicate/ignored outcome made no Notion write, so it is free to
-      // re-skip and must not consume the reconciliation budget. Otherwise a
-      // dense overlap cluster larger than MAX_TASKS_PER_RUN would have its
-      // leading (already-reconciled) Tasks re-selected and re-skipped every
-      // run, exhausting the cap on repeats of the same duplicates and never
-      // reaching the unprocessed tail behind them.
+      // A free outcome (duplicate/ignored re-read, or an already-valid Done
+      // needing no change) made no Notion write, so it must not consume the
+      // reconciliation budget. Otherwise a dense cluster of such outcomes
+      // larger than MAX_TASKS_PER_RUN — duplicates from the overlap window,
+      // or 25+ Tasks that are legitimately already Done — would have its
+      // leading Tasks re-selected and re-skipped every run, exhausting the
+      // cap on repeats of itself and never reaching the unprocessed tail
+      // behind it.
       if (!isFreeOutcome_(outcome)) reconciledCount++;
     }
 
@@ -317,7 +319,20 @@ function mergeTasksById_(primary, secondary) {
 // Outcomes that made no Notion write, and are therefore free to re-skip
 // without charging the per-run reconciliation budget (MAX_TASKS_PER_RUN).
 function isFreeOutcome_(outcome) {
-  return outcome === 'ignored:not_configured_task' || /^duplicate:/.test(String(outcome));
+  // 'done_gate_passed' makes no Notion write (a Done Task that already meets
+  // every requirement is left exactly as it is), so it is free to re-verify
+  // on every poll just like a duplicate or ignored outcome. Without this,
+  // always re-verifying Done (see reconcileTaskPage_) would let a run of 25+
+  // already-valid Done Tasks inside the overlap window exhaust the
+  // reconciliation budget on themselves every single run, permanently
+  // starving whatever changed Task sorts behind them — the same stall this
+  // budget exists to prevent, just triggered by successes instead of
+  // duplicates. A rejected Done ('done_gate_rejected:...') still counts: it
+  // made a real write (the rollback) and is exactly the case the always-
+  // reverify rule exists to keep catching.
+  return outcome === 'ignored:not_configured_task' ||
+    outcome === 'done_gate_passed' ||
+    /^duplicate:/.test(String(outcome));
 }
 
 function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
