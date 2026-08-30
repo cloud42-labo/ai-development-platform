@@ -18,7 +18,7 @@ There is **no webhook, no public endpoint, and no receiver credential** anywhere
 
 ## Behavior
 
-- Each run asks Notion for `Stories & Tasks` pages whose `last_edited_time` is at or after the stored cursor (minus a fixed overlap), oldest first, and reconciles each one.
+- Each run asks Notion for `Stories & Tasks` pages whose `last_edited_time` is at or after the stored cursor (minus a fixed overlap), oldest first, and reconciles each one. The very first run (no cursor yet) additionally bootstraps every currently `Status = In Progress` Task directly, regardless of `last_edited_time` — see **Behavior of the cursor** below.
 - `Status = In Progress` ensures exactly one authoritative open Task Time Event for the currently mapped `Assigned Agent`.
 - Moving from `In Progress` to `Review`, `Blocked`, `Ready`, or `Backlog` closes every authoritative open event for the Task, regardless of current assignee.
 - Changing or clearing `Assigned Agent` while the Task remains `In Progress` closes the old Actor event and opens the new Actor event when the new assignment maps to a supported Actor.
@@ -116,11 +116,12 @@ There is nothing to deploy: the project is not a Web App. If a Web App deploymen
 `LAST_SYNC_CURSOR` (Script Property) holds the timestamp the next poll starts from. Each run:
 
 - queries from `cursor - 2 minutes`, because Notion reports `last_edited_time` at minute granularity and a page can be indexed fractionally after it is written;
-- re-reads are free — the reconciler's snapshot hash (`page id | last_edited_time | Status | Assigned Agent`) drops anything already processed;
-- advances the cursor to the moment the query was issued, but only for a run that completes. A failed or skipped run leaves the cursor alone, so the window is retried;
-- reconciles at most 25 Tasks per run so a large backlog cannot exceed the Apps Script runtime limit; a capped run leaves the cursor on the last Task it actually reconciled, and the next run continues from there.
+- **bootstraps once** when no cursor exists yet (a fresh deploy, or after clearing `LAST_SYNC_CURSOR`): in addition to the time-window query, it separately queries every Task currently `Status = In Progress` by Status, independent of `last_edited_time`, and merges the two lists by page ID. Without this, a Task that had already been `In Progress` for longer than the one-hour initial lookback would never receive an open Time Event, and would then permanently fail the Done gate for lack of any applicable interval once it eventually moved;
+- re-reads are free — the reconciler's snapshot hash (`page id | last_edited_time | Status | Assigned Agent`) drops anything already processed, reported as a `duplicate:` outcome;
+- reconciles at most 25 Tasks **that actually do something** per run, so a large backlog of real work cannot exceed the Apps Script runtime limit. A `duplicate:`/`ignored:` outcome does **not** count against that limit — it made no Notion write, so it is skipped for free. This matters because the 2-minute overlap always re-includes Tasks from the previous run: if a dense cluster of already-reconciled Tasks were charged against the same cap as new work, that cluster (sorted first, being oldest) would be re-selected and re-skipped on every run, and Tasks behind it would never be reached. A safety bound (`MAX_TASKS_SCANNED_PER_RUN`, 500) still limits how many Tasks a single run will even look at, independent of how many turn out to be free re-skips;
+- advances the cursor to the moment the query was issued, but only for a run that gets through its entire batch. A run that stops early (either bound above) leaves the cursor on the last Task it actually looked at, and the next run continues from there. A failed or skipped run leaves the cursor alone entirely, so the window is retried.
 
-To re-run a window deliberately, clear `LAST_SYNC_CURSOR` (the next poll then looks back one hour) or call `reconcileTaskById(pageId)` for a single Task.
+To re-run a window deliberately, clear `LAST_SYNC_CURSOR` (the next poll then bootstraps again and looks back one hour) or call `reconcileTaskById(pageId)` for a single Task.
 
 ## E2E
 
@@ -154,6 +155,7 @@ Use non-production test Tasks. Allow up to one poll interval for each step, or c
 
 1. Call `reconcileTaskById(pageId)` twice in a row for an unchanged Task and confirm the second call reports `duplicate:` and makes no Notion mutation.
 2. Confirm the overlapping poll window (a Task edited within the last 2 minutes is re-read on the next run) creates no duplicate authoritative Time Event.
+3. **Fresh-deploy bootstrap**: with a test Task already `Status = In Progress` and edited more than an hour ago, clear `LAST_SYNC_CURSOR` and run `pollTaskChanges()` (or wait for the trigger). Confirm the Task receives an open Time Event even though its `last_edited_time` predates the initial lookback window.
 
 ### No public endpoint
 
@@ -180,6 +182,8 @@ The Done gate is reactive: it observes a Status that has already been set. An in
 - In-progress reassignment/clearing cannot leave the original Actor event open indefinitely.
 - Done cannot persist without a closed Time Event **applicable to the current execution** (started at or after the Task's current `Started At`), `Result`, and `Completed At`. A closed event left over from a prior, already-completed execution does not satisfy a later reopen's Done gate.
 - Repeated reconciliation of an unchanged Task does not duplicate authoritative events.
+- A Task already `In Progress` before the first-ever poll still receives an open Time Event, via the fresh-deploy bootstrap.
+- A dense cluster of already-reconciled Tasks inside the overlap window cannot permanently stall reconciliation of Tasks behind it.
 - Normal conversation and non-Task activity create no event.
 
 ## Tests

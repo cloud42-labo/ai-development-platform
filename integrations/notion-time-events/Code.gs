@@ -23,10 +23,19 @@ const SYNC_OVERLAP_MS = 2 * 60 * 1000;
 // How far back the very first poll looks when no cursor exists yet.
 const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 
-// Upper bound on Tasks reconciled in one trigger run, so a large backlog can
-// never push a single execution past the Apps Script runtime limit. Anything
-// left over is picked up by the next run from the un-advanced cursor.
+// Upper bound on *genuine* reconciliations (an outcome that is not a free
+// duplicate/ignored re-read) performed in one trigger run, so a large backlog
+// of real work can never push a single execution past the Apps Script
+// runtime limit. Anything left over is picked up by the next run from the
+// un-advanced cursor. A duplicate/ignored outcome does not count against
+// this — see isFreeOutcome_.
 const MAX_TASKS_PER_RUN = 25;
+
+// Separate, much larger bound on how many Tasks a single run will even look
+// at (scan), independent of how many of those turn out to be free re-skips.
+// This exists only as a runtime safety valve for a pathological overlap
+// cluster; MAX_TASKS_PER_RUN is the bound that matters in normal operation.
+const MAX_TASKS_SCANNED_PER_RUN = 500;
 
 function setup() {
   const props = PropertiesService.getScriptProperties();
@@ -101,33 +110,64 @@ function pollTaskChanges() {
     const props = PropertiesService.getScriptProperties();
     const runStartedAt = new Date();
     const cursor = props.getProperty('LAST_SYNC_CURSOR');
+    const isBootstrap = !cursor;
     const sinceMs = (cursor ? parseTimestamp_(cursor).getTime() : runStartedAt.getTime() - INITIAL_LOOKBACK_MS)
       - SYNC_OVERLAP_MS;
 
     const changed = queryChangedTasks_(new Date(sinceMs));
-    const outcomes = [];
-    let lastProcessedEdit = '';
 
-    for (let i = 0; i < changed.length && i < MAX_TASKS_PER_RUN; i++) {
-      outcomes.push(reconcileTaskPage_(changed[i]));
-      lastProcessedEdit = String(changed[i].last_edited_time || '');
+    // On a fresh deploy (no cursor yet), a Task that has been sitting In
+    // Progress since before the initial lookback window would never surface
+    // through the time-window query above, so it would never receive an open
+    // Time Event — and would then permanently fail the Done gate for lack of
+    // any applicable interval once it eventually moves. Bootstrap once, only
+    // when there is no cursor, by also pulling every currently In Progress
+    // Task directly by Status, independent of last_edited_time.
+    const tasksToProcess = isBootstrap
+      ? mergeTasksById_(changed, queryActiveInProgressTasks_())
+      : changed;
+
+    const outcomes = [];
+    let reconciledCount = 0;
+    let iterated = 0;
+    let lastScannedEdit = '';
+
+    while (
+      iterated < tasksToProcess.length &&
+      iterated < MAX_TASKS_SCANNED_PER_RUN &&
+      reconciledCount < MAX_TASKS_PER_RUN
+    ) {
+      const task = tasksToProcess[iterated];
+      const outcome = reconcileTaskPage_(task);
+      outcomes.push(outcome);
+      lastScannedEdit = String(task.last_edited_time || '');
+      iterated++;
+      // A duplicate/ignored outcome made no Notion write, so it is free to
+      // re-skip and must not consume the reconciliation budget. Otherwise a
+      // dense overlap cluster larger than MAX_TASKS_PER_RUN would have its
+      // leading (already-reconciled) Tasks re-selected and re-skipped every
+      // run, exhausting the cap on repeats of the same duplicates and never
+      // reaching the unprocessed tail behind them.
+      if (!isFreeOutcome_(outcome)) reconciledCount++;
     }
 
-    // If the batch was capped, the cursor must stay at the last Task actually
-    // reconciled rather than jumping to now — otherwise the untouched tail of
-    // this window would be skipped permanently. An uncapped run advances to
-    // the moment the query was issued, so edits made while it ran are still
-    // inside the next run's overlap.
-    const capped = changed.length > MAX_TASKS_PER_RUN;
+    // If the run did not reach the end of tasksToProcess, the cursor must
+    // stay at the last Task actually scanned rather than jumping to now —
+    // otherwise the untouched tail of this window would be skipped
+    // permanently. A run that reached the end advances to the moment the
+    // query was issued, so edits made while it ran are still inside the next
+    // run's overlap.
+    const capped = iterated < tasksToProcess.length;
     props.setProperty(
       'LAST_SYNC_CURSOR',
-      capped && lastProcessedEdit ? lastProcessedEdit : runStartedAt.toISOString()
+      capped && lastScannedEdit ? lastScannedEdit : runStartedAt.toISOString()
     );
 
     return {
-      scanned: changed.length,
-      processed: Math.min(changed.length, MAX_TASKS_PER_RUN),
+      scanned: tasksToProcess.length,
+      processed: reconciledCount,
       capped: capped,
+      bootstrap: isBootstrap,
       outcomes: outcomes,
     };
   });
@@ -208,6 +248,66 @@ function queryChangedTasks_(since) {
   } while (cursor && pageCount < 5);
 
   return results;
+}
+
+// Bootstrap-only query: every Task currently Status = In Progress, regardless
+// of last_edited_time. Used exactly once per fresh deploy (or cursor reset),
+// so a Task that has been active since before the initial lookback window
+// still gets an open Time Event instead of never receiving one.
+function queryActiveInProgressTasks_() {
+  let cursor = null;
+  let pageCount = 0;
+  const results = [];
+
+  do {
+    const body = {
+      page_size: 100,
+      filter: { property: 'Status', status: { equals: DEFAULTS.START_STATUS } },
+    };
+    if (cursor) body.start_cursor = cursor;
+
+    const response = notionRequest_(
+      'post',
+      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+      body
+    );
+
+    (response.results || []).forEach(function (item) {
+      if (item && item.object === 'page') results.push(item);
+    });
+
+    cursor = response.has_more ? response.next_cursor : null;
+    pageCount++;
+  } while (cursor && pageCount < 5);
+
+  return results;
+}
+
+// Dedups two Task-page lists by page ID (first occurrence wins) and returns
+// them sorted ascending by last_edited_time, so the poll loop's cursor-
+// advancement math stays correct regardless of which source list a given
+// Task came from.
+function mergeTasksById_(primary, secondary) {
+  const seen = {};
+  const merged = [];
+  [primary, secondary].forEach(function (list) {
+    (list || []).forEach(function (task) {
+      const id = task && task.id;
+      if (!id || seen[id]) return;
+      seen[id] = true;
+      merged.push(task);
+    });
+  });
+  merged.sort(function (a, b) {
+    return String(a.last_edited_time || '').localeCompare(String(b.last_edited_time || ''));
+  });
+  return merged;
+}
+
+// Outcomes that made no Notion write, and are therefore free to re-skip
+// without charging the per-run reconciliation budget (MAX_TASKS_PER_RUN).
+function isFreeOutcome_(outcome) {
+  return outcome === 'ignored:not_configured_task' || /^duplicate:/.test(String(outcome));
 }
 
 function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {

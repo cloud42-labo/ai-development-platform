@@ -190,6 +190,88 @@ test('a capped batch leaves the cursor on the last Task it actually reconciled',
   assert.equal(scriptProps.get('LAST_SYNC_CURSOR'), '2026-08-30T05:24:00.000Z');
 });
 
+test('a fresh deploy bootstraps every currently In Progress Task even if it predates the initial lookback window', () => {
+  const staleActiveTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43d1f99', {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-28T00:00:00.000Z', // well outside the 1h initial lookback
+    startedAt: '2026-08-28T00:00:00.000Z',
+  });
+  const recentTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43d1f98', {
+    status: 'Ready',
+    agent: 'Human',
+    lastEdited: '2026-08-30T05:59:00.000Z', // inside the lookback window
+  });
+
+  // A payload-aware stub: the time-window query and the bootstrap
+  // Status=In Progress query must be answered differently, or this test
+  // could not tell a real bootstrap query from a coincidence.
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const isBootstrapStatusQuery = Boolean(body.filter && body.filter.property === 'Status');
+      return { results: isBootstrapStatusQuery ? [staleActiveTask] : [recentTask], has_more: false };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' }, // no LAST_SYNC_CURSOR: fresh deploy
+    fetch: notionFetchStub(routes),
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.bootstrap, true);
+  const openedOutcome = summary.outcomes.find((o) => /^opened:/.test(o));
+  assert.ok(openedOutcome, 'expected the stale In Progress Task to get an opened Time Event: ' + JSON.stringify(summary.outcomes));
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.ok(creates.some((body) => body.properties.Task.relation[0].id === staleActiveTask.id));
+});
+
+test('overlap duplicates are skipped for free, so a dense duplicate cluster does not stall the unprocessed tail', () => {
+  const cursor = '2026-08-30T06:00:00.000Z';
+  const oldTasks = [];
+  for (let i = 0; i < 20; i++) {
+    oldTasks.push(taskPage('3cafbd82-6f3b-8158-9622-d795b43d1' + String(i).padStart(3, '0'), {
+      status: 'Ready',
+      agent: 'Human',
+      lastEdited: '2026-08-30T05:59:' + String(i).padStart(2, '0') + '.000Z', // inside the overlap window
+    }));
+  }
+  const newTasks = [];
+  for (let i = 0; i < 10; i++) {
+    newTasks.push(taskPage('3cafbd82-6f3b-8158-9622-d795b43d2' + String(i).padStart(3, '0'), {
+      status: 'Ready',
+      agent: 'Human',
+      lastEdited: '2026-08-30T06:00:' + String(10 + i).padStart(2, '0') + '.000Z', // after the cursor
+    }));
+  }
+
+  const { sandbox, scriptProps } = harness({
+    tasks: oldTasks.concat(newTasks),
+    scriptProperties: { LAST_SYNC_CURSOR: cursor },
+  });
+
+  // Simulate that the 20 old Tasks were already reconciled by an earlier
+  // run, so this run's re-read of them inside the overlap window is a free
+  // duplicate rather than new work.
+  oldTasks.forEach((task) => sandbox.reconcileTaskPage_(task));
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.scanned, 30);
+  // Only the 10 genuinely new Tasks are charged against the reconciliation
+  // budget; the 20 duplicates were skipped for free instead of exhausting it.
+  assert.equal(summary.processed, 10);
+  assert.equal(summary.capped, false); // the whole batch was reached in one run
+  // The cursor advanced past the entire batch instead of staying pinned
+  // inside the old duplicate cluster (which would repeat the same stall on
+  // every subsequent run).
+  assert.ok(new Date(scriptProps.get('LAST_SYNC_CURSOR')).getTime() >= new Date('2026-08-30T06:00:19.000Z').getTime());
+});
+
 test('a poll that is already running is skipped without advancing the cursor', () => {
   const { sandbox, fetchLog, scriptProps } = harness({
     lockHeld: true,
