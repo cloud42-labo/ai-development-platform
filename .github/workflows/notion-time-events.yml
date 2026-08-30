@@ -1,0 +1,31 @@
+name: Notion Time Events
+
+on:
+  pull_request:
+    paths:
+      - 'integrations/notion-time-events/**'
+      - '.github/workflows/notion-time-events.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'integrations/notion-time-events/**'
+      - '.github/workflows/notion-time-events.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Run Apps Script reconciler tests
+        working-directory: integrations/notion-time-events
+        run: node --test test/*.test.mjs
