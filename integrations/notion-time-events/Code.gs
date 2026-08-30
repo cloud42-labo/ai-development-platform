@@ -9,6 +9,12 @@ const DEFAULTS = {
   NOTION_VERSION: '2026-03-11',
 };
 
+// Maximum age (either direction) a Worker -> Apps Script relay envelope may
+// have before it is treated as expired rather than a live delivery. Wide
+// enough to absorb Notion/Worker retry latency and modest clock skew, narrow
+// enough to keep a captured envelope from being replayed long after the fact.
+const RELAY_TIMESTAMP_WINDOW_MS = 5 * 60 * 1000;
+
 function setup() {
   const props = PropertiesService.getScriptProperties();
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -34,6 +40,9 @@ function showSetupInfo() {
     tasksDataSourceId: props.getProperty('TASKS_DATA_SOURCE_ID'),
     timeEventsDataSourceId: props.getProperty('TIME_EVENTS_DATA_SOURCE_ID'),
     notionTokenConfigured: Boolean(props.getProperty('NOTION_TOKEN')),
+    // Presence only. Never log the relay secret value itself; it must be
+    // pasted directly into Script Properties by an authenticated operator.
+    relaySecretConfigured: Boolean(props.getProperty('APPS_SCRIPT_RELAY_SECRET')),
   }, null, 2));
 }
 
@@ -52,15 +61,22 @@ function doPost(e) {
     return json_({ ok: false, error: 'invalid_json' });
   }
 
-  const pageId = normalizeUuid_(request && request.pageId);
-  if (!pageId) return json_({ ok: false, error: 'missing_or_invalid_page_id' });
+  // Verify the Worker -> Apps Script relay envelope (HMAC over pageId+timestamp,
+  // a bounded timestamp window, and single-use replay protection) before this
+  // handler touches Notion in any way. {pageId} alone must never be enough to
+  // trigger reconciliation; a request missing or failing this check is rejected
+  // here, before retrieveNotionPage_ or any privileged mutation runs below.
+  const verification = verifyRelayRequest_(request);
+  if (!verification.ok) return json_({ ok: false, error: verification.error });
+  const pageId = verification.pageId;
 
-  // pageId is deliberately treated as untrusted input. No status, actor,
-  // timestamp, author, completion evidence or event fields are accepted from
-  // the caller. The endpoint re-fetches the page using the private Notion token,
-  // validates the authoritative parent data source, and derives every mutation
-  // from that Notion state. A direct caller can therefore only request an
-  // idempotent reconciliation of a Task that already exists in Notion.
+  // pageId is still deliberately treated as untrusted *content*. No status,
+  // actor, timestamp, author, completion evidence or event fields are accepted
+  // from the caller. The endpoint re-fetches the page using the private Notion
+  // token, validates the authoritative parent data source, and derives every
+  // mutation from that Notion state. An authenticated relay caller can
+  // therefore only request an idempotent reconciliation of a Task that already
+  // exists in Notion.
   return withLock_(function () {
     const task = retrieveNotionPage_(pageId);
     if (!isConfiguredTask_(task)) {
@@ -163,7 +179,29 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   const result = propertyText_(task.properties.Result).trim();
   const completedAt = propertyDate_(task.properties['Completed At']);
 
-  if (!allEvents || !allEvents.length) failures.push('missing_time_event');
+  // A closed Time Event must apply to the *current* execution, not merely
+  // exist somewhere in the Task's history. Reopen -> restart cases can leave
+  // an old closed event on the Task while the restart's own In Progress
+  // webhook is aggregated away by Notion (see README "Known limitations"),
+  // so counting any historical closed event would let a stale interval from
+  // a previous completed execution satisfy Done for work that was never
+  // timed. `Started At` on the Task itself is the current-execution marker:
+  // governance requires it to be (re)recorded whenever a fresh execution
+  // begins. A closed event only counts if it started at or after that
+  // marker.
+  const taskStartedAt = propertyDate_(task.properties['Started At']);
+  if (!taskStartedAt) {
+    failures.push('missing_task_started_at');
+  } else {
+    const closedEvents = (allEvents || []).filter(function (eventPage) {
+      return Boolean(propertyDate_(eventPage.properties['Ended At']));
+    });
+    const hasApplicableClosedEvent = closedEvents.some(function (eventPage) {
+      return eventStartedAt_(eventPage).getTime() >= taskStartedAt.getTime();
+    });
+    if (!hasApplicableClosedEvent) failures.push('missing_applicable_time_event');
+  }
+
   if (openEvents && openEvents.length) failures.push('open_time_event');
   if (!result) failures.push('missing_result');
   if (!completedAt) failures.push('missing_completed_at');
@@ -178,6 +216,79 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     : DEFAULTS.REVIEW_STATUS;
   updateTaskStatus_(task.id, rollbackStatus);
   return 'done_gate_rejected:' + failures.join('+') + ':rollback=' + rollbackStatus;
+}
+
+// Verifies the Worker -> Apps Script relay envelope: HMAC-SHA256 over
+// "pageId|relayTimestamp" using the shared APPS_SCRIPT_RELAY_SECRET, a
+// bounded timestamp window, and single-use replay protection via
+// CacheService. Returns { ok: true, pageId } only when every check passes;
+// otherwise { ok: false, error }. Must run, and must pass, before any Notion
+// fetch or mutation.
+function verifyRelayRequest_(request) {
+  const secret = PropertiesService.getScriptProperties().getProperty('APPS_SCRIPT_RELAY_SECRET');
+  if (!secret) return { ok: false, error: 'relay_secret_not_configured' };
+
+  // Sign/verify against the exact raw pageId string the Worker put in the
+  // envelope, not a normalized form. The Worker signs payload.entity.id
+  // verbatim, so recomputing the HMAC over anything else (e.g. a
+  // dash-normalized copy) would make a legitimate signature fail to match on
+  // the rare page ID whose raw formatting differs from normalizeUuid_'s
+  // canonical output.
+  const rawPageId = typeof (request && request.pageId) === 'string' ? request.pageId : '';
+  const pageId = normalizeUuid_(rawPageId);
+  if (!pageId) return { ok: false, error: 'missing_or_invalid_page_id' };
+
+  const relayTimestamp = request && request.relayTimestamp;
+  if (typeof relayTimestamp !== 'string' || !/^\d+$/.test(relayTimestamp)) {
+    return { ok: false, error: 'missing_or_invalid_relay_timestamp' };
+  }
+
+  const relaySignature = request && request.relaySignature;
+  if (typeof relaySignature !== 'string' || !relaySignature) {
+    return { ok: false, error: 'missing_relay_signature' };
+  }
+
+  const timestampMs = Number(relayTimestamp);
+  if (!isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > RELAY_TIMESTAMP_WINDOW_MS) {
+    return { ok: false, error: 'relay_timestamp_out_of_window' };
+  }
+
+  const expectedSignature = computeRelayHmacHex_(rawPageId + '|' + relayTimestamp, secret);
+  if (!constantTimeEqual_(expectedSignature, relaySignature)) {
+    return { ok: false, error: 'invalid_relay_signature' };
+  }
+
+  // A valid, in-window signature is still only good for one use: cache it for
+  // (at least) twice the acceptance window so a captured envelope cannot be
+  // replayed anywhere inside the window either side of its first use.
+  const cache = CacheService.getScriptCache();
+  const nonceKey = 'relay_nonce:' + relaySignature;
+  if (cache.get(nonceKey)) return { ok: false, error: 'relay_replay_detected' };
+  const cacheSeconds = Math.min(21600, Math.ceil((RELAY_TIMESTAMP_WINDOW_MS * 2) / 1000) + 30);
+  cache.put(nonceKey, '1', cacheSeconds);
+
+  return { ok: true, pageId: pageId };
+}
+
+// HMAC-SHA256 of `message` under `secret`, returned as lowercase hex. Must
+// stay byte-for-byte compatible with the Worker's own `rawHmac` (which signs
+// the same "pageId|relayTimestamp" message and hex-encodes the raw digest)
+// since both sides compute this independently and must agree.
+function computeRelayHmacHex_(message, secret) {
+  const rawSignature = Utilities.computeHmacSha256Signature(message, secret, Utilities.Charset.UTF_8);
+  return rawSignature.map(function (byte) {
+    const hex = (byte < 0 ? byte + 256 : byte).toString(16);
+    return hex.length === 1 ? '0' + hex : hex;
+  }).join('');
+}
+
+function constantTimeEqual_(a, b) {
+  a = String(a || '');
+  b = String(b || '');
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 function updateTaskStatus_(taskId, statusName) {

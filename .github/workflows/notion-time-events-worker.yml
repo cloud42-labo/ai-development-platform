@@ -3,13 +3,13 @@ name: Notion Time Events Worker
 on:
   pull_request:
     paths:
-      - 'integrations/notion-time-events/worker/**'
+      - 'integrations/notion-time-events/**'
       - '.github/workflows/notion-time-events-worker.yml'
   push:
     branches:
       - main
     paths:
-      - 'integrations/notion-time-events/worker/**'
+      - 'integrations/notion-time-events/**'
       - '.github/workflows/notion-time-events-worker.yml'
 
 permissions:
@@ -19,9 +19,6 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    defaults:
-      run:
-        working-directory: integrations/notion-time-events/worker
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -29,5 +26,9 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: Run tests
+      - name: Run Cloudflare Worker tests
+        working-directory: integrations/notion-time-events/worker
         run: npm test
+      - name: Run Apps Script relay/Done-gate tests
+        working-directory: integrations/notion-time-events
+        run: node --test test/*.test.mjs

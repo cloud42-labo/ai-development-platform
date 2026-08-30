@@ -12,9 +12,12 @@ export default {
     if (!env.APPS_SCRIPT_URL) {
       return response(500, { ok: false, error: 'missing_apps_script_url' });
     }
-    if (!env.APPS_SCRIPT_RELAY_SECRET) {
-      return response(500, { ok: false, error: 'missing_apps_script_relay_secret' });
-    }
+    // APPS_SCRIPT_RELAY_SECRET is required only for the privileged relay hop
+    // to Apps Script, checked just before that hop below. It is deliberately
+    // NOT required this early: the initial Notion verification handshake
+    // (the pending-token branch) must succeed on a freshly deployed Worker
+    // before an operator has provisioned any secret, or Notion's own
+    // subscription verification can never get off the ground.
 
     const rawBody = await request.text();
     if (!rawBody) return response(400, { ok: false, error: 'empty_body' });
@@ -55,6 +58,12 @@ export default {
     const pageId = payload.entity && payload.entity.id;
     if (!isUuidLike(pageId)) {
       return response(400, { ok: false, error: 'missing_or_invalid_page_id' });
+    }
+
+    // Only now, immediately before the privileged Worker -> Apps Script hop,
+    // is the relay secret actually required.
+    if (!env.APPS_SCRIPT_RELAY_SECRET) {
+      return response(500, { ok: false, error: 'missing_apps_script_relay_secret' });
     }
 
     // Authenticate the Worker -> Apps Script hop separately from the Notion

@@ -106,14 +106,49 @@ test('a forged pending token cannot become an active signing credential', { conc
   }
 });
 
-test('missing relay secret fails before processing webhook', { concurrency: false }, async () => {
+test('verification handshake succeeds even with no relay secret configured yet', { concurrency: false }, async () => {
   const kv = new MemoryKV();
-  const res = await worker.fetch(await requestFor({ verification_token: 'token' }, 'token'), {
+  const token = 'fresh-deploy-verification-token';
+  const res = await worker.fetch(await requestFor({ verification_token: token }, token), {
     WEBHOOK_STATE: kv,
     APPS_SCRIPT_URL: 'https://script.example/exec',
+    // APPS_SCRIPT_RELAY_SECRET intentionally omitted: a freshly deployed
+    // Worker must still be able to complete Notion's initial subscription
+    // verification before an operator has provisioned the relay secret.
   });
-  assert.equal(res.status, 500);
-  assert.equal((await res.json()).error, 'missing_apps_script_relay_secret');
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).verificationPending, true);
+  assert.equal(await kv.get('notion_webhook_pending_token'), token);
+});
+
+test('missing relay secret fails a normal signed delivery before calling Apps Script', { concurrency: false }, async () => {
+  const token = 'operator-promoted-token';
+  const kv = new MemoryKV();
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response('{}');
+  };
+
+  try {
+    const payload = {
+      type: 'page.properties_updated',
+      id: 'evt-no-relay-secret',
+      entity: { id: TASK_ID },
+    };
+    const res = await worker.fetch(await requestFor(payload, token), {
+      WEBHOOK_STATE: kv,
+      APPS_SCRIPT_URL: 'https://script.example/exec',
+      NOTION_WEBHOOK_VERIFICATION_TOKEN: token,
+      // APPS_SCRIPT_RELAY_SECRET intentionally omitted.
+    });
+    assert.equal(res.status, 500);
+    assert.equal((await res.json()).error, 'missing_apps_script_relay_secret');
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('invalid Notion signature is rejected before relay', { concurrency: false }, async () => {
