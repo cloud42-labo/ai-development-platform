@@ -411,7 +411,20 @@ function backfillResultFingerprints_() {
         for (let i = 0; i < processed.length; i++) {
           newTieOffset = String(processed[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
         }
-        props.setProperty('BACKFILL_RESUME_TIE_OFFSET', String(newTieOffset));
+        // If this call's own tail is still the exact same tied timestamp the
+        // resume cursor already pointed at when this call started, the
+        // members that resume's own tieOffset already skipped (processed by
+        // an earlier call, not present in `processed` at all — startIndex
+        // skipped them via the query result, not this loop) belong to that
+        // same tie and must be counted cumulatively. Otherwise each further
+        // call spanning the same cohort overwrites the stored offset with
+        // only what THAT call processed, so every subsequent call re-skips
+        // to the same fixed count and re-walks (never past) the same middle
+        // slice forever instead of ever draining the tail. A tail that moved
+        // to a genuinely new timestamp (lastSeen !== resumeCursor) has no
+        // such carry-over — that offset belonged to a now-fully-drained tie.
+        const cumulativeTieOffset = (lastSeen === resumeCursor ? tieOffset : 0) + newTieOffset;
+        props.setProperty('BACKFILL_RESUME_TIE_OFFSET', String(cumulativeTieOffset));
       }
       Logger.log('backfillResultFingerprints_: stopped at the ' + (timedOut ? 'wall-clock bound' : 'pagination safety limit') + ' — call again to resume from ' + lastSeen + '.');
     } else if (doneTasks.truncated || timedOut) {
@@ -770,9 +783,22 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   const currentExecutionEventIds = {};
   closedEvents.forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
-    if (latestEndedAt && endedAt.getTime() === latestEndedAt.getTime()) {
-      currentExecutionEventIds[eventPage.id] = true;
-    }
+    if (!latestEndedAt || endedAt.getTime() !== latestEndedAt.getTime()) return;
+    // last_edited_time is minute-granular (see README Known limitations), so
+    // a genuinely prior execution's own boundary close and the current
+    // execution's close CAN land on the identical recorded Ended At by pure
+    // coincidence, not just a true simultaneous multi-event close. An event
+    // explicitly, retroactively marked Boundary=left_in_progress carries a
+    // much stronger claim than a plain Reason=left_in_progress ever does —
+    // it was deliberately stamped specifically to say "this is where a past
+    // execution genuinely ended" — so it must never be swept into the seed
+    // by a mere timestamp tie. A plain Reason=left_in_progress event with no
+    // such marker stays tie-seedable: that is the ambiguous, ordinary case
+    // (e.g. a Task first observed after leaving In Progress with multiple
+    // open events, all genuinely closed together this same call) the tie
+    // rule exists to handle, and Boundary is never stamped on it.
+    if (parseNoteMeta_(propertyText_(eventPage.properties.Note)).boundary === 'left_in_progress') return;
+    currentExecutionEventIds[eventPage.id] = true;
   });
   closedEvents.forEach(function (eventPage) {
     const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));

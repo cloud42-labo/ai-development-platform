@@ -1338,3 +1338,66 @@ test('backfillResultFingerprints_ bails out on wall-clock time within a single p
   assert.equal(secondRun.scanned, taskCount - summary.scanned);
   assert.equal(scriptProps.get('BACKFILL_RESUME_CURSOR'), '');
 });
+
+test('a wall-clock bail-out mid-tie accumulates onto the tie offset a prior call already persisted, instead of overwriting it', () => {
+  // Codex-reported gap in the wall-clock bound above: when a same-timestamp
+  // cohort needs more than one wall-clock-bounded call to drain, a resumed
+  // call's own tie-offset arithmetic only counted what THAT call itself
+  // processed, discarding the count earlier calls had already skipped past
+  // (BACKFILL_RESUME_TIE_OFFSET, loaded at the top of this call as
+  // `tieOffset`). Simulate the middle of such a sequence directly: an
+  // earlier call already persisted a resume point 10 members into a tied
+  // cohort, and this call — itself cut short by the wall clock, not
+  // pagination — must persist the CUMULATIVE count (10 plus however many it
+  // adds), not just its own contribution, or the next call resumes from the
+  // wrong offset and re-walks (never past) the same middle slice forever.
+  const tiedTimestamp = '2026-08-01T00:00:00.000Z';
+  const alreadyProcessed = 10;
+  const remainingCount = 70; // 10 already skipped + plenty left so the wall clock, not the list, ends this call
+  const tasks = [];
+  for (let i = 1; i <= remainingCount; i++) {
+    const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dm' + String(i).padStart(3, '0'), {
+      status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp,
+    });
+    task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+    task.properties['Completed At'] = { type: 'date', date: { start: tiedTimestamp } };
+    tasks.push(task);
+  }
+  const routes = {
+    // The resumed on_or_after(tiedTimestamp) query returns the full tied
+    // group again (every member shares the identical timestamp) — the local
+    // tie-offset skip below is what's actually relied on to not re-process
+    // the leading members a prior call already handled, mirroring genuine
+    // Notion `on_or_after` semantics for an exact-match tie.
+    [TASKS_QUERY]: () => ({ results: tasks, has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  let ticks = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 30 * 1000;
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      BACKFILL_RESUME_CURSOR: tiedTimestamp,
+      BACKFILL_RESUME_TIE_OFFSET: String(alreadyProcessed),
+    },
+    fetch: notionFetchStub(routes),
+    now,
+  });
+
+  const summary = sandbox.backfillResultFingerprints_();
+
+  assert.equal(summary.timedOut, true);
+  assert.ok(summary.scanned > 0 && summary.scanned < remainingCount, 'expected a partial scan: got ' + summary.scanned);
+  // Still the same tied timestamp — the cursor doesn't move within a tie.
+  assert.equal(scriptProps.get('BACKFILL_RESUME_CURSOR'), tiedTimestamp);
+  // The bug: this would be String(summary.scanned) alone, discarding the 10
+  // a prior call already accounted for.
+  assert.equal(scriptProps.get('BACKFILL_RESUME_TIE_OFFSET'), String(alreadyProcessed + summary.scanned));
+});

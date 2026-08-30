@@ -618,3 +618,37 @@ test('Done passes when a reassignment-only execution is NOT boundary-marked (sti
 
   assert.equal(outcome, 'done_gate_passed:stamped');
 });
+
+test('Done is rejected when a prior execution boundary event ties the current close on Ended At', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Codex-reported gap in the seed-set fix above: last_edited_time is
+  // minute-granular (see README Known limitations), so a genuinely PRIOR
+  // execution's own retroactively-marked boundary close and the CURRENT
+  // execution's fresh close can coincidentally land on the exact same
+  // recorded Ended At — not just a true simultaneous multi-event close
+  // (the case the tie-seed rule exists for). The tie-seed loop must not
+  // sweep an explicitly Boundary=left_in_progress-marked event into the
+  // current-execution seed just because it ties on timestamp: doing so
+  // drops it from priorTimestamp entirely, letting a stale, never-
+  // refreshed Task Started At slip through undetected.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: unchanged since the OLD execution
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const tiedEndedAt = '2026-08-30T04:00:00.000Z';
+  const priorBoundaryEvent = eventPage('evt-prior-boundary', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: tiedEndedAt, // coincidentally identical to the new event's Ended At
+    note: 'Reason=reassignment | Boundary=left_in_progress',
+  });
+  const newEvent = eventPage('evt-new-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: tiedEndedAt,
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorBoundaryEvent, newEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
