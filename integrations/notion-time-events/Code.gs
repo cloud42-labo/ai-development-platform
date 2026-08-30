@@ -360,36 +360,56 @@ function backfillResultFingerprints_() {
           { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
         ] }
       : { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } };
-    const doneTasks = paginateNotionQuery_(
-      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
-      {
-        page_size: 100,
-        filter: filter,
-        sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
-      },
-      // Reserve half of MAX_RUN_DURATION_MS for pagination and leave the
-      // other half for actually processing and checkpointing whatever was
-      // retrieved — a large Done database or a slow Notion response can
-      // otherwise spend the entire wall-clock budget just fetching pages
-      // (up to QUERY_PAGE_SAFETY_LIMIT of them, each its own round trip)
-      // before the processing loop below ever runs its own MAX_RUN_
-      // DURATION_MS check, risking an uncaught Apps Script kill with
-      // nothing reconciled or checkpointed at all — the run would then
-      // repeat the identical pagination prefix forever, never progressing.
-      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2
-    );
-    let startIndex = 0;
-    if (resumeCursor && tieOffset > 0) {
-      let skipped = 0;
-      while (
-        startIndex < doneTasks.results.length &&
-        skipped < tieOffset &&
-        String(doneTasks.results[startIndex].last_edited_time || '') === resumeCursor
-      ) {
-        skipped++;
-        startIndex++;
+    const queryPath = '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query';
+    const queryBody = {
+      page_size: 100,
+      filter: filter,
+      sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+    };
+    function tieOffsetStartIndex_(results) {
+      let index = 0;
+      if (resumeCursor && tieOffset > 0) {
+        let skipped = 0;
+        while (
+          index < results.length &&
+          skipped < tieOffset &&
+          String(results[index].last_edited_time || '') === resumeCursor
+        ) {
+          skipped++;
+          index++;
+        }
       }
+      return index;
     }
+
+    // Reserve half of MAX_RUN_DURATION_MS for pagination and leave the
+    // other half for actually processing and checkpointing whatever was
+    // retrieved — a large Done database or a slow Notion response can
+    // otherwise spend the entire wall-clock budget just fetching pages (up
+    // to QUERY_PAGE_SAFETY_LIMIT of them, each its own round trip) before
+    // the processing loop below ever runs its own MAX_RUN_DURATION_MS
+    // check, risking an uncaught Apps Script kill with nothing reconciled
+    // or checkpointed at all. But a resumed cohort whose persisted tie
+    // offset already exceeds what the half-budget alone can fetch would
+    // otherwise deadlock forever: every call re-fetches the identical
+    // already-consumed prefix (on_or_after is inclusive and always
+    // restarts from its own beginning) and stops with zero net progress,
+    // and nothing about that changes between calls on its own. Rather than
+    // starting a SECOND, independent pagination pass past the half-budget
+    // deadline (which would only re-fetch from page 1 again, wasting the
+    // time the first pass already spent, and could never net out ahead —
+    // both passes share the same wall clock), extend this SAME continuous
+    // pass past the half-budget deadline specifically while the tie-offset
+    // skip would still consume everything fetched so far, bounded by the
+    // full run budget as the outer, unconditional limit.
+    const doneTasks = paginateNotionQuery_(
+      queryPath,
+      queryBody,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS,
+      function (results) { return tieOffsetStartIndex_(results) < results.length; }
+    );
+    const startIndex = tieOffsetStartIndex_(doneTasks.results);
     const toProcess = doneTasks.results.slice(startIndex);
 
     // Bounded by wall-clock time as well as the pagination safety limit
@@ -1230,7 +1250,7 @@ function notionRequest_(method, path, body) {
 // unretrieved data.
 const QUERY_PAGE_SAFETY_LIMIT = 50;
 
-function paginateNotionQuery_(path, baseBody, deadlineMs) {
+function paginateNotionQuery_(path, baseBody, deadlineMs, extendedDeadlineMs, hasProgress) {
   let cursor = null;
   let pageCount = 0;
   const results = [];
@@ -1246,8 +1266,27 @@ function paginateNotionQuery_(path, baseBody, deadlineMs) {
     // before the very first page: a caller needs at least one page's worth
     // of results to make any progress at all this call.
     if (typeof deadlineMs === 'number' && pageCount > 0 && Date.now() >= deadlineMs) {
-      truncated = true;
-      break;
+      // A resumed call whose persisted skip (e.g. BACKFILL_RESUME_TIE_
+      // OFFSET, for a tied cohort spanning more than one call) already
+      // covers everything fetchable before `deadlineMs` would stop here
+      // with zero net progress — and since the resumed query is inclusive
+      // (on_or_after) and always restarts from its own beginning, the next
+      // call faces the identical situation: an exact repeat, forever,
+      // since nothing changes between calls on its own. `extendedDeadlineMs`
+      // + `hasProgress` let a caller in exactly that situation keep this
+      // SAME continuous fetch going (not restart a second one, which would
+      // only waste the time already spent and could never net out ahead)
+      // until real progress exists or the caller's own outer wall-clock
+      // bound is reached — never past it, so this still cannot blow the
+      // run's total budget.
+      const keepGoing = typeof extendedDeadlineMs === 'number'
+        && typeof hasProgress === 'function'
+        && !hasProgress(results)
+        && Date.now() < extendedDeadlineMs;
+      if (!keepGoing) {
+        truncated = true;
+        break;
+      }
     }
     const body = Object.assign({}, baseBody);
     if (cursor) body.start_cursor = cursor;

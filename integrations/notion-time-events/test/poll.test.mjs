@@ -1342,6 +1342,71 @@ test('backfillResultFingerprints_ resumes past what it already backfilled when t
   assert.equal(onOrAfterClause.last_edited_time.on_or_after, resumeCursor);
 });
 
+test('backfillResultFingerprints_ escalates past the reserved pagination budget when the persisted tie offset exceeds it, instead of deadlocking', () => {
+  // Codex-reported gap in the pagination-deadline fix above: once a resumed
+  // tied cohort's persisted BACKFILL_RESUME_TIE_OFFSET is at least as large
+  // as what the reserved half-budget pagination phase can retrieve, EVERY
+  // call re-issues the identical inclusive on_or_after query, fetches only
+  // that already-consumed prefix, the local tie-offset skip consumes the
+  // entire batch, and the "no progress" branch leaves persisted state
+  // untouched — an exact repeat, forever, since nothing about the situation
+  // changes between calls on its own. A merely-large (not pathologically
+  // large) tied cohort must still make progress by escalating pagination
+  // up to the full run budget when the half-budget fetch alone cannot get
+  // past the offset it already has to skip.
+  const tiedTimestamp = '2026-08-01T00:00:00.000Z';
+  const totalRows = 60;
+  const alreadyProcessed = 25; // more than the half-budget fetch below can retrieve
+  const routes = {
+    // One row per page (like real Notion pagination) so the wall-clock
+    // deadline actually bounds how much of the tied group a single
+    // pagination phase can retrieve — every member shares the identical
+    // timestamp, mirroring genuine on_or_after semantics for an exact-match
+    // tie: the resumed query returns the group from its own start again
+    // every call, regardless of how much a prior call already consumed.
+    [TASKS_QUERY]: (body) => {
+      const cursor = body.start_cursor ? Number(body.start_cursor) : 0;
+      if (cursor >= totalRows) return { results: [], has_more: false };
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dp' + String(cursor + 1).padStart(3, '0'), {
+        status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp,
+      });
+      task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+      task.properties['Completed At'] = { type: 'date', date: { start: tiedTimestamp } };
+      return { results: [task], has_more: cursor + 1 < totalRows, next_cursor: String(cursor + 1) };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  // 6 simulated seconds per Date() read: the reserved half-budget deadline
+  // (120s) lands around page ~20 — comfortably short of alreadyProcessed
+  // (25) — while the full budget (240s) reaches well past it.
+  let ticks = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 6 * 1000;
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      BACKFILL_RESUME_CURSOR: tiedTimestamp,
+      BACKFILL_RESUME_TIE_OFFSET: String(alreadyProcessed),
+    },
+    fetch: notionFetchStub(routes),
+    now,
+  });
+
+  const summary = sandbox.backfillResultFingerprints_();
+
+  assert.ok(summary.scanned > 0, 'expected the escalation to still make progress: got ' + summary.scanned);
+  // The tie offset must have advanced past what was already processed —
+  // proof this call did not just re-skip the identical prefix again.
+  const newOffset = Number(scriptProps.get('BACKFILL_RESUME_TIE_OFFSET') || '0');
+  assert.ok(newOffset > alreadyProcessed, 'expected the persisted tie offset to advance: got ' + newOffset);
+});
+
 test('backfillResultFingerprints_ bounds its own pagination phase, reserving budget to still process and checkpoint what it fetched', () => {
   // Codex-reported gap: paginateNotionQuery_ had no wall-clock bound of its
   // own, only QUERY_PAGE_SAFETY_LIMIT (50 pages) — so a large Done database
