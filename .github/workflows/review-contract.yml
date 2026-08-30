@@ -1,0 +1,56 @@
+name: Review Contract
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  review-contract:
+    name: Review Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Validate PR Review Contract
+        shell: python
+        run: |
+          import json
+          import os
+          import re
+          import sys
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as fh:
+              event = json.load(fh)
+
+          body = (event.get("pull_request", {}).get("body") or "").replace("\r\n", "\n")
+          required = [
+              "Purpose / Contract",
+              "Invariants",
+              "Adversarial Scenarios",
+              "Validation",
+              "Known Limitations / Non-goals",
+          ]
+
+          failures = []
+          for name in required:
+              pattern = rf"(?ms)^###\s+{re.escape(name)}\s*$\n(.*?)(?=^###\s+|\Z)"
+              match = re.search(pattern, body)
+              if not match:
+                  failures.append(f"missing heading: {name}")
+                  continue
+
+              content = re.sub(r"<!--.*?-->", "", match.group(1), flags=re.S)
+              content = re.sub(r"(?m)^\s*[-*+]\s*$", "", content)
+              if not content.strip():
+                  failures.append(f"empty section: {name}")
+
+          if failures:
+              print("PR Review Contract is incomplete:")
+              for failure in failures:
+                  print(f"- {failure}")
+              print("\nFill every Review Contract section in the PR body before review/merge.")
+              sys.exit(1)
+
+          print("PR Review Contract is complete.")
