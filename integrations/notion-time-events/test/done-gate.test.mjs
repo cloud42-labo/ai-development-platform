@@ -530,3 +530,344 @@ test('appendNote_ evicts non-fingerprint segments before ever touching an older 
   assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
   assert.equal(combined.indexOf('Snapshot='), -1, 'the non-fingerprint segment should have been dropped instead');
 });
+
+test('appendNote_ evicts an older Result Fingerprint before ever touching Execution=/Boundary=', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Execution=/Boundary= identify which execution an event belongs to and
+  // whether it marks a genuine boundary — enforceDoneGate_'s current/prior
+  // classification reads them directly, so losing one is worse than losing
+  // one old Result Fingerprint= (which only narrows the already-bounded
+  // stale-Result window). Both an ordinary segment AND an old fingerprint
+  // must be exhausted before Execution=/Boundary= is ever touched.
+  const execution = 'Execution=2026-08-01T00:00:00.000Z';
+  const boundary = 'Boundary=left_in_progress';
+  const oldFingerprint = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v1');
+  const existingNote = [execution, boundary, oldFingerprint, 'Snapshot=' + 'x'.repeat(1700)].join(' | ');
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v2');
+
+  // Small enough that even after the ordinary Snapshot= segment (the
+  // biggest, easiest target) is dropped, Execution= + Boundary= +
+  // oldFingerprint + newMarker together still exceed it — forcing a SECOND
+  // eviction round, which must reach for the old fingerprint next, not
+  // Execution=/Boundary=.
+  const maxLength = execution.length + boundary.length + newMarker.length + 20;
+
+  const combined = sandbox.appendNote_(existingNote, newMarker, maxLength);
+
+  assert.ok(combined.length <= maxLength);
+  assert.ok(combined.indexOf(execution) >= 0, 'Execution= must survive the eviction');
+  assert.ok(combined.indexOf(boundary) >= 0, 'Boundary= must survive the eviction');
+  assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
+  assert.equal(combined.indexOf(oldFingerprint), -1, 'the older fingerprint should have been dropped instead');
+});
+
+test('appendNote_ evicts Execution=/Boundary= only as an absolute last resort, once no fingerprint is left either', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const execution = 'Execution=2026-08-01T00:00:00.000Z';
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+
+  // A maxLength barely larger than the freshly written marker itself forces
+  // every existing segment — including Execution= — to be dropped: the
+  // marker just written must never be the thing that gets clipped or
+  // dropped.
+  const combined = sandbox.appendNote_(execution, newMarker, newMarker.length + 2);
+
+  assert.equal(combined, newMarker);
+});
+
+test('Done passes when multiple events close simultaneously on first observing the Task leaving In Progress', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // A Task with two open events (e.g. an unresolved duplicate) is first
+  // observed after leaving In Progress: reconcileAuthoritativeTimeEvents_
+  // closes ALL of them at the identical `when`, with Reason=left_in_progress.
+  // Both are equally "now" and must both count as current-execution
+  // evidence — picking only one arbitrarily would leave its identically
+  // recent sibling looking like a separate, prior execution.
+  const task = taskPage({
+    startedAt: '2026-08-29T03:00:00.000Z',
+    result: 'shipped',
+    completedAt: '2026-08-29T04:00:00.000Z',
+  });
+  const eventA = eventPage('evt-a', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:45:00.000Z',
+    note: 'Reason=left_in_progress',
+  });
+  const eventB = eventPage('evt-b', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:45:00.000Z', // identical Ended At — simultaneously closed
+    note: 'Reason=left_in_progress',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [eventA, eventB], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
+test('Done is rejected when a reassignment-only execution is retroactively marked as an execution boundary', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // A past execution's only recorded artifact is a reassignment close (the
+  // assignee was cleared, and the Task then left In Progress with nothing
+  // open — reconcileAuthoritativeTimeEvents_'s no-open-events branch
+  // retroactively stamps Boundary=left_in_progress onto it, since its own
+  // Reason=reassignment never signals an execution end on its own). A
+  // reopen whose Task-level Started At was never actually refreshed (still
+  // pointing at the old execution) must still be caught as stale, even
+  // though the historical event's Reason alone would normally count as
+  // current-execution evidence.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: unchanged since the OLD execution
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const priorEvent = eventPage('evt-prior-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-28T11:00:00.000Z',
+    note: 'Reason=reassignment | Boundary=left_in_progress',
+  });
+  const newEvent = eventPage('evt-new-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorEvent, newEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
+
+test('Done passes when a reassignment-only execution is NOT boundary-marked (still genuinely current)', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Sanity check for the previous test: without the retroactive Boundary
+  // marker (e.g. because the Task never actually left In Progress — an
+  // in-progress reassignment gap, not a real execution end), the same
+  // reassignment-reason event must still count as current-execution
+  // evidence, exactly as before this fix.
+  const task = taskPage({
+    startedAt: '2026-08-30T03:00:00.000Z', // correctly fresh
+    result: 'shipped',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const gappedEvent = eventPage('evt-gapped', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:20:00.000Z',
+    note: 'Reason=reassignment', // no Boundary marker
+  });
+  const seedEvent = eventPage('evt-seed', {
+    startedAt: '2026-08-30T03:40:00.000Z', // a real gap from gappedEvent's Ended At
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [gappedEvent, seedEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
+test('Done is rejected when a prior execution boundary event ties the current close on Ended At', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Codex-reported gap in the seed-set fix above: last_edited_time is
+  // minute-granular (see README Known limitations), so a genuinely PRIOR
+  // execution's own retroactively-marked boundary close and the CURRENT
+  // execution's fresh close can coincidentally land on the exact same
+  // recorded Ended At — not just a true simultaneous multi-event close
+  // (the case the tie-seed rule exists for). The tie-seed loop must not
+  // sweep an explicitly Boundary=left_in_progress-marked event into the
+  // current-execution seed just because it ties on timestamp: doing so
+  // drops it from priorTimestamp entirely, letting a stale, never-
+  // refreshed Task Started At slip through undetected.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: unchanged since the OLD execution
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const tiedEndedAt = '2026-08-30T04:00:00.000Z';
+  const priorBoundaryEvent = eventPage('evt-prior-boundary', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: tiedEndedAt, // coincidentally identical to the new event's Ended At
+    note: 'Reason=reassignment | Boundary=left_in_progress',
+  });
+  const newEvent = eventPage('evt-new-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: tiedEndedAt,
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorBoundaryEvent, newEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
+
+test('Done is rejected when an ordinary prior close (no Reason/Boundary signal at all) ties the current close on Ended At', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Codex-reported gap in the boundary-scoping fix above: restricting the
+  // Boundary= stamp to reassignment/duplicate_reconciliation closes (so a
+  // plain left_in_progress close is never wrongly marked) reopened the
+  // ORIGINAL ambiguity for the plain-close case itself — a genuinely PRIOR
+  // execution's ordinary left_in_progress close and the CURRENT execution's
+  // own close can still coincidentally tie on Ended At (last_edited_time is
+  // minute-granular), and neither carries any Reason/Boundary signal to
+  // exclude the prior one. The legacy tie-seed heuristic sweeps BOTH into
+  // "current" in that case — leaving NO prior evidence at all once they're
+  // the only two closed events on the Task, so a genuinely stale, never-
+  // refreshed Task Started At is trusted vacuously and Done wrongly passes.
+  // The Execution= identifier (see createNotionTimeEvent_) sidesteps the
+  // whole tie/Reason inference: the prior event's Execution= (stamped for
+  // its OWN, older execution) does not match the Task's current Started At,
+  // so it correctly stays prior evidence regardless of the coincidental
+  // Ended At tie or its ordinary, unmarked Reason.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: unchanged since the OLD execution
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:05:00.000Z',
+  });
+  const tiedEndedAt = '2026-08-30T04:00:00.000Z';
+  const priorOrdinaryClose = eventPage('evt-prior-ordinary', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: tiedEndedAt, // coincidentally identical to the new event's own close
+    note: 'Reason=left_in_progress | Execution=2026-08-28T10:00:00.000Z',
+  });
+  const newOrdinaryClose = eventPage('evt-new-ordinary', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: tiedEndedAt,
+    note: 'Reason=left_in_progress | Execution=2026-08-30T03:00:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [priorOrdinaryClose, newOrdinaryClose], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
+
+test('Done is rejected when Execution= identifies a tied close as belonging to a stale prior execution', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Companion/sanity check for the previous test, from the opposite
+  // direction: when the Task's OWN Started At was never actually refreshed
+  // after a reopen (still pointing at the OLD execution), a tied close
+  // whose Execution= matches the (stale) current Started At is correctly
+  // still treated as applicable evidence, but that Started At itself must
+  // still fail the freshness check against the genuinely later prior close
+  // — Execution= replaces the ambiguous inference, not the freshness
+  // requirement itself.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: never refreshed for the reopen
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:05:00.000Z',
+  });
+  const tiedEndedAt = '2026-08-30T04:00:00.000Z';
+  const staleExecutionClose = eventPage('evt-stale-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: tiedEndedAt,
+    note: 'Reason=left_in_progress | Execution=2026-08-28T10:00:00.000Z',
+  });
+  const laterUnrelatedClose = eventPage('evt-later-unrelated', {
+    startedAt: '2026-08-29T09:00:00.000Z',
+    endedAt: tiedEndedAt, // ties with the stale execution's own close
+    note: 'Reason=left_in_progress | Execution=2026-08-29T09:00:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [staleExecutionClose, laterUnrelatedClose], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
+
+test('Done is rejected when an Execution=-mismatched event still satisfies the timestamp-only applicability check', () => {
+  // Model/Invariant Review I3, scenario S7 (PR #17 Codex finding "Exclude
+  // mismatched executions from applicable events"): a prior execution's
+  // reassignment replacement can close in the exact same minute a later,
+  // never-observed reopen records as its own Started At. currentExecution
+  // EventIds above already correctly excludes this event (its Execution=
+  // does not match the Task's current Started At) — but the OLD
+  // applicableClosedEvent search derived applicability independently, from
+  // eventStartedAt_ >= taskStartedAt alone, so the very same coincidental
+  // tie that makes taskStartedAtTrusted hold (the prior event's own Started/
+  // Ended At being AT MOST taskStartedAt) also makes it satisfy that naive
+  // filter (its Started At being AT LEAST taskStartedAt) — forcing exact
+  // equality, which this fixture models directly. Without requiring
+  // currentExecutionEventIds membership too, this event would wrongly
+  // become the applicable evidence and let Done pass for an execution that
+  // produced no real Time Event of its own.
+  const { sandbox } = harnessWithNotionStub();
+  const taskStartedAt = '2026-08-30T10:00:00.000Z';
+  const mismatchedExecutionClose = eventPage('evt-mismatched-execution', {
+    startedAt: taskStartedAt,
+    endedAt: taskStartedAt, // zero-duration, tied exactly with taskStartedAt
+    note: 'Reason=reassignment | Execution=2026-08-29T08:00:00.000Z', // does not match taskStartedAt
+  });
+  const task = taskPage({
+    startedAt: taskStartedAt,
+    result: 'shipped',
+    completedAt: '2026-08-30T10:05:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [mismatchedExecutionClose], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /missing_applicable_time_event/);
+});
+
+test('Done passes by correctly picking the Execution=-matching event out of a tied cohort, ignoring the mismatched one', () => {
+  // Companion to the previous test, from the opposite direction: the fix
+  // must not become overly restrictive. When a genuinely current event
+  // (Execution= matches) ties on Ended At with a mismatched prior one (the
+  // exact scenario above, now with a real current event present too),
+  // the mismatched event must still be excluded while the matching one is
+  // correctly selected as applicable — Done must still pass.
+  const { sandbox } = harnessWithNotionStub();
+  const taskStartedAt = '2026-08-30T10:00:00.000Z';
+  const mismatchedExecutionClose = eventPage('evt-mismatched-execution-2', {
+    startedAt: taskStartedAt,
+    endedAt: taskStartedAt,
+    note: 'Reason=reassignment | Execution=2026-08-29T08:00:00.000Z',
+  });
+  const currentExecutionClose = eventPage('evt-current-execution-2', {
+    startedAt: taskStartedAt,
+    endedAt: taskStartedAt, // ties with the mismatched event's own Ended At
+    note: 'Reason=reassignment | Execution=' + taskStartedAt, // matches taskStartedAt
+  });
+  const task = taskPage({
+    startedAt: taskStartedAt,
+    result: 'shipped',
+    completedAt: '2026-08-30T10:05:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [mismatchedExecutionClose, currentExecutionClose], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
+test('Done still passes for a legacy reassignment whose replacement carries no Execution= marker at all', () => {
+  // Model/Invariant Review I2/I3, scenario S19 regression guard (the flip
+  // side of the reconcileAuthoritativeTimeEvents_ fix for PR #17 Codex
+  // finding "Reject ambiguous legacy handoffs instead of trusting Started
+  // At", see poll.test.mjs): once that fix stops manufacturing an Execution=
+  // marker for a reassignment replacing a legacy (pre-Execution=) outgoing
+  // event, EVERY event this Task ever produces from that reassignment
+  // onward is unmarked too — neither carries any Execution= at all. Both
+  // must still be classified current via the plain Reason-based heuristic
+  // alone (the same one that has always covered fully-legacy data), so a
+  // legitimate mid-execution reassignment must still let Done pass —
+  // exactly the original scenario commit 482706c fixed, just with the
+  // now-corrected "manufacture nothing" identity instead of a stamped one.
+  const { sandbox } = harnessWithNotionStub();
+  const taskStartedAt = '2026-08-30T05:00:00.000Z';
+  const legacyOutgoingClose = eventPage('evt-legacy-outgoing-close', {
+    startedAt: taskStartedAt,
+    endedAt: '2026-08-30T05:10:00.000Z', // closed at the reassignment boundary
+    note: 'Reason=reassignment', // no Execution= — predates the field
+  });
+  const replacementClose = eventPage('evt-replacement-close', {
+    startedAt: '2026-08-30T05:10:00.000Z', // opened at the reassignment boundary
+    endedAt: '2026-08-30T05:30:00.000Z', // the Task's own genuine completion
+    note: 'Reason=left_in_progress', // no Execution= either — the fix's whole point
+  });
+  const task = taskPage({
+    startedAt: taskStartedAt, // unchanged across the reassignment, as expected
+    result: 'shipped',
+    completedAt: '2026-08-30T05:30:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [legacyOutgoingClose, replacementClose], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});

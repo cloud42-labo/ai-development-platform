@@ -61,6 +61,34 @@ const MAX_TASKS_PER_RUN = 25;
 // already produces — rather than risking an unrecoverable mid-scan kill.
 const MAX_RUN_DURATION_MS = 4 * 60 * 1000;
 
+// How much of MAX_RUN_DURATION_MS backfillResultFingerprints_ always reserves
+// for actually processing and checkpointing whatever pagination retrieved,
+// even while its pagination phase is escalating past the primary half-budget
+// deadline to make progress against a large persisted tie offset (see the
+// comment on that escalation below). Without this, escalation's own outer
+// bound was the full run budget, so a call that only manages to fetch enough
+// to clear the tie offset right near that bound would exit pagination with
+// effectively zero wall-clock time left, process nothing, and — since a call
+// that processes nothing leaves persisted state untouched — repeat the exact
+// same expensive fetch-only round trip indefinitely.
+//
+// This must cover more than "some processing time": paginateNotionQuery_'s
+// deadline check only runs BEFORE issuing a page's request (see the comment
+// there), never while one is in flight — it bounds when a new request is
+// allowed to START, not how long the run's wall clock has actually advanced
+// once that request RETURNS. A single Notion request that itself blocks
+// longer than this reserve can still land after the full run deadline,
+// leaving the processing loop with zero usable time regardless of how early
+// pagination's own checks ran. For the reserve to actually guarantee
+// processing time (not just usually leave some), it must be at least as
+// large as the worst-case duration of one single UrlFetchApp.fetch call —
+// Apps Script does not expose a configurable fetch timeout, so this is an
+// assumption about platform behavior (commonly observed to cap around a
+// minute), not a documented guarantee; see README "Known limitations".
+// Still kept well under half of MAX_RUN_DURATION_MS so it never itself
+// starves the primary pagination phase down to nothing.
+const MIN_PROCESSING_RESERVE_MS = 65 * 1000;
+
 function setup() {
   const props = PropertiesService.getScriptProperties();
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -339,6 +367,7 @@ function reconcileTaskById(pageId) {
 // with no pre-existing Done history.
 function backfillResultFingerprints_() {
   return withPollLock_(function () {
+    const runStartedAt = new Date();
     const props = PropertiesService.getScriptProperties();
     const resumeCursor = props.getProperty('BACKFILL_RESUME_CURSOR');
     // Sorted ascending and, on a resumed call, filtered to on-or-after the
@@ -359,47 +388,134 @@ function backfillResultFingerprints_() {
           { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
         ] }
       : { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } };
-    const doneTasks = paginateNotionQuery_(
-      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
-      {
-        page_size: 100,
-        filter: filter,
-        sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+    const queryPath = '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query';
+    const queryBody = {
+      page_size: 100,
+      filter: filter,
+      sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+    };
+    function tieOffsetStartIndex_(results) {
+      let index = 0;
+      if (resumeCursor && tieOffset > 0) {
+        let skipped = 0;
+        while (
+          index < results.length &&
+          skipped < tieOffset &&
+          String(results[index].last_edited_time || '') === resumeCursor
+        ) {
+          skipped++;
+          index++;
+        }
       }
-    );
-    let startIndex = 0;
-    if (resumeCursor && tieOffset > 0) {
-      let skipped = 0;
-      while (
-        startIndex < doneTasks.results.length &&
-        skipped < tieOffset &&
-        String(doneTasks.results[startIndex].last_edited_time || '') === resumeCursor
-      ) {
-        skipped++;
-        startIndex++;
-      }
+      return index;
     }
+
+    // Reserve half of MAX_RUN_DURATION_MS for pagination and leave the
+    // other half for actually processing and checkpointing whatever was
+    // retrieved — a large Done database or a slow Notion response can
+    // otherwise spend the entire wall-clock budget just fetching pages (up
+    // to QUERY_PAGE_SAFETY_LIMIT of them, each its own round trip) before
+    // the processing loop below ever runs its own MAX_RUN_DURATION_MS
+    // check, risking an uncaught Apps Script kill with nothing reconciled
+    // or checkpointed at all. But a resumed cohort whose persisted tie
+    // offset already exceeds what the half-budget alone can fetch would
+    // otherwise deadlock forever: every call re-fetches the identical
+    // already-consumed prefix (on_or_after is inclusive and always
+    // restarts from its own beginning) and stops with zero net progress,
+    // and nothing about that changes between calls on its own. Rather than
+    // starting a SECOND, independent pagination pass past the half-budget
+    // deadline (which would only re-fetch from page 1 again, wasting the
+    // time the first pass already spent, and could never net out ahead —
+    // both passes share the same wall clock), extend this SAME continuous
+    // pass past the half-budget deadline specifically while the tie-offset
+    // skip would still consume everything fetched so far — but bounded by
+    // MIN_PROCESSING_RESERVE_MS short of the full run budget, not the full
+    // budget itself. Escalating all the way to the outer bound would let a
+    // call that only just manages to fetch past the tie offset right near
+    // that bound exit pagination with nothing left to actually process or
+    // checkpoint with — see MIN_PROCESSING_RESERVE_MS.
+    const doneTasks = paginateNotionQuery_(
+      queryPath,
+      queryBody,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS - MIN_PROCESSING_RESERVE_MS,
+      function (results) { return tieOffsetStartIndex_(results) < results.length; }
+    );
+    const startIndex = tieOffsetStartIndex_(doneTasks.results);
     const toProcess = doneTasks.results.slice(startIndex);
-    const outcomes = toProcess.map(function (task) {
-      return reconcileTaskPage_(task);
-    });
-    if (doneTasks.truncated && toProcess.length) {
-      const lastSeen = String(toProcess[toProcess.length - 1].last_edited_time || '');
+
+    // Bounded by wall-clock time as well as the pagination safety limit
+    // above — a batch of Done Tasks well under QUERY_PAGE_SAFETY_LIMIT can
+    // still exceed Apps Script's own execution limit once each one costs a
+    // real Time Events query/write (reconcileTaskPage_ always re-verifies
+    // Done, the same as pollTaskChanges' free-outcome scan). Same
+    // MAX_RUN_DURATION_MS pattern: stop before the platform kills the run —
+    // which would lose all progress and re-scan the identical prefix next
+    // time — and checkpoint however far this call actually got instead of
+    // however far the fetched batch goes.
+    const outcomes = [];
+    let iterated = 0;
+    while (
+      iterated < toProcess.length &&
+      (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
+    ) {
+      outcomes.push(reconcileTaskPage_(toProcess[iterated]));
+      iterated++;
+    }
+    const timedOut = iterated < toProcess.length;
+    const processed = toProcess.slice(0, iterated);
+
+    if ((doneTasks.truncated || timedOut) && processed.length) {
+      const lastSeen = String(processed[processed.length - 1].last_edited_time || '');
       if (lastSeen) {
         props.setProperty('BACKFILL_RESUME_CURSOR', lastSeen);
+        // The offset must count only members of the tie that will still be
+        // returned by a FUTURE resumed query — i.e. still `Status = Done`.
+        // A `done_gate_rejected:*` outcome rolls the Task back to `Review`
+        // (updateTaskStatus_ above), which removes it from this query's own
+        // `Status = Done` filter from that point on: it will never appear in
+        // any later call's results again. Counting it toward the skip would
+        // inflate the offset past what the (now smaller) future result set
+        // actually contains for this tie, silently skipping a genuinely
+        // unprocessed valid Task forever — the same failure mode the
+        // cumulative carry-over below exists to avoid, just introduced from
+        // the other direction. A rejected member is therefore skipped over
+        // (it needs no further visit — reconcileTaskPage_ already ran it and
+        // Notion no longer considers it Done) without incrementing the
+        // count, but without resetting the count either: it does not break
+        // the contiguous tie the way a genuinely different timestamp does.
         let newTieOffset = 0;
-        for (let i = 0; i < toProcess.length; i++) {
-          newTieOffset = String(toProcess[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
+        for (let i = 0; i < processed.length; i++) {
+          if (String(processed[i].last_edited_time || '') !== lastSeen) {
+            newTieOffset = 0;
+            continue;
+          }
+          if (outcomes[i].indexOf('done_gate_rejected:') === 0) continue;
+          newTieOffset++;
         }
-        props.setProperty('BACKFILL_RESUME_TIE_OFFSET', String(newTieOffset));
+        // If this call's own tail is still the exact same tied timestamp the
+        // resume cursor already pointed at when this call started, the
+        // members that resume's own tieOffset already skipped (processed by
+        // an earlier call, not present in `processed` at all — startIndex
+        // skipped them via the query result, not this loop) belong to that
+        // same tie and must be counted cumulatively. Otherwise each further
+        // call spanning the same cohort overwrites the stored offset with
+        // only what THAT call processed, so every subsequent call re-skips
+        // to the same fixed count and re-walks (never past) the same middle
+        // slice forever instead of ever draining the tail. A tail that moved
+        // to a genuinely new timestamp (lastSeen !== resumeCursor) has no
+        // such carry-over — that offset belonged to a now-fully-drained tie.
+        const cumulativeTieOffset = (lastSeen === resumeCursor ? tieOffset : 0) + newTieOffset;
+        props.setProperty('BACKFILL_RESUME_TIE_OFFSET', String(cumulativeTieOffset));
       }
-      Logger.log('backfillResultFingerprints_: result set truncated at the pagination safety limit — call again to resume from ' + lastSeen + '.');
-    } else if (doneTasks.truncated) {
-      // Truncated AND nothing new this call (the whole returned batch was
-      // already covered by the tie-offset skip): leave BACKFILL_RESUME_
-      // CURSOR/TIE_OFFSET exactly as they were rather than losing the resume
-      // point — same "no progress, don't touch persisted state" rule
-      // pollTaskChanges applies for the identical scenario.
+      Logger.log('backfillResultFingerprints_: stopped at the ' + (timedOut ? 'wall-clock bound' : 'pagination safety limit') + ' — call again to resume from ' + lastSeen + '.');
+    } else if (doneTasks.truncated || timedOut) {
+      // Stopped (by either bound) with nothing new processed this call (the
+      // whole returned batch was already covered by the tie-offset skip):
+      // leave BACKFILL_RESUME_CURSOR/TIE_OFFSET exactly as they were rather
+      // than losing the resume point — same "no progress, don't touch
+      // persisted state" rule pollTaskChanges applies for the identical
+      // scenario.
     } else {
       // Fully drained (or nothing left to see): clear any stale resume point
       // so a future call starts a fresh full pass rather than silently
@@ -408,7 +524,7 @@ function backfillResultFingerprints_() {
       props.setProperty('BACKFILL_RESUME_CURSOR', '');
       props.setProperty('BACKFILL_RESUME_TIE_OFFSET', '');
     }
-    return { scanned: outcomes.length, truncated: doneTasks.truncated, outcomes: outcomes };
+    return { scanned: outcomes.length, truncated: doneTasks.truncated, timedOut: timedOut, outcomes: outcomes };
   });
 }
 
@@ -616,22 +732,169 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // assignment change made moments after the restart, still within the
       // same interval) would open its new event at that later edit instead
       // of the execution's real start, silently dropping the time between.
+      // `allEvents` was fetched at the top of this call, before the
+      // otherActor.forEach above closed anything — so if a reassignment just
+      // happened this same call, allEvents' in-memory copy of that outgoing
+      // event still shows no Ended At, and latestEventTimestamp_ can't see
+      // it. Without accounting for that, an unchanged Task-level Started At
+      // (correctly representing the whole execution's true start) looks
+      // "trusted" and the replacement actor's event opens there instead of
+      // at the reassignment boundary — overlapping the outgoing actor's own
+      // interval and double-counting effort. `when` (this observed edit,
+      // i.e. the reassignment itself) must count as part of history
+      // whenever we just closed something this call.
       const latestHistoricalTimestamp = latestEventTimestamp_(allEvents);
+      const effectiveLatestHistoricalTimestamp = otherActor.length
+        ? (latestHistoricalTimestamp && latestHistoricalTimestamp.getTime() > when.getTime() ? latestHistoricalTimestamp : when)
+        : latestHistoricalTimestamp;
       const taskStartedAt = propertyDate_(task.properties['Started At']);
-      const trustedTaskStart = taskStartedAt && (!latestHistoricalTimestamp || taskStartedAt.getTime() >= latestHistoricalTimestamp.getTime())
+      const trustedTaskStart = taskStartedAt && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime())
         ? taskStartedAt
         : null;
       const startAt = trustedTaskStart || when;
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt);
+      // The execution identifier must stay identical across every event
+      // belonging to one continuous execution — the first-ever event AND
+      // any reassignment replacement within it — so enforceDoneGate_ can
+      // recognize them as the same execution without inferring it from
+      // timestamp ties. The Task's raw Started At is NOT safe to use
+      // directly for this: if governance was violated and Started At was
+      // never actually refreshed at a genuine reopen, the newly (re)opened
+      // event would inherit the *stale* old value indistinguishably from
+      // the prior execution's own events, defeating the whole point. A
+      // reassignment replacement instead inherits the outgoing event's own
+      // Execution= marker directly (whatever it already was, correct or
+      // not) — reassigning never changes which execution is running. The
+      // first-ever event of a genuinely new execution gets `startAt` itself:
+      // exactly the value already computed above to correctly fall back to
+      // `when` instead of a stale Started At, so a governance violation
+      // still gets a fresh, distinguishing identity rather than reusing the
+      // old one.
+      const outgoingExecutionId = otherActor.length
+        ? (otherActor.map(function (eventPage) {
+            return parseNoteMeta_(propertyText_(eventPage.properties.Note)).execution;
+          }).find(Boolean) || '')
+        : '';
+      // A reassignment (otherActor.length) replacing a *legacy* outgoing
+      // event — one that predates this field and so has no Execution= to
+      // inherit — must NOT fall back to `startAt` here: `startAt` is
+      // deliberately the reassignment boundary in this exact branch (see
+      // above and Finding 1), not the execution's true start, so stamping
+      // it as the identity would tag the replacement with a value that will
+      // almost never match the Task's own (unchanged, still-correct)
+      // Started At once this closes — permanently misclassifying a
+      // genuinely current event as prior and blocking Done forever after
+      // an upgrade mid-execution.
+      //
+      // An earlier version of this fallback used the Task's raw Started At
+      // instead — reasoning that, unlike the first-ever-open case, this Task
+      // is already open, so its Started At already identifies the ongoing
+      // execution. Codex found the gap: nothing here verifies that. The
+      // outgoing event carries no Execution= of its own precisely because it
+      // predates the field, so there is no independently-verified value to
+      // compare Started At against — it is trusted outright, unconditionally,
+      // with none of the freshness checks used everywhere else this file
+      // trusts Started At (`trustedTaskStart` just above, `taskStartedAtTrusted`
+      // in enforceDoneGate_). If Started At was ever edited independently of
+      // this event's true start — a data-entry correction, a bulk edit, or
+      // truly the same governance-violating invisible-reopen risk `startAt`'s
+      // own fallback above already guards against — the replacement would
+      // carry a manufactured identity that happens not to match whatever
+      // Started At reads at Done-check time. That is *worse* than carrying no
+      // marker at all: enforceDoneGate_'s Execution= pass authoritatively
+      // DELETES a mismatched event from current-execution membership even
+      // when the legacy Reason-based heuristic would have correctly kept it
+      // in, turning a self-inflicted, unverifiable mismatch into Done being
+      // wrongly blocked for an execution that never actually reopened.
+      //
+      // There is no available signal here to tell "Started At is still this
+      // event's true start" apart from "it drifted" — this call site cannot
+      // see anything past what a `Reason=reassignment` marker on the
+      // outgoing event already tells the legacy heuristic. So, exactly like
+      // stampExecutionBoundary_'s own identical dilemma (see its comment),
+      // the safe choice is to manufacture nothing: leave the replacement
+      // unmarked and let the same legacy Reason/Boundary/tie heuristic that
+      // already, correctly, carried the outgoing event decide the
+      // replacement's membership too. Only the true first-ever-open case (no
+      // otherActor at all) still needs `startAt`'s own stale-Started-At
+      // fallback behavior — there, no outgoing event's Reason marker exists
+      // to fall back on, so `startAt` (already gated by `trustedTaskStart`
+      // above) is the only signal available at all.
+      const executionId = otherActor.length
+        ? outgoingExecutionId
+        : startAt.toISOString();
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId);
       actions.push('opened:' + created.id);
     }
-  } else {
+  } else if (openEvents.length) {
     // Review / Blocked / Ready / Backlog are non-active Task states and may close
     // intervals. Done is intentionally handled above and never closes timing.
     openEvents.forEach(function (eventPage) {
       closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'left_in_progress');
       actions.push('closed:' + eventPage.id);
     });
+  } else {
+    // Nothing was open — either the assignee had already been cleared
+    // (closing its event via 'reassignment') before the Task left In
+    // Progress, so there is no event to close here at all, OR this Task was
+    // already correctly closed by a *prior* poll (its open event closed then
+    // with the ordinary 'left_in_progress' reason) and this call is simply
+    // re-observing it later, still out of In Progress, for an unrelated
+    // reason (e.g. Result being edited). Only the first case needs a
+    // retroactive marker: a 'reassignment'/'duplicate_reconciliation' close
+    // never marks an execution boundary on its own (see the Reason-based
+    // membership rule in enforceDoneGate_), so without one, this transition
+    // would otherwise leave none, letting a real prior execution's
+    // reassignment-only close go on looking "current" forever. A plain
+    // 'left_in_progress' close is already unambiguous prior-execution
+    // evidence by Reason alone — it needs no marker, and re-stamping it here
+    // on every later re-observation would wrongly exclude it from the Done
+    // gate's tie-seed (see enforceDoneGate_) even when it is the genuinely
+    // CURRENT applicable event, rejecting a legitimate Done as
+    // stale_task_started_at. Stamp the most-recently-closed event only when
+    // its own Reason is exactly the case this marker exists for — not a
+    // phantom zero-duration Time Event, since nothing was actually open.
+    let mostRecentClosed = null;
+    (allEvents || []).forEach(function (eventPage) {
+      const endedAt = propertyDate_(eventPage.properties['Ended At']);
+      if (!endedAt) return;
+      if (!mostRecentClosed || endedAt.getTime() > propertyDate_(mostRecentClosed.properties['Ended At']).getTime()) {
+        mostRecentClosed = eventPage;
+      }
+    });
+    if (mostRecentClosed) {
+      const mostRecentClosedMeta = parseNoteMeta_(propertyText_(mostRecentClosed.properties.Note));
+      const needsBoundary = mostRecentClosedMeta.reason === 'reassignment' || mostRecentClosedMeta.reason === 'duplicate_reconciliation';
+      if (needsBoundary && mostRecentClosedMeta.boundary !== 'left_in_progress') {
+        // Deliberately never backfills Execution= here, even for a legacy
+        // event with none yet. An earlier version did — filling it in from
+        // the Task's own CURRENT Started At — to save exactly the case this
+        // whole branch exists for: a legacy event that is genuinely this
+        // Task's only (and therefore current) execution, which would
+        // otherwise fall back to the legacy Reason/Boundary heuristic and be
+        // wrongly excluded from current-execution membership. But this call
+        // site cannot tell that case apart from the one right next to it in
+        // the README's "Known limitations": a Task reopened and restarted
+        // entirely inside one poll window, whose new In Progress spell was
+        // never itself observed. There, by the time this branch runs, the
+        // Task's current Started At already reflects the NEW (invisible)
+        // execution, while `mostRecentClosed` is still evidence from the
+        // OLD one — backfilling Execution= from the Task's current Started
+        // At would tag that stale old event as belonging to the new
+        // execution it has nothing to do with, letting a Done with no valid
+        // Time Event for the new execution pass anyway. Both cases reach
+        // this exact branch with the exact same information available
+        // (a Reason-eligible closed event, no Execution= yet, and the
+        // Task's own current Started At); there is no way from here to know
+        // which one this is. Leaving Execution= unstamped reintroduces the
+        // narrower, already-documented self-poisoning gap for the first
+        // case (see README "Known limitations") rather than risk silently
+        // accepting a stale-Result reopen for the second — the Boundary=
+        // stamp alone (still applied below) is enough for the legacy
+        // heuristic to keep working for both.
+        stampExecutionBoundary_(mostRecentClosed, '');
+        actions.push('boundary:' + mostRecentClosed.id);
+      }
+    }
   }
 
   return actions.length ? actions.join(',') : 'no_change:' + currentStatus;
@@ -655,6 +918,7 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   // begins. A closed event only counts if it started at or after that
   // marker.
   const taskStartedAt = propertyDate_(task.properties['Started At']);
+  const taskStartedAtIso = taskStartedAt ? taskStartedAt.toISOString() : null;
 
   // Started At itself must look fresh before it can be trusted to identify
   // "the current execution" at all — otherwise the applicability check below
@@ -674,35 +938,92 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   // reconcileAuthoritativeTimeEvents_'s 'reassignment' cleanup, and a
   // duplicate open event is closed via its 'duplicate_reconciliation'
   // cleanup — neither ever ends an execution, only 'left_in_progress' does.
-  // So membership is decided by that Reason marker alone, not by timestamp
+  // So membership is decided by that Reason marker, not by timestamp
   // adjacency: an event closed 'reassignment' or 'duplicate_reconciliation'
-  // is unconditionally part of whatever execution is current, however far
-  // its own Ended At sits from anything else (an assignment gap, or a
-  // duplicate detected well after the fact, are exactly this). The
-  // most-recently-closed event is always the seed regardless of its own
-  // reason — it is the candidate applicable event this whole check exists to
-  // validate, never evidence against itself. Anything else — a genuine
-  // 'left_in_progress' close (the Task actually left In Progress there), or
-  // no reason at all (legacy data) — is a real execution boundary and stays
-  // prior-execution evidence even if it happens to coincide in time with
-  // something in the current one (e.g. both landing in the same Notion
-  // minute).
+  // is part of whatever execution is current, however far its own Ended At
+  // sits from anything else (an assignment gap, or a duplicate detected
+  // well after the fact, are exactly this) — UNLESS it also carries a
+  // 'Boundary=left_in_progress' marker (see reconcileAuthoritativeTime
+  // Events_'s no-open-events branch): a reassignment/clear can end up being
+  // the last thing ever recorded for an execution that reassigned its only
+  // actor away and then left In Progress with nothing open to close, and
+  // reconcileAuthoritativeTimeEvents_ retroactively stamps that boundary
+  // onto the most-recently-closed event precisely so this check can still
+  // tell that execution actually ended there. Without it, every historical
+  // reassignment marker would look like "still current," no matter how long
+  // ago its execution really finished.
+  //
+  // The seed (never evidence against itself, since it's the candidate
+  // applicable event this whole check exists to validate) is every event
+  // sharing the single latest Ended At, not just one arbitrarily chosen
+  // among ties: a Task first observed after leaving In Progress with
+  // multiple open events closes all of them at the identical timestamp, and
+  // each is equally "now" — picking only one would leave its equally recent
+  // siblings looking like prior-execution evidence. Anything else — a
+  // genuine 'left_in_progress' close (the Task actually left In Progress
+  // there), a boundary-marked reassignment/duplicate, or no reason at all
+  // (legacy data) — is a real execution boundary and stays prior-execution
+  // evidence even if it happens to coincide in time with something in the
+  // current one (e.g. both landing in the same Notion minute).
   const closedEvents = (allEvents || []).filter(function (eventPage) {
     return Boolean(propertyDate_(eventPage.properties['Ended At']));
   });
-  let mostRecentClosedEvent = null;
+  let latestEndedAt = null;
   closedEvents.forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
-    if (!mostRecentClosedEvent || endedAt.getTime() > propertyDate_(mostRecentClosedEvent.properties['Ended At']).getTime()) {
-      mostRecentClosedEvent = eventPage;
-    }
+    if (!latestEndedAt || endedAt.getTime() > latestEndedAt.getTime()) latestEndedAt = endedAt;
   });
   const currentExecutionEventIds = {};
-  if (mostRecentClosedEvent) currentExecutionEventIds[mostRecentClosedEvent.id] = true;
   closedEvents.forEach(function (eventPage) {
-    const reason = parseNoteMeta_(propertyText_(eventPage.properties.Note)).reason;
-    if (reason === 'reassignment' || reason === 'duplicate_reconciliation') {
+    const endedAt = propertyDate_(eventPage.properties['Ended At']);
+    if (!latestEndedAt || endedAt.getTime() !== latestEndedAt.getTime()) return;
+    // last_edited_time is minute-granular (see README Known limitations), so
+    // a genuinely prior execution's own boundary close and the current
+    // execution's close CAN land on the identical recorded Ended At by pure
+    // coincidence, not just a true simultaneous multi-event close. An event
+    // explicitly, retroactively marked Boundary=left_in_progress carries a
+    // much stronger claim than a plain Reason=left_in_progress ever does —
+    // it was deliberately stamped specifically to say "this is where a past
+    // execution genuinely ended" — so it must never be swept into the seed
+    // by a mere timestamp tie. A plain Reason=left_in_progress event with no
+    // such marker stays tie-seedable: that is the ambiguous, ordinary case
+    // (e.g. a Task first observed after leaving In Progress with multiple
+    // open events, all genuinely closed together this same call) the tie
+    // rule exists to handle, and Boundary is never stamped on it.
+    if (parseNoteMeta_(propertyText_(eventPage.properties.Note)).boundary === 'left_in_progress') return;
+    currentExecutionEventIds[eventPage.id] = true;
+  });
+  closedEvents.forEach(function (eventPage) {
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    const isExecutionBoundary = meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
+    if (!isExecutionBoundary && (meta.reason === 'reassignment' || meta.reason === 'duplicate_reconciliation')) {
       currentExecutionEventIds[eventPage.id] = true;
+    }
+  });
+  // Everything above is a heuristic inferring membership from timestamp ties
+  // and Reason/Boundary markers — necessarily so for data that predates the
+  // Execution= field, but vulnerable to exactly the class of coincidental-tie
+  // ambiguity Codex kept finding new cases of: last_edited_time's minute
+  // granularity means two genuinely DIFFERENT executions' closes can land on
+  // the identical Ended At, and no combination of Reason/Boundary/tie rules
+  // can fully tell them apart without literally identifying which execution
+  // each one belongs to. An event stamped with an explicit Execution= marker
+  // (see createNotionTimeEvent_) doesn't need inference at all: it is
+  // current if and only if that marker exactly equals the Task's own
+  // current Started At (Started At does not change across a mid-execution
+  // reassignment, so every event opened during one continuous execution —
+  // the original open and any reassignment replacement within it — carries
+  // the identical value). This authoritatively overrides whatever the
+  // heuristic above concluded for such an event; only an event with no
+  // Execution= marker at all (created before this field existed) is left to
+  // that heuristic.
+  closedEvents.forEach(function (eventPage) {
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    if (!meta.execution) return;
+    if (taskStartedAtIso && meta.execution === taskStartedAtIso) {
+      currentExecutionEventIds[eventPage.id] = true;
+    } else {
+      delete currentExecutionEventIds[eventPage.id];
     }
   });
   const priorTimestamp = latestEventTimestamp_((allEvents || []).filter(function (eventPage) {
@@ -719,6 +1040,18 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     (allEvents || []).forEach(function (eventPage) {
       const endedAt = propertyDate_(eventPage.properties['Ended At']);
       if (!endedAt) return;
+      // Applicability must go through the SAME current-execution
+      // classification `currentExecutionEventIds` above already computed —
+      // never re-derive it from a separate, parallel timestamp check. An
+      // event a prior execution's reassignment replacement whose own
+      // `Started At`/`Ended At` happen to land in the same minute as the
+      // current (later, possibly never-observed-reopen) `Started At` can
+      // satisfy `eventStartedAt_ >= taskStartedAt` on timestamps alone even
+      // though its `Execution=` marker (or the legacy heuristic) has
+      // already, correctly, excluded it as prior evidence. Without this
+      // check, such an event could be selected as applicable and let Done
+      // pass for an execution that produced no real Time Event of its own.
+      if (!currentExecutionEventIds[eventPage.id]) return;
       if (eventStartedAt_(eventPage).getTime() < taskStartedAt.getTime()) return;
       // Prefer the most-recently-closed applicable event, so a stale
       // Completed At is checked against the freshest legitimate close below.
@@ -828,6 +1161,30 @@ function markResultValidated_(eventPage, result) {
   return true;
 }
 
+// Retroactively marks a closed event as the point an execution genuinely
+// ended, for a Task that left In Progress with nothing open to close (see
+// reconcileAuthoritativeTimeEvents_'s no-open-events branch) — the event's
+// own Reason (e.g. 'reassignment') never signals that on its own. Does not
+// touch the original Reason: both facts (why it closed, and that this is
+// also where its execution ended) are preserved side by side.
+//
+// `executionId`, when non-empty, also backfills Execution= at the same
+// time — but the only call site deliberately always passes '' (see the
+// comment there for why: it cannot safely distinguish the one legacy-data
+// case backfilling would help from a stale-Started-At case it would
+// silently break). Kept as a parameter rather than dropped so a future,
+// genuinely safe backfill path (one with enough information to tell the
+// two cases apart) has an existing, tested hook to call into.
+function stampExecutionBoundary_(eventPage, executionId) {
+  const existingNote = propertyText_(eventPage.properties.Note);
+  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId });
+  notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
+    properties: {
+      Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
+    },
+  });
+}
+
 function updateTaskStatus_(taskId, statusName) {
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(taskId), {
     properties: {
@@ -836,9 +1193,10 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId) {
   const note = buildNote_({
     source: 'notion_reconcile',
+    execution: executionId,
     snapshotId: snapshotId,
     changedBy: changedBy,
   });
@@ -992,13 +1350,44 @@ function notionRequest_(method, path, body) {
 // unretrieved data.
 const QUERY_PAGE_SAFETY_LIMIT = 50;
 
-function paginateNotionQuery_(path, baseBody) {
+function paginateNotionQuery_(path, baseBody, deadlineMs, extendedDeadlineMs, hasProgress) {
   let cursor = null;
   let pageCount = 0;
   const results = [];
   let truncated = false;
 
   do {
+    // An optional wall-clock deadline (e.g. from backfillResultFingerprints_,
+    // which needs to reserve time to actually process and checkpoint
+    // whatever gets retrieved, not just spend its whole run fetching pages)
+    // stops pagination early rather than letting it run unbounded up to
+    // QUERY_PAGE_SAFETY_LIMIT — treated exactly like hitting that page-count
+    // limit: truncated, resumable via on_or_after next call. Never cuts off
+    // before the very first page: a caller needs at least one page's worth
+    // of results to make any progress at all this call.
+    if (typeof deadlineMs === 'number' && pageCount > 0 && Date.now() >= deadlineMs) {
+      // A resumed call whose persisted skip (e.g. BACKFILL_RESUME_TIE_
+      // OFFSET, for a tied cohort spanning more than one call) already
+      // covers everything fetchable before `deadlineMs` would stop here
+      // with zero net progress — and since the resumed query is inclusive
+      // (on_or_after) and always restarts from its own beginning, the next
+      // call faces the identical situation: an exact repeat, forever,
+      // since nothing changes between calls on its own. `extendedDeadlineMs`
+      // + `hasProgress` let a caller in exactly that situation keep this
+      // SAME continuous fetch going (not restart a second one, which would
+      // only waste the time already spent and could never net out ahead)
+      // until real progress exists or the caller's own outer wall-clock
+      // bound is reached — never past it, so this still cannot blow the
+      // run's total budget.
+      const keepGoing = typeof extendedDeadlineMs === 'number'
+        && typeof hasProgress === 'function'
+        && !hasProgress(results)
+        && Date.now() < extendedDeadlineMs;
+      if (!keepGoing) {
+        truncated = true;
+        break;
+      }
+    }
     const body = Object.assign({}, baseBody);
     if (cursor) body.start_cursor = cursor;
 
@@ -1098,6 +1487,8 @@ function buildNote_(fields) {
   if (fields.source) parts.push('Source=' + fields.source);
   if (fields.endStatus) parts.push('End Status=' + fields.endStatus);
   if (fields.reason) parts.push('Reason=' + fields.reason);
+  if (fields.boundary) parts.push('Boundary=' + fields.boundary);
+  if (fields.execution) parts.push('Execution=' + fields.execution);
   if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
   if (fields.changedBy) parts.push('Changed By=' + fields.changedBy);
   if (fields.resultFingerprint) parts.push('Result Fingerprint=' + fields.resultFingerprint);
@@ -1108,6 +1499,27 @@ function parseNoteMeta_(note) {
   return {
     endStatus: noteField_(note, 'End Status'),
     reason: noteField_(note, 'Reason'),
+    // Retroactively stamped onto the most-recently-closed event when the
+    // Task leaves In Progress with nothing open to close (see
+    // reconcileAuthoritativeTimeEvents_) — marks that an execution actually
+    // ended there even though the event's own Reason (e.g. 'reassignment')
+    // never does. See enforceDoneGate_'s execution-membership check.
+    boundary: noteField_(note, 'Boundary'),
+    // Stamped once, at creation — the execution this event belongs to,
+    // identified directly rather than inferred from timestamp ties or
+    // Reason markers. A reassignment replacement inherits the OUTGOING
+    // event's own Execution= marker unchanged (reassigning never starts a
+    // new execution); the first-ever event of a genuinely new execution
+    // gets the interval's own computed start (see reconcileAuthoritative
+    // TimeEvents_'s opening logic) rather than the Task's raw Started At
+    // directly — that already correctly falls back to the observed edit
+    // time instead of a stale, never-refreshed Started At, so a governance
+    // violation still gets a fresh, distinguishing identity instead of
+    // silently reusing the old one. See enforceDoneGate_'s execution-
+    // membership check, which prefers this direct equality test over the
+    // legacy Reason/Boundary/tie heuristic whenever it's present (absent
+    // only on data from before this field existed).
+    execution: noteField_(note, 'Execution'),
     snapshotId: noteField_(note, 'Snapshot'),
     changedBy: noteField_(note, 'Changed By'),
     // The *last* recorded value only — fine for every other field (only the
@@ -1167,7 +1579,14 @@ function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
 }
 
 function ensureProjectionHeaders_() {
-  const sheet = sheet_(DEFAULTS.TIME_EVENTS_SHEET);
+  // sheet_() throws when the tab is missing — correct for callers during
+  // normal reconciliation, where its absence means setup was never run. But
+  // this function IS setup's own initialization step: on a brand-new
+  // spreadsheet with no "Time Events" tab yet, that same strictness would
+  // make setup() itself throw before it ever gets the chance to create one.
+  // Mirror ensureSyncLogSheet_'s create-if-absent pattern instead.
+  const ss = spreadsheet_();
+  const sheet = ss.getSheetByName(DEFAULTS.TIME_EVENTS_SHEET) || ss.insertSheet(DEFAULTS.TIME_EVENTS_SHEET);
   const headers = [
     'Event ID', 'Task ID', 'Task Title', 'Actor', 'Started At', 'Ended At',
     'Duration (h)', 'Start Status', 'End Status', 'Changed By', 'Notion URL',
@@ -1248,11 +1667,28 @@ function appendNote_(existingNote, marker, maxLength) {
   const isFingerprintSegment = function (segment) {
     return segment.trim().indexOf('Result Fingerprint=') === 0;
   };
+  // Execution=/Boundary= identify which execution an event belongs to and
+  // whether it marks a genuine execution boundary — enforceDoneGate_'s
+  // current-execution classification (and thus taskStartedAtTrusted) reads
+  // them directly. Losing one is a materially worse failure than losing one
+  // old Result Fingerprint=: a fingerprint only narrows the already-bounded
+  // stale-Result detection window (see README "Known limitations"), while
+  // losing Execution=/Boundary= can flip an event's own current/prior
+  // classification outright. Protected even more than fingerprints:
+  // evicted only once every fingerprint segment is already gone.
+  const isExecutionOrBoundarySegment = function (segment) {
+    const trimmed = segment.trim();
+    return trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0;
+  };
   const segments = existingNote.split(separator);
   let combined = segments.concat([clippedMarker]).join(separator);
   while (segments.length && combined.length > maxLength) {
-    const dropIndex = segments.findIndex(function (segment) { return !isFingerprintSegment(segment); });
-    segments.splice(dropIndex >= 0 ? dropIndex : 0, 1);
+    let dropIndex = segments.findIndex(function (segment) {
+      return !isFingerprintSegment(segment) && !isExecutionOrBoundarySegment(segment);
+    });
+    if (dropIndex < 0) dropIndex = segments.findIndex(isFingerprintSegment);
+    if (dropIndex < 0) dropIndex = 0;
+    segments.splice(dropIndex, 1);
     combined = segments.length ? segments.concat([clippedMarker]).join(separator) : clippedMarker;
   }
   return combined;
