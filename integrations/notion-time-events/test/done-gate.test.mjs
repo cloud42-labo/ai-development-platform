@@ -835,3 +835,39 @@ test('Done passes by correctly picking the Execution=-matching event out of a ti
 
   assert.equal(outcome, 'done_gate_passed:stamped');
 });
+
+test('Done still passes for a legacy reassignment whose replacement carries no Execution= marker at all', () => {
+  // Model/Invariant Review I2/I3, scenario S19 regression guard (the flip
+  // side of the reconcileAuthoritativeTimeEvents_ fix for PR #17 Codex
+  // finding "Reject ambiguous legacy handoffs instead of trusting Started
+  // At", see poll.test.mjs): once that fix stops manufacturing an Execution=
+  // marker for a reassignment replacing a legacy (pre-Execution=) outgoing
+  // event, EVERY event this Task ever produces from that reassignment
+  // onward is unmarked too — neither carries any Execution= at all. Both
+  // must still be classified current via the plain Reason-based heuristic
+  // alone (the same one that has always covered fully-legacy data), so a
+  // legitimate mid-execution reassignment must still let Done pass —
+  // exactly the original scenario commit 482706c fixed, just with the
+  // now-corrected "manufacture nothing" identity instead of a stamped one.
+  const { sandbox } = harnessWithNotionStub();
+  const taskStartedAt = '2026-08-30T05:00:00.000Z';
+  const legacyOutgoingClose = eventPage('evt-legacy-outgoing-close', {
+    startedAt: taskStartedAt,
+    endedAt: '2026-08-30T05:10:00.000Z', // closed at the reassignment boundary
+    note: 'Reason=reassignment', // no Execution= — predates the field
+  });
+  const replacementClose = eventPage('evt-replacement-close', {
+    startedAt: '2026-08-30T05:10:00.000Z', // opened at the reassignment boundary
+    endedAt: '2026-08-30T05:30:00.000Z', // the Task's own genuine completion
+    note: 'Reason=left_in_progress', // no Execution= either — the fix's whole point
+  });
+  const task = taskPage({
+    startedAt: taskStartedAt, // unchanged across the reassignment, as expected
+    result: 'shipped',
+    completedAt: '2026-08-30T05:30:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [legacyOutgoingClose, replacementClose], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});

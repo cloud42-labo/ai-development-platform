@@ -1145,18 +1145,24 @@ test('a reassignment replacement inherits the outgoing event\'s own Execution= m
   assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:20:00.000Z');
 });
 
-test('a reassignment replacing a legacy (pre-Execution=) outgoing event falls back to the Task\'s own Started At, not the reassignment boundary', () => {
-  // Codex-reported gap: when the outgoing event predates this field
-  // entirely (a live deployment upgraded mid-execution), outgoingExecutionId
-  // is empty and the replacement must NOT fall back to `startAt` — `startAt`
-  // is deliberately the reassignment boundary in this branch (Finding 1),
-  // not the execution's true start. Stamping that as the identity would tag
-  // the replacement with a value that (almost) never matches the Task's own
-  // unchanged Started At once it closes, permanently misclassifying a
-  // genuinely current event as prior and blocking Done forever after an
-  // upgrade mid-execution. The Task's raw Started At — which already
-  // identifies this same ongoing execution, since the Task is currently
-  // open — is the correct fallback here instead.
+test('a reassignment replacing a legacy (pre-Execution=) outgoing event manufactures no Execution= marker at all, deferring to the legacy Reason heuristic', () => {
+  // Model/Invariant Review I2/I3, scenario S19 (PR #17 Codex finding "Reject
+  // ambiguous legacy handoffs instead of trusting Started At"): when the
+  // outgoing event predates this field entirely (a live deployment upgraded
+  // mid-execution), outgoingExecutionId is empty. An earlier version of this
+  // fallback then backfilled the Task's raw Started At as the replacement's
+  // identity — but nothing here verifies Started At still reflects this
+  // exact, still-open execution rather than having drifted from an
+  // unrelated edit (or the same invisible-reopen risk `startAt`'s own
+  // fallback already guards against). A marker manufactured from an
+  // unverified value is worse than no marker: enforceDoneGate_'s Execution=
+  // pass authoritatively excludes a *mismatched* event even when the legacy
+  // Reason-based heuristic would have correctly kept it in, turning a
+  // self-inflicted mismatch into Done wrongly blocked later. So this
+  // replacement must carry no Execution= marker at all, leaving membership
+  // to the same Reason=reassignment heuristic that already, correctly,
+  // covers the outgoing event it replaces (see the regression-guard test
+  // below for confirmation Done still passes correctly this way).
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa04';
   const legacyOutgoingEvent = eventPage('evt-legacy-outgoing', {
     actor: 'Claude',
@@ -1177,9 +1183,9 @@ test('a reassignment replacing a legacy (pre-Execution=) outgoing event falls ba
   const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
   assert.equal(creates.length, 1);
   const note = creates[0].properties.Note.rich_text[0].text.content;
-  // The Task's own Started At (05:00) — NOT the reassignment boundary
-  // (05:20) that this same replacement event's own Started At correctly is.
-  assert.match(note, /Execution=2026-08-30T05:00:00\.000Z/);
+  assert.doesNotMatch(note, /Execution=/);
+  // The replacement's own Started At is still correctly the reassignment
+  // boundary (05:20), independent of this identity question.
   assert.equal(creates[0].properties['Started At'].date.start, '2026-08-30T05:20:00.000Z');
 });
 

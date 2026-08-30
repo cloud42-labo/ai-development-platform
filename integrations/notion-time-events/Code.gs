@@ -783,16 +783,45 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // almost never match the Task's own (unchanged, still-correct)
       // Started At once this closes — permanently misclassifying a
       // genuinely current event as prior and blocking Done forever after
-      // an upgrade mid-execution. The Task's raw Started At is the correct
-      // fallback specifically here: unlike the first-ever-open case above,
-      // this Task is already, currently open — its Started At already
-      // identifies this same ongoing execution (whatever separately
-      // determines whether that itself is trustworthy is unrelated to this
-      // reassignment). Only the true first-ever-open case (no otherActor at
-      // all) needs `startAt`'s own stale-Started-At fallback behavior.
-      const executionId = outgoingExecutionId
-        || (otherActor.length && taskStartedAt ? taskStartedAt.toISOString() : '')
-        || startAt.toISOString();
+      // an upgrade mid-execution.
+      //
+      // An earlier version of this fallback used the Task's raw Started At
+      // instead — reasoning that, unlike the first-ever-open case, this Task
+      // is already open, so its Started At already identifies the ongoing
+      // execution. Codex found the gap: nothing here verifies that. The
+      // outgoing event carries no Execution= of its own precisely because it
+      // predates the field, so there is no independently-verified value to
+      // compare Started At against — it is trusted outright, unconditionally,
+      // with none of the freshness checks used everywhere else this file
+      // trusts Started At (`trustedTaskStart` just above, `taskStartedAtTrusted`
+      // in enforceDoneGate_). If Started At was ever edited independently of
+      // this event's true start — a data-entry correction, a bulk edit, or
+      // truly the same governance-violating invisible-reopen risk `startAt`'s
+      // own fallback above already guards against — the replacement would
+      // carry a manufactured identity that happens not to match whatever
+      // Started At reads at Done-check time. That is *worse* than carrying no
+      // marker at all: enforceDoneGate_'s Execution= pass authoritatively
+      // DELETES a mismatched event from current-execution membership even
+      // when the legacy Reason-based heuristic would have correctly kept it
+      // in, turning a self-inflicted, unverifiable mismatch into Done being
+      // wrongly blocked for an execution that never actually reopened.
+      //
+      // There is no available signal here to tell "Started At is still this
+      // event's true start" apart from "it drifted" — this call site cannot
+      // see anything past what a `Reason=reassignment` marker on the
+      // outgoing event already tells the legacy heuristic. So, exactly like
+      // stampExecutionBoundary_'s own identical dilemma (see its comment),
+      // the safe choice is to manufacture nothing: leave the replacement
+      // unmarked and let the same legacy Reason/Boundary/tie heuristic that
+      // already, correctly, carried the outgoing event decide the
+      // replacement's membership too. Only the true first-ever-open case (no
+      // otherActor at all) still needs `startAt`'s own stale-Started-At
+      // fallback behavior — there, no outgoing event's Reason marker exists
+      // to fall back on, so `startAt` (already gated by `trustedTaskStart`
+      // above) is the only signal available at all.
+      const executionId = otherActor.length
+        ? outgoingExecutionId
+        : startAt.toISOString();
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId);
       actions.push('opened:' + created.id);
     }
