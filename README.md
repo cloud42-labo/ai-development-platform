@@ -23,6 +23,9 @@ In short: **State = Notion / Artifact = GitHub / Memory = brain**.
 - [Knowledge Asset Model: State / Artifact / Memory](decisions/0001-knowledge-asset-model.md)
 - [AI agent working rules](AGENTS.md)
 - [Package manifest](adp-package.yaml) and [Versioning Policy](docs/versioning-policy.md)
+- [Distribution package index](package/README.md) — Rules/Schemas/Workflows/Templates by class
+- [Software Product design-document standard](docs/product-design-doc-standard.md)
+- [ADP's own Inception Deck](docs/inception-deck.md) and [PRD](docs/PRD.md)
 - [v1.0.0 Asset Inventory & Freeze Scope](docs/v1-asset-inventory.md)
 - [Notion Operating Guide](https://app.notion.com/p/3bdfbd826f3b8119b7b4e623c9cdc94e)
 
@@ -32,6 +35,8 @@ In short: **State = Notion / Artifact = GitHub / Memory = brain**.
 - `governance/` — policies, standards, guardrails and source-of-truth rules
 - `decisions/` — durable ADP design insights and architecture/organization decisions
 - `templates/` — reusable templates for AI-native product development
+- `package/` — index of this repository's Rules/Schemas/Workflows/Templates by class, for an adopting agent or script (`adp-package.yaml`'s `package_root`)
+- `examples/` — this deployment's own environment-specific values (Notion workspace, GitHub org, named AI roles), catalogued separately from the package body
 - `AGENTS.md` — working rules for AI agents modifying this repository
 
 ## Operating principle

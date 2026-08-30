@@ -35,16 +35,19 @@ schema_version: 0.1.0-experimental
 # governance/research-security-policy.md,
 # governance/authority-stop-gate-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 0.1.0
+rules_version: 0.2.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
-# governance/monthly-risk-management-review.md).
-workflow_version: 0.1.0
+# governance/monthly-risk-management-review.md,
+# docs/product-design-doc-standard.md).
+workflow_version: 0.2.0
 
 # Version of the Templates asset class (templates/README.md,
-# templates/monthly-risk-review.md).
-templates_version: 0.1.0
+# templates/monthly-risk-review.md, templates/product-vision.md,
+# templates/inception-deck.md, templates/prd.md, templates/design-doc.md,
+# templates/epic-brief.md).
+templates_version: 0.2.0
 
 # What an adopting agent/environment must have to operate this package as
 # intended. Not enforced by tooling here (no custom package manager) —
@@ -61,6 +64,18 @@ required_capabilities:
 # Phase 2/3 — intentionally out of v1.0.0 scope, not a gap in this manifest.
 optional_adapters: []
 
+# Where an adopting agent/script finds the four asset classes above, and
+# where this deployment's own environment-specific values (Notion workspace,
+# GitHub org/repo names, named AI roles) are documented for manual reference.
+# This is a catalogue an adopter reads, not a substitution mechanism — the
+# canonical files under package_root's index still contain Cloud42's values
+# as-is (see package/README.md's "Environment-specific values" for why, and
+# for ADP-049-D, which is where actual compile-time substitution belongs).
+# Added by ADP-049-C; see package/README.md for why package_root is a
+# reference index rather than a physical file move.
+package_root: package/README.md
+example_config: examples/cloud42-labo-config.md
+
 # How to move between manifest states. This is the first manifest this
 # repository has had, so there is no prior version to migrate from — the
 # only entry today documents adopting the manifest itself. Add an entry
@@ -76,4 +91,53 @@ migration_path:
       documents that the manifest itself is new, not a behavior change
       to the underlying Rules/Workflows/Templates (those were classified,
       not modified, by ADP-049-A).
+    action_required: none
+  # ADP-049-C (2026-08-30) added the package_root/example_config fields
+  # above without bumping any version field: both are new optional-to-use
+  # fields, no existing field changed meaning, and no asset content
+  # changed — per docs/versioning-policy.md's "When to add a
+  # migration_path entry", a bump-free additive change does not need one.
+  - field: rules_version
+    from: "0.1.0"
+    to: "0.2.0"
+    date: "2026-08-30"
+    change: >-
+      ADP-046: governance/ai-execution-constraints.md's managed-work
+      execution pre-flight and completion post-flight each gained a new
+      step ("AI Work Session opened" / "AI Work Session closed") plus an
+      "AI Work Session recording" subsection with the full field mapping.
+      Additive (MINOR per docs/versioning-policy.md's Rules judgment): no
+      existing gate, field, or required step was removed or redefined.
+    action_required: >-
+      An adopter following this Rule must, from this version on, also
+      create/update a row in an AI Work Sessions-equivalent database at
+      Task start and end (see governance/ai-execution-constraints.md's
+      "AI Work Session recording"), not only the Task's own Status/Time
+      Event. An adopter with no such database should either create one
+      matching that section's fields, or explicitly adopt the section's
+      degradation rule (record the gap in the Task's Result, do not block
+      substantive work on it).
+  - field: workflow_version
+    from: "0.1.0"
+    to: "0.2.0"
+    date: "2026-08-30"
+    change: >-
+      ADP-050: added docs/product-design-doc-standard.md — the Vision /
+      Inception Deck / PRD / Design Doc / Epic Brief flow, where each lives,
+      and when each is synced. Additive: no existing Workflow document's
+      required steps changed.
+    action_required: >-
+      None to adopt the field bump itself. Adopting the standard's content
+      (creating the five documents for a Product, syncing PRD/Design Doc at
+      Epic completion) is the separate, per-Product backfill work tracked
+      as ADP-050's child Tasks — not implied by the version bump alone.
+  - field: templates_version
+    from: "0.1.0"
+    to: "0.2.0"
+    date: "2026-08-30"
+    change: >-
+      ADP-050: added templates/product-vision.md, inception-deck.md,
+      prd.md, design-doc.md, epic-brief.md — the five templates for
+      docs/product-design-doc-standard.md. Additive: no existing template
+      changed.
     action_required: none
