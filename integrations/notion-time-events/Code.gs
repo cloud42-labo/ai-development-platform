@@ -691,15 +691,25 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       actions.push('closed:' + eventPage.id);
     });
   } else {
-    // Nothing was open — e.g. the assignee had already been cleared (closing
-    // its event via 'reassignment') before the Task left In Progress — so
-    // there is no event to close here at all. The execution still genuinely
-    // ended at this moment, but without an explicit marker,
-    // enforceDoneGate_'s stale-Started-At check has no way to know that: a
-    // 'reassignment' close never marks an execution boundary on its own (see
-    // its Reason-based membership rule), and this transition would
-    // otherwise leave none. Stamp the most-recently-closed event, if one
-    // exists and isn't already marked, with a retroactive boundary — not a
+    // Nothing was open — either the assignee had already been cleared
+    // (closing its event via 'reassignment') before the Task left In
+    // Progress, so there is no event to close here at all, OR this Task was
+    // already correctly closed by a *prior* poll (its open event closed then
+    // with the ordinary 'left_in_progress' reason) and this call is simply
+    // re-observing it later, still out of In Progress, for an unrelated
+    // reason (e.g. Result being edited). Only the first case needs a
+    // retroactive marker: a 'reassignment'/'duplicate_reconciliation' close
+    // never marks an execution boundary on its own (see the Reason-based
+    // membership rule in enforceDoneGate_), so without one, this transition
+    // would otherwise leave none, letting a real prior execution's
+    // reassignment-only close go on looking "current" forever. A plain
+    // 'left_in_progress' close is already unambiguous prior-execution
+    // evidence by Reason alone — it needs no marker, and re-stamping it here
+    // on every later re-observation would wrongly exclude it from the Done
+    // gate's tie-seed (see enforceDoneGate_) even when it is the genuinely
+    // CURRENT applicable event, rejecting a legitimate Done as
+    // stale_task_started_at. Stamp the most-recently-closed event only when
+    // its own Reason is exactly the case this marker exists for — not a
     // phantom zero-duration Time Event, since nothing was actually open.
     let mostRecentClosed = null;
     (allEvents || []).forEach(function (eventPage) {
@@ -709,9 +719,13 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         mostRecentClosed = eventPage;
       }
     });
-    if (mostRecentClosed && parseNoteMeta_(propertyText_(mostRecentClosed.properties.Note)).boundary !== 'left_in_progress') {
-      stampExecutionBoundary_(mostRecentClosed);
-      actions.push('boundary:' + mostRecentClosed.id);
+    if (mostRecentClosed) {
+      const mostRecentClosedMeta = parseNoteMeta_(propertyText_(mostRecentClosed.properties.Note));
+      const needsBoundary = mostRecentClosedMeta.reason === 'reassignment' || mostRecentClosedMeta.reason === 'duplicate_reconciliation';
+      if (needsBoundary && mostRecentClosedMeta.boundary !== 'left_in_progress') {
+        stampExecutionBoundary_(mostRecentClosed);
+        actions.push('boundary:' + mostRecentClosed.id);
+      }
     }
   }
 

@@ -213,6 +213,44 @@ test('leaving In Progress with nothing open retroactively stamps the last closed
   assert.match(note, /Boundary=left_in_progress/);
 });
 
+test('re-observing a Task already closed normally does not retroactively stamp its ordinary close as a boundary', () => {
+  // Codex-reported gap in the boundary-stamping fix above: a Task that left
+  // In Progress *normally* (its open event closed with the plain
+  // 'left_in_progress' reason on an earlier poll) has zero open events on
+  // every later re-observation too, e.g. because an unrelated property like
+  // Result got edited while it sat in Review — that unrelated edit alone
+  // reaches this same "nothing open" branch again. A plain 'left_in_progress'
+  // close is already unambiguous prior-execution evidence by Reason alone
+  // and never needed the marker; stamping it here anyway would make
+  // enforceDoneGate_'s tie-seed wrongly exclude it even when it is the
+  // genuinely CURRENT applicable event, rejecting a legitimate Done as
+  // stale_task_started_at.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f04';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Review',
+      agent: 'Human',
+      // A later, unrelated re-observation — well after the close below.
+      lastEdited: '2026-08-30T06:30:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+    })],
+    events: [
+      eventPage('evt-normally-closed', {
+        actor: 'Claude',
+        startedAt: '2026-08-30T05:10:00.000Z',
+        endedAt: '2026-08-30T06:00:00.000Z', // already closed by an earlier, ordinary poll
+        note: 'Reason=left_in_progress',
+      }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'no_change:Review');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-normally-closed');
+  assert.equal(patches.length, 0, 'expected no PATCH — the ordinary close needs no retroactive boundary marker');
+});
+
 test('a capped batch leaves the cursor on the last Task it actually reconciled', () => {
   const tasks = [];
   for (let i = 0; i < 30; i++) {
