@@ -120,9 +120,8 @@ Role split:
 Approach Review is a Definition of Ready gate for executable work:
 
 - `Approved` or `N/A` may proceed to `Ready`.
-- `Pending`, `Revise` or unset must not start substantive execution for a Task that has not yet begun.
+- `Pending`, `Revise` or unset must not start substantive execution.
 - `Revise` means the selected **how** is not acceptable. If only the method changes, update `Approach Decision` and the implementation plan, then review again. If the correction would change Acceptance Criteria, scope, placement, priority or dependencies, route that change through Backlog Refinement first, then re-run Approach Review against the refined Task.
-- **Grandfathered in-progress Tasks:** a Task that was already validly `In Progress` before this control was introduced is not blocked solely because `Approach Review` is unset/Pending under the new schema. The missing field alone must not create a Blocker or stop already-authorised reversible work. Perform and record the review at the next natural checkpoint; stop or revise only if the review finds a substantive approach/safety/dependency issue that independently requires it.
 
 ### Review and Refinement control map
 
@@ -182,7 +181,7 @@ The weekly close occurs on Monday, in this order:
 - Dependencies and target GitHub repository are clear.
 - Assigned AI and the role within the primary development line, or ChatGPT failover condition, are defined.
 - Required current primary-reference checks are known before execution.
-- For executable Tasks, `Approach Review = Approved` or `N/A` is required before entering or re-entering `Ready`. The only exception is a **grandfathered continuation** that was already validly `In Progress` before this control was introduced and still has `Approach Review` unset/Pending; that work may continue under the section 6 migration rule until its next natural checkpoint. A Task returning from `Blocked` to `Ready`, or a Task whose checkpoint review is `Revise`, is not grandfathered and must satisfy `Approved`/`N/A` before resuming.
+- For executable Tasks, `Approach Review = Approved` or `N/A` is required before entering or re-entering `Ready`.
 
 ## 10. Definition of Done
 
