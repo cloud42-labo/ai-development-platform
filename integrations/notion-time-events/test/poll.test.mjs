@@ -357,6 +357,52 @@ test('25+ already-valid Done Tasks inside the overlap do not exhaust the batch a
   assert.equal(summary.capped, false);
 });
 
+test('a Done cohort larger than the old scan cap does not stall reconciliation forever', () => {
+  // Regression for the Codex-reported analogous repro: done_gate_passed
+  // costs a Time Events read even though it makes no write, and — unlike
+  // duplicate: — is never exempted from re-scanning, since Done always
+  // bypasses snapshot dedup. A prior fix that capped free outcomes at a
+  // fixed scan count (rather than not capping them at all) reintroduced the
+  // exact same stall for a large valid-Done cohort.
+  const sharedEvent = eventPage('evt-shared', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: '2026-08-30T05:05:00.000Z',
+  });
+
+  const doneTasks = [];
+  for (let i = 0; i < 520; i++) {
+    const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d5' + String(i).padStart(3, '0'), {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T05:59:00.000Z', // every Task shares the exact same timestamp
+      startedAt: '2026-08-30T05:00:00.000Z',
+    });
+    task.properties.Result = { type: 'rich_text', rich_text: [{ plain_text: 'shipped' }] };
+    task.properties['Completed At'] = { type: 'date', date: { start: '2026-08-30T05:10:00.000Z' } };
+    doneTasks.push(task);
+  }
+
+  const laterChangedTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43d6999', {
+    status: 'Ready',
+    agent: 'Human',
+    lastEdited: '2026-08-30T06:00:30.000Z',
+  });
+
+  const { sandbox } = harness({
+    tasks: doneTasks.concat([laterChangedTask]),
+    events: [sharedEvent],
+    scriptProperties: { LAST_SYNC_CURSOR: '2026-08-30T06:00:00.000Z' },
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  const passingDoneOutcomes = summary.outcomes.filter((outcome) => outcome === 'done_gate_passed');
+  assert.equal(passingDoneOutcomes.length, 520); // the whole cohort was scanned, not just a fixed prefix
+  assert.equal(summary.outcomes[summary.outcomes.length - 1], 'no_change:Ready');
+  assert.equal(summary.capped, false);
+});
+
 test('a Done state is always re-verified by the gate, even if its snapshot hash collides with an already-processed one', () => {
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f77';
   const task = taskPage(taskId, {

@@ -196,6 +196,57 @@ test('Done is rejected when the Task has never recorded a Started At', () => {
   assert.match(outcome, /missing_task_started_at/);
 });
 
+test('Done is rejected when Started At was never refreshed after a reopen, even though a later event exists', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // The Task completed once (oldEvent, ended Aug 28 11:00). Reopened, but
+  // the actor never updated Started At — it still shows the OLD value from
+  // the prior execution. A new event nonetheless opened later (e.g. at the
+  // observed edit time, per the opening-logic fallback for an untrustworthy
+  // Started At) and has since closed with a fresh Completed At — but
+  // Started At itself was never refreshed to mark this as a genuinely new,
+  // governance-compliant execution, so no event can be reliably attributed
+  // to "the current execution" using it.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: identical to the PRIOR execution's own start
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const oldEvent = eventPage('evt-old-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-28T11:00:00.000Z',
+  });
+  const newEvent = eventPage('evt-new-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z', // opened later than Started At, but not governance-marked as "current"
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [oldEvent, newEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
+
+test('Done passes when Started At was properly refreshed for the new execution', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const task = taskPage({
+    startedAt: '2026-08-30T03:00:00.000Z', // freshly recorded, after the prior execution's own close
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const oldEvent = eventPage('evt-old-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-28T11:00:00.000Z',
+  });
+  const newEvent = eventPage('evt-new-execution', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [oldEvent, newEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed');
+});
+
 test('Done is rejected when Completed At predates the current execution entirely (stale from a prior completion)', () => {
   const { sandbox } = harnessWithNotionStub();
   const task = taskPage({

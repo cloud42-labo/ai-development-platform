@@ -29,21 +29,21 @@ const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 // Anything left over is picked up by the next run from the un-advanced
 // cursor. A free outcome (duplicate/ignored re-read, or an already-valid
 // Done needing no change) does not count against this — see isFreeOutcome_.
+//
+// There is deliberately no separate, smaller cap on free outcomes. An
+// earlier version added one (to bound total scanned Tasks regardless of
+// write cost) and it reintroduced exactly the stall this design exists to
+// prevent, just for free outcomes instead of writes: a cohort larger than
+// that cap sharing one last_edited_time — duplicates, or Tasks that are
+// legitimately already Done and get re-verified every poll — would hit it
+// before reaching the unprocessed tail, on every run, forever. The only
+// remaining bound on a free-outcome scan is tasksToProcess.length itself,
+// which pagination already caps (QUERY_PAGE_SAFETY_LIMIT, with truncation
+// correctly signaled — see queryChangedTasks_). A pathologically large
+// simultaneous free-outcome cohort can make one run slow; it cannot make a
+// run permanently unable to progress. Narrowing POLL_INTERVAL_MINUTES
+// bounds how large such a cohort can accumulate between runs.
 const MAX_TASKS_PER_RUN = 25;
-
-// Separate bound on how many Tasks needing an actual Notion API call — a
-// real write (charged against MAX_TASKS_PER_RUN) or a no-write Done re-check
-// (`done_gate_passed`, which still costs a Time Events query even though it
-// makes no write) — a single run will make, so a large volume of legitimate
-// re-verification traffic can't itself exhaust Apps Script's execution time
-// or UrlFetch quota. A Task whose outcome makes literally zero Notion calls
-// (`duplicate:`, `ignored:not_configured_task`) does NOT count against this
-// either — see isZeroCostOutcome_. Without that exemption, a cohort of more
-// than this many Tasks sharing one last_edited_time (e.g. a bulk edit
-// landing in the same minute) could get permanently stuck: every run would
-// re-scan the same already-processed prefix, hit this cap before reaching
-// the tail, and hold the cursor at that same static timestamp forever.
-const MAX_TASKS_SCANNED_PER_RUN = 500;
 
 function setup() {
   const props = PropertiesService.getScriptProperties();
@@ -144,13 +144,11 @@ function pollTaskChanges() {
 
     const outcomes = [];
     let reconciledCount = 0;
-    let apiCallCount = 0;
     let iterated = 0;
     let lastScannedEdit = '';
 
     while (
       iterated < tasksToProcess.length &&
-      apiCallCount < MAX_TASKS_SCANNED_PER_RUN &&
       reconciledCount < MAX_TASKS_PER_RUN
     ) {
       const task = tasksToProcess[iterated];
@@ -158,25 +156,14 @@ function pollTaskChanges() {
       outcomes.push(outcome);
       lastScannedEdit = String(task.last_edited_time || '');
       iterated++;
-      // A zero-cost outcome (duplicate/ignored) made literally no Notion API
-      // call, so it must not consume MAX_TASKS_SCANNED_PER_RUN either — only
-      // tasksToProcess.length (itself bounded by pagination, see
-      // sourceTruncated above) limits how many of these one run can scan.
-      // Without this, a cohort larger than MAX_TASKS_SCANNED_PER_RUN sharing
-      // one last_edited_time (e.g. a bulk edit landing in the same minute)
-      // would get permanently stuck: every run re-scans the same
-      // already-processed prefix, hits this cap before reaching the
-      // unprocessed tail, and holds the cursor at that same static
-      // timestamp forever.
-      if (!isZeroCostOutcome_(outcome)) apiCallCount++;
       // A free outcome (duplicate/ignored re-read, or an already-valid Done
       // needing no change) made no Notion write, so it must not consume the
-      // reconciliation budget. Otherwise a dense cluster of such outcomes
-      // larger than MAX_TASKS_PER_RUN — duplicates from the overlap window,
-      // or 25+ Tasks that are legitimately already Done — would have its
-      // leading Tasks re-selected and re-skipped every run, exhausting the
-      // cap on repeats of itself and never reaching the unprocessed tail
-      // behind it.
+      // reconciliation budget — see the comment on MAX_TASKS_PER_RUN for why
+      // this must have no separate, smaller cap of its own either. A dense
+      // cluster of such outcomes larger than MAX_TASKS_PER_RUN — duplicates
+      // from the overlap window, or 25+ Tasks that are legitimately already
+      // Done — is instead scanned in full every run, bounded only by
+      // tasksToProcess.length.
       if (!isFreeOutcome_(outcome)) reconciledCount++;
     }
 
@@ -328,16 +315,6 @@ function isFreeOutcome_(outcome) {
     /^duplicate:/.test(String(outcome));
 }
 
-// Outcomes that made literally zero Notion API calls — reconcileTaskPage_
-// returns both of these before ever fetching the Task's Time Events, unlike
-// every other outcome (including 'done_gate_passed', which still costs a
-// Time Events query even though it makes no write). These are the only
-// outcomes safe to exempt from MAX_TASKS_SCANNED_PER_RUN as well as
-// MAX_TASKS_PER_RUN — see the comment at that constant's declaration.
-function isZeroCostOutcome_(outcome) {
-  return outcome === 'ignored:not_configured_task' || /^duplicate:/.test(String(outcome));
-}
-
 function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
   const taskId = task.id;
   const taskTitle = propertyText_(task.properties.Title) || taskId;
@@ -433,9 +410,36 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   // begins. A closed event only counts if it started at or after that
   // marker.
   const taskStartedAt = propertyDate_(task.properties['Started At']);
+
+  // Started At itself must look fresh before it can be trusted to identify
+  // "the current execution" at all — otherwise the applicability check below
+  // is a tautology. If a Task is reopened without replacing Started At, a
+  // new closed event naturally still starts *after* that stale marker (time
+  // only moves forward), so "event started at/after Started At" would treat
+  // it as applicable even though Started At was never actually refreshed
+  // for this execution — governance requires it to be. Detect this the same
+  // way reconcileAuthoritativeTimeEvents_ decides whether to trust it when
+  // opening a new event: Started At must be at or after every event already
+  // on file for this Task *other than* the most-recently-closed one (which
+  // is the only candidate for "this execution's" own event).
+  let mostRecentClosedEvent = null;
+  (allEvents || []).forEach(function (eventPage) {
+    const endedAt = propertyDate_(eventPage.properties['Ended At']);
+    if (!endedAt) return;
+    if (!mostRecentClosedEvent || endedAt.getTime() > propertyDate_(mostRecentClosedEvent.properties['Ended At']).getTime()) {
+      mostRecentClosedEvent = eventPage;
+    }
+  });
+  const priorTimestamp = latestEventTimestamp_((allEvents || []).filter(function (eventPage) {
+    return !mostRecentClosedEvent || eventPage.id !== mostRecentClosedEvent.id;
+  }));
+  const taskStartedAtTrusted = Boolean(taskStartedAt) && (!priorTimestamp || taskStartedAt.getTime() >= priorTimestamp.getTime());
+
   let applicableClosedEvent = null;
   if (!taskStartedAt) {
     failures.push('missing_task_started_at');
+  } else if (!taskStartedAtTrusted) {
+    failures.push('stale_task_started_at');
   } else {
     (allEvents || []).forEach(function (eventPage) {
       const endedAt = propertyDate_(eventPage.properties['Ended At']);
