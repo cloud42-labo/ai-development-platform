@@ -45,6 +45,22 @@ const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 // bounds how large such a cohort can accumulate between runs.
 const MAX_TASKS_PER_RUN = 25;
 
+// Wall-clock safety margin for a single trigger execution. Apps Script kills
+// a run outright at its own per-execution limit (6 minutes on a consumer
+// account, 30 on Workspace) — an uncaught termination there does not reach
+// the cursor-persist step at the end of pollTaskChanges, so a run killed
+// mid-scan would lose all progress and re-scan the identical prefix on the
+// next trigger. This matters because neither MAX_TASKS_PER_RUN nor pagination
+// bounds a free-outcome scan (duplicates, or a large already-Done cohort):
+// each one still costs a real Time Events query, so a cohort large enough can
+// still make the run itself run long even though it makes no write. Checked
+// against the same wall clock as runStartedAt, on the safe (shorter) side of
+// both platform limits, so behavior is correct regardless of account type.
+// Crossing it stops the scan early and persists the cursor at the last Task
+// actually reconciled — same graceful "capped" behavior MAX_TASKS_PER_RUN
+// already produces — rather than risking an unrecoverable mid-scan kill.
+const MAX_RUN_DURATION_MS = 4 * 60 * 1000;
+
 function setup() {
   const props = PropertiesService.getScriptProperties();
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -149,7 +165,8 @@ function pollTaskChanges() {
 
     while (
       iterated < tasksToProcess.length &&
-      reconciledCount < MAX_TASKS_PER_RUN
+      reconciledCount < MAX_TASKS_PER_RUN &&
+      (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
     ) {
       const task = tasksToProcess[iterated];
       const outcome = reconcileTaskPage_(task);
@@ -420,18 +437,49 @@ function enforceDoneGate_(task, allEvents, openEvents) {
   // for this execution — governance requires it to be. Detect this the same
   // way reconcileAuthoritativeTimeEvents_ decides whether to trust it when
   // opening a new event: Started At must be at or after every event already
-  // on file for this Task *other than* the most-recently-closed one (which
-  // is the only candidate for "this execution's" own event).
+  // on file for this Task that is NOT part of the current execution.
+  //
+  // A single execution can produce more than one closed event — an
+  // in-progress reassignment closes the outgoing actor's event and opens the
+  // incoming actor's at the identical timestamp (reconcileAuthoritativeTime
+  // Events_), so consecutive events from the same execution always touch
+  // with zero gap: one's Ended At exactly equals the next one's Started At.
+  // A genuinely prior (separate, already-completed) execution's most recent
+  // event has no such successor touching it — there was a gap while the Task
+  // sat outside In Progress before being reopened. So: walk backward from the
+  // most-recently-closed event through that exact adjacency to collect every
+  // event belonging to the same unbroken execution; anything left over is
+  // fair evidence of a genuinely earlier execution.
+  const closedEvents = (allEvents || []).filter(function (eventPage) {
+    return Boolean(propertyDate_(eventPage.properties['Ended At']));
+  });
   let mostRecentClosedEvent = null;
-  (allEvents || []).forEach(function (eventPage) {
+  closedEvents.forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
-    if (!endedAt) return;
     if (!mostRecentClosedEvent || endedAt.getTime() > propertyDate_(mostRecentClosedEvent.properties['Ended At']).getTime()) {
       mostRecentClosedEvent = eventPage;
     }
   });
+  const currentExecutionEventIds = {};
+  if (mostRecentClosedEvent) {
+    currentExecutionEventIds[mostRecentClosedEvent.id] = true;
+    let frontierStartedAt = eventStartedAt_(mostRecentClosedEvent);
+    let extended = true;
+    while (extended) {
+      extended = false;
+      closedEvents.forEach(function (eventPage) {
+        if (currentExecutionEventIds[eventPage.id]) return;
+        const endedAt = propertyDate_(eventPage.properties['Ended At']);
+        if (endedAt && endedAt.getTime() === frontierStartedAt.getTime()) {
+          currentExecutionEventIds[eventPage.id] = true;
+          frontierStartedAt = eventStartedAt_(eventPage);
+          extended = true;
+        }
+      });
+    }
+  }
   const priorTimestamp = latestEventTimestamp_((allEvents || []).filter(function (eventPage) {
-    return !mostRecentClosedEvent || eventPage.id !== mostRecentClosedEvent.id;
+    return !currentExecutionEventIds[eventPage.id];
   }));
   const taskStartedAtTrusted = Boolean(taskStartedAt) && (!priorTimestamp || taskStartedAt.getTime() >= priorTimestamp.getTime());
 

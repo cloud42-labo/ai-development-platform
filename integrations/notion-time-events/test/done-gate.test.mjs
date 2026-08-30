@@ -247,6 +247,62 @@ test('Done passes when Started At was properly refreshed for the new execution',
   assert.equal(outcome, 'done_gate_passed:stamped');
 });
 
+test('Done passes when the current execution produced two closed events via an in-progress reassignment', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // Actor A works the Task, then it is reassigned to Actor B mid-execution:
+  // reconcileAuthoritativeTimeEvents_ closes A's event and opens B's at the
+  // identical timestamp (03:20), so they touch with zero gap. Both belong to
+  // this one execution and must not count as "prior evidence" against the
+  // Task's own (correctly fresh) Started At.
+  const task = taskPage({
+    startedAt: '2026-08-29T03:00:00.000Z',
+    result: 'shipped',
+    completedAt: '2026-08-29T04:00:00.000Z',
+  });
+  const actorAEvent = eventPage('evt-actor-a', {
+    startedAt: '2026-08-29T03:00:00.000Z',
+    endedAt: '2026-08-29T03:20:00.000Z', // closed by the reassignment
+  });
+  const actorBEvent = eventPage('evt-actor-b', {
+    startedAt: '2026-08-29T03:20:00.000Z', // opened at the exact moment A's closed
+    endedAt: '2026-08-29T03:45:00.000Z', // closed later, e.g. by the move to Review
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [actorAEvent, actorBEvent], []);
+
+  assert.equal(outcome, 'done_gate_passed:stamped');
+});
+
+test('Done is still rejected for a genuinely prior execution even when the current one has two chained events', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // A real prior, separate execution (oldEvent) sits before a reassignment
+  // pair (actorAEvent -> actorBEvent) that belongs to the current one. The
+  // chain-walk must stop at the gap between oldEvent and actorAEvent rather
+  // than treating oldEvent as part of the current execution too.
+  const task = taskPage({
+    startedAt: '2026-08-28T10:00:00.000Z', // stale: unchanged since the OLD execution
+    result: 'shipped again',
+    completedAt: '2026-08-30T04:00:00.000Z',
+  });
+  const oldEvent = eventPage('evt-old-execution', {
+    startedAt: '2026-08-28T10:00:00.000Z',
+    endedAt: '2026-08-28T11:00:00.000Z',
+  });
+  const actorAEvent = eventPage('evt-actor-a', {
+    startedAt: '2026-08-30T03:00:00.000Z',
+    endedAt: '2026-08-30T03:20:00.000Z',
+  });
+  const actorBEvent = eventPage('evt-actor-b', {
+    startedAt: '2026-08-30T03:20:00.000Z',
+    endedAt: '2026-08-30T03:45:00.000Z',
+  });
+
+  const outcome = sandbox.enforceDoneGate_(task, [oldEvent, actorAEvent, actorBEvent], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  assert.match(outcome, /stale_task_started_at/);
+});
+
 test('Done is rejected when Completed At predates the current execution entirely (stale from a prior completion)', () => {
   const { sandbox } = harnessWithNotionStub();
   const task = taskPage({

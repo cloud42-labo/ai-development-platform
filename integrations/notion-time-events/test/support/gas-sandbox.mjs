@@ -226,6 +226,27 @@ export function loadCodeGsSandbox(overrides = {}) {
     UrlFetchApp,
     Logger,
   };
+
+  // Optional deterministic clock for tests exercising wall-clock behavior
+  // (e.g. pollTaskChanges' MAX_RUN_DURATION_MS bail-out) without actually
+  // waiting real minutes. `overrides.now` is a () => ms function; when given,
+  // `new Date()` (no args) and `Date.now()` inside the sandbox both resolve
+  // through it, while every other Date usage (parsing, arithmetic) is
+  // untouched via real subclassing.
+  if (typeof overrides.now === 'function') {
+    const RealDate = Date;
+    class FakeDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(overrides.now());
+        else super(...args);
+      }
+      static now() {
+        return overrides.now();
+      }
+    }
+    context.Date = FakeDate;
+  }
+
   vm.createContext(context);
   vm.runInContext(source, context, { filename: 'Code.gs' });
 

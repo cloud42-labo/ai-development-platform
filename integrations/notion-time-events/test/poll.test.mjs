@@ -41,7 +41,7 @@ function eventPage(id, { actor, startedAt, endedAt = null }) {
 
 // A sandbox whose Notion stub answers with `tasks` for the Stories & Tasks
 // query and `events` for the Task Time Events query, and accepts writes.
-function harness({ tasks = [], events = [], scriptProperties = {}, lockHeld = false } = {}) {
+function harness({ tasks = [], events = [], scriptProperties = {}, lockHeld = false, now } = {}) {
   const routes = {
     [TASKS_QUERY]: () => ({ results: tasks, has_more: false }),
     [EVENTS_QUERY]: () => ({ results: events, has_more: false }),
@@ -53,6 +53,7 @@ function harness({ tasks = [], events = [], scriptProperties = {}, lockHeld = fa
     scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', ...scriptProperties },
     lockHeld,
     fetch: notionFetchStub(routes),
+    now,
   });
 }
 
@@ -312,6 +313,68 @@ test('a duplicate cohort larger than the scan cap does not stall reconciliation 
   assert.equal(summary.outcomes[summary.outcomes.length - 1], 'no_change:Ready');
   assert.equal(summary.capped, false);
   assert.ok(new Date(scriptProps.get('LAST_SYNC_CURSOR')).getTime() > new Date(sharedLastEdited).getTime());
+});
+
+test('a long-running free-outcome scan bails out on wall-clock time and leaves a resumable cursor', () => {
+  // Regression for the Codex-reported gap: neither MAX_TASKS_PER_RUN nor
+  // pagination bounds a free-outcome (duplicate:/done_gate_passed) scan, and
+  // each one still costs a real Time Events query — so a large-enough free
+  // cohort can make the run itself run long even though it makes no write,
+  // risking an uncaught Apps Script execution-limit kill that never reaches
+  // the cursor-persist step (losing all progress and re-scanning the exact
+  // same prefix on every subsequent trigger, forever). MAX_RUN_DURATION_MS
+  // must stop the scan before that happens and persist a resumable cursor,
+  // the same graceful "capped" behavior MAX_TASKS_PER_RUN already produces.
+  const sharedLastEdited = '2026-08-30T05:59:00.000Z';
+  const cursor = '2026-08-30T06:00:00.000Z';
+  const oldTasks = [];
+  for (let i = 0; i < 10; i++) {
+    oldTasks.push(taskPage('3cafbd82-6f3b-8158-9622-d795b43d9' + String(i).padStart(3, '0'), {
+      status: 'Ready',
+      agent: 'Human',
+      lastEdited: sharedLastEdited,
+    }));
+  }
+  const laterTask = taskPage('3cafbd82-6f3b-8158-9622-d795b43daaa9', {
+    status: 'Ready',
+    agent: 'Human',
+    lastEdited: '2026-08-30T06:00:30.000Z',
+  });
+
+  // A fake clock advancing 1 simulated minute on every no-arg `new Date()` /
+  // `Date.now()` call. The while loop reads it once per iteration (plus once
+  // for runStartedAt), so processing the 4th duplicate pushes elapsed time to
+  // MAX_RUN_DURATION_MS (4 minutes) and the loop must stop before a 5th.
+  let ticks = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 60 * 1000;
+  };
+
+  const { sandbox, scriptProps } = harness({
+    tasks: oldTasks.concat([laterTask]),
+    scriptProperties: { LAST_SYNC_CURSOR: cursor },
+    now,
+  });
+
+  // Pre-seed all 10 as already reconciled — a free `duplicate:` outcome on
+  // this run — using the real (unstubbed at this point) clock, since `now`
+  // only takes effect for calls made after the sandbox is constructed.
+  oldTasks.forEach((task) => sandbox.reconcileTaskPage_(task));
+
+  const summary = sandbox.pollTaskChanges();
+
+  const duplicateOutcomes = summary.outcomes.filter((o) => /^duplicate:/.test(o));
+  // Stopped by the wall-clock budget partway through the free-outcome cohort
+  // — not all 10, and nowhere near MAX_TASKS_PER_RUN (which duplicates never
+  // even count against).
+  assert.ok(duplicateOutcomes.length > 0 && duplicateOutcomes.length < 10, 'expected a partial scan: got ' + duplicateOutcomes.length);
+  assert.ok(!summary.outcomes.includes('no_change:Ready')); // laterTask was never reached this run
+  assert.equal(summary.capped, true);
+  // The cursor is pinned at the last Task actually scanned (still inside the
+  // shared-timestamp cohort), not advanced to "now" or lost entirely — the
+  // next trigger resumes the scan instead of restarting blind.
+  assert.equal(scriptProps.get('LAST_SYNC_CURSOR'), sharedLastEdited);
 });
 
 test('25+ already-valid Done Tasks inside the overlap do not exhaust the batch and starve a later changed Task', () => {
