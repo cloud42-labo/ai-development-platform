@@ -109,6 +109,56 @@ _HTML_BLOCK_TYPE7_LINE_RE = re.compile(
 _HIDDEN_SPAN_OPEN_RE = re.compile(r"<!--|<!\[CDATA\[|<!(?=[A-Za-z])|<\?")
 
 
+def _is_setext_heading_pair(text_line: str, underline_line: str) -> bool:
+    """True if `text_line` immediately followed by `underline_line` forms a
+    genuine Setext heading -- reuses `_SETEXT_HEADING_RE` itself (rather than
+    a fresh, potentially-diverging regex) so this shares the exact same
+    exclusions it already encodes (a `- item` list line, a blank-line-
+    preceded horizontal rule, ...). A paragraph closes at (and including)
+    `underline_line` when this is true, same as any other heading."""
+    return bool(_SETEXT_HEADING_RE.match(text_line + "\n" + underline_line))
+
+
+def _paragraph_lookahead_lines(lines: list, start_idx: int) -> list:
+    """The rest of the CURRENT paragraph starting at `start_idx`, for
+    confirming whether an unmatched backtick run genuinely continues as a
+    multiline code span (see `_paragraph_has_matching_close`). Stops BEFORE
+    any line that would itself end the paragraph -- not just a blank line,
+    but any other block-level construct this parser recognizes: an ATX or
+    Setext heading, a fenced-code opener, or a raw-HTML-block (type 1/6)
+    opener. (Type 7 is deliberately not checked here: whether a given line
+    qualifies for type 7 already depends on paragraph state, which would
+    make this recursive for comparatively little benefit -- a known,
+    documented residual gap.) A backtick match found only past one of these
+    boundaries is not actually reachable within the same paragraph and must
+    not count.
+    """
+    result: list = []
+    n = len(lines)
+    idx = start_idx
+    while idx < n:
+        candidate = lines[idx]
+        if not candidate.strip():
+            break
+        if _ATX_HEADING_RE.match(candidate):
+            break
+        if idx + 1 < n and _is_setext_heading_pair(candidate, lines[idx + 1]):
+            break
+        fence_match = _FENCE_OPEN_RE.match(candidate)
+        if fence_match:
+            marker = fence_match.group(1)
+            if marker[0] != "`" or "`" not in fence_match.group(2):
+                break
+        html_match = _HTML_BLOCK_OPEN_RE.match(candidate)
+        if html_match:
+            tag = html_match.group(1).lower()
+            if tag in _HTML_BLOCK_TAGS or tag in _PRE_LIKE_HTML_TAGS:
+                break
+        result.append(candidate)
+        idx += 1
+    return result
+
+
 def _find_span_close(line: str, delimiter: str, search_from: int) -> int:
     """Return the index of `delimiter` in `line` that closes a code span
     opened by that same delimiter, or -1. A closing run must be exactly
@@ -342,7 +392,11 @@ def _strip_hidden_regions(body: str) -> str:
         # A heading line is its own block: it closes whatever paragraph
         # preceded it, and does not itself open one -- the line right after
         # a heading is still eligible to start a type-7 HTML block.
-        at_block_boundary = line_is_blank or bool(_ATX_HEADING_RE.match(line))
+        at_block_boundary = (
+            line_is_blank
+            or bool(_ATX_HEADING_RE.match(line))
+            or (idx > 0 and _is_setext_heading_pair(lines[idx - 1], line))
+        )
 
         # Computed lazily, AT MOST ONCE for this physical line: `_mask_inline_
         # code_spans` mutates `span_state`, so calling it more than once per
@@ -368,11 +422,7 @@ def _strip_hidden_regions(body: str) -> str:
 
             if scan_line is None:
                 if paragraph_lookahead is None:
-                    paragraph_lookahead = []
-                    for candidate in lines[idx + 1:]:
-                        if not candidate.strip():
-                            break
-                        paragraph_lookahead.append(candidate)
+                    paragraph_lookahead = _paragraph_lookahead_lines(lines, idx + 1)
                 scan_line = _mask_inline_code_spans(line, span_state, paragraph_lookahead)
 
             open_match = _HIDDEN_SPAN_OPEN_RE.search(scan_line, pos)
