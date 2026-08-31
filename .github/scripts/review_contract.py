@@ -25,32 +25,10 @@ deep.
 HTML comments and fenced code blocks are hidden from the ENTIRE body
 first, in one line-oriented structural pass (`_strip_hidden_regions`),
 before any heading is looked for at all -- not per-section after
-splitting, and not with a single `.sub()` call. Two things a plain
-"replace every `<!--.*?-->` pair" regex gets wrong:
-
-- A comment that itself SPANS a heading boundary (e.g. opened right after
-  `### Purpose / Contract` and closed after the final required section,
-  with every other required heading and its placeholder text sitting
-  inside that one comment) needs stripping *before* splitting -- each
-  fragment produced by splitting on the hidden headings would otherwise
-  see only half of the `<!--`/`-->` pair, so neither half's own `.sub()`
-  call would ever match, and the "commented out" text would be wrongly
-  counted as real content.
-- A comment that never closes at all (`<!--` with no matching `-->`
-  anywhere in the rest of the body) matches nothing under `.*?-->`, so a
-  non-greedy regex leaves it -- and every heading after it -- completely
-  visible, the opposite of hidden. `_strip_hidden_regions` tracks comment
-  state explicitly line by line: once an unmatched `<!--` is seen, every
-  line after it is hidden through end-of-document, exactly like a real
-  Markdown renderer would treat it (an unterminated comment consumes the
-  rest of the document, it doesn't silently reveal it).
-
-The same pass also hides fenced code block bodies (``` ``` ``` `/`~~~`
-fences). A PR body can legitimately show the five required `###` headings
-as prose *inside* a fenced example (e.g. documenting what the template
-looks like) without actually completing the real contract -- heading
-discovery must never treat a `###` line that only exists as code text
-inside a fence as a real section boundary.
+splitting, and not with a single `.sub()` call. The parser also respects
+Markdown code contexts: an apparent `<!--` inside an inline code span or an
+indented code block is literal code, not an HTML-comment opener, and a fence
+only closes when the closing marker is followed by whitespace only.
 """
 
 from __future__ import annotations
@@ -67,33 +45,70 @@ REQUIRED_SECTIONS = (
 )
 
 _ATX_HEADING_RE = re.compile(r"(?m)^(#{1,3})[ \t]+(.*?)[ \t]*$")
-# Setext: a non-blank text line immediately followed by a line of ONLY `=`
-# (heading level 1) or ONLY `-` (level 2, requiring 2+ dashes so a single
-# `-` -- indistinguishable from a list item's own dash -- is never treated
-# as an underline). The text line must not itself look like a heading,
-# blockquote, or list item, so this doesn't misfire on adjacent block
-# constructs that merely happen to precede such a line.
 _SETEXT_HEADING_RE = re.compile(
     r"(?m)^(?![ \t]*(?:#{1,6}[ \t]|[-*+][ \t]|>))[ \t]*(\S.*?)[ \t]*\n(=+|-{2,})[ \t]*$"
 )
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _EMPTY_BULLET_RE = re.compile(r"(?m)^[ \t]*[-*+][ \t]*$")
-_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+_FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
+_FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$")
+_INDENTED_CODE_RE = re.compile(r"^(?: {4}|\t)")
+
+
+def _mask_inline_code_spans(line: str) -> str:
+    """Mask complete backtick code spans while preserving character offsets.
+
+    HTML-comment delimiters inside code spans are literal text in Markdown and
+    must not change comment state. Unclosed backtick runs are left untouched;
+    they do not form a complete code span.
+    """
+    chars = list(line)
+    i = 0
+    length = len(line)
+    while i < length:
+        if line[i] != "`":
+            i += 1
+            continue
+
+        run_start = i
+        while i < length and line[i] == "`":
+            i += 1
+        run_len = i - run_start
+        delimiter = "`" * run_len
+        search_from = i
+        close_start = -1
+
+        while True:
+            candidate = line.find(delimiter, search_from)
+            if candidate == -1:
+                break
+            before_ok = candidate == 0 or line[candidate - 1] != "`"
+            after = candidate + run_len
+            after_ok = after >= length or line[after] != "`"
+            if before_ok and after_ok:
+                close_start = candidate
+                break
+            search_from = candidate + 1
+
+        if close_start == -1:
+            continue
+
+        close_end = close_start + run_len
+        for pos in range(run_start, close_end):
+            chars[pos] = " "
+        i = close_end
+
+    return "".join(chars)
 
 
 def _strip_hidden_regions(body: str) -> str:
-    """Hides fenced code block bodies and HTML comments from `body` in a
-    single line-oriented pass, returning a same-line-count string safe to
-    run heading discovery against (see module docstring for why a single
-    `.sub()` regex handles neither case correctly).
+    """Hide fenced code blocks and HTML comments before heading discovery.
 
-    A hidden fenced-code line becomes an empty line. A comment is hidden
-    character-for-character where it appears (mid-line comments leave the
-    rest of that line visible); an unmatched `<!--` hides everything from
-    that point through the end of the document, never just leaving it
-    visible by default. Line count is preserved so downstream heading
-    discovery and section slicing -- which both index into this returned
-    string, not the original body -- stay internally consistent.
+    Hidden lines are replaced with empty lines so line count remains stable.
+    Fenced blocks only close on valid Markdown closing-fence syntax: the same
+    fence character, at least the opening length, and no non-whitespace suffix.
+    Inline code spans and indented code blocks are not interpreted as HTML
+    comments. An unmatched real HTML-comment opener hides through EOF.
     """
     lines = body.replace("\r\n", "\n").split("\n")
     visible_lines: list[str] = []
@@ -104,21 +119,31 @@ def _strip_hidden_regions(body: str) -> str:
 
     for line in lines:
         if in_fence:
-            match = _FENCE_RE.match(line)
+            match = _FENCE_CLOSE_RE.match(line)
             if match and match.group(1)[0] == fence_char and len(match.group(1)) >= fence_len:
                 in_fence = False
             visible_lines.append("")
             continue
 
         if not in_comment:
-            match = _FENCE_RE.match(line)
+            match = _FENCE_OPEN_RE.match(line)
             if match:
-                in_fence = True
-                fence_char = match.group(1)[0]
-                fence_len = len(match.group(1))
-                visible_lines.append("")
+                marker = match.group(1)
+                # A backtick opening fence cannot use a backtick in its info
+                # string. Treat such a line as ordinary prose rather than a
+                # fence opener; tilde fences do not have this restriction.
+                if marker[0] != "`" or "`" not in match.group(2):
+                    in_fence = True
+                    fence_char = marker[0]
+                    fence_len = len(marker)
+                    visible_lines.append("")
+                    continue
+
+            if _INDENTED_CODE_RE.match(line):
+                visible_lines.append(line)
                 continue
 
+        scan_line = line if in_comment else _mask_inline_code_spans(line)
         parts: list[str] = []
         pos = 0
         while True:
@@ -129,8 +154,10 @@ def _strip_hidden_regions(body: str) -> str:
                     break
                 in_comment = False
                 pos = close + 3
+                scan_line = _mask_inline_code_spans(line)
                 continue
-            open_idx = line.find("<!--", pos)
+
+            open_idx = scan_line.find("<!--", pos)
             if open_idx == -1:
                 parts.append(line[pos:])
                 pos = len(line)
@@ -138,6 +165,7 @@ def _strip_hidden_regions(body: str) -> str:
             parts.append(line[pos:open_idx])
             pos = open_idx + 4
             in_comment = True
+
         visible_lines.append("".join(parts))
 
     return "\n".join(visible_lines)
@@ -151,10 +179,7 @@ class Section:
 
 
 def _find_headings(body: str):
-    """Returns (start, end, level, name) for every ATX and Setext heading in
-    `body`, in document order. `end` is the offset immediately after the
-    heading's own line(s), i.e. where that heading's content begins.
-    """
+    """Return (start, end, level, name) for every ATX/Setext heading."""
     headings = []
     for match in _ATX_HEADING_RE.finditer(body):
         headings.append((match.start(), match.end(), len(match.group(1)), match.group(2).strip()))
@@ -166,16 +191,7 @@ def _find_headings(body: str):
 
 
 def split_sections(body: str) -> list[Section]:
-    """Splits `body` into Markdown sections at every heading of level 1-3.
-
-    HTML comments and fenced code blocks are hidden from the whole body
-    FIRST (see module docstring for why a per-section, single-regex strip
-    cannot substitute for this). Each section's `content` runs from
-    immediately after its own heading line(s) to immediately before the
-    next level-1..3 heading (ATX or Setext) or end of string. Content
-    before the first heading is discarded (not part of any named section,
-    and never required).
-    """
+    """Split `body` at every real Markdown heading of level 1-3."""
     body = _strip_hidden_regions(body)
     headings = _find_headings(body)
     sections: list[Section] = []
@@ -186,24 +202,14 @@ def split_sections(body: str) -> list[Section]:
 
 
 def is_section_empty(content: str) -> bool:
-    """True if `content` has no substantive text once template scaffolding
-    (HTML comments, and bullet markers with nothing after them) is removed.
-    """
+    """True if `content` has no substantive text after scaffolding removal."""
     stripped = _HTML_COMMENT_RE.sub("", content)
     stripped = _EMPTY_BULLET_RE.sub("", stripped)
     return not stripped.strip()
 
 
 def validate(body: str, required: tuple[str, ...] = REQUIRED_SECTIONS) -> list[str]:
-    """Returns a list of human-readable failure strings; empty means valid.
-
-    Only a level-3 (`###`) heading counts as satisfying a required section --
-    matching the PR template, where these are sub-headings under the
-    `## Review Contract` heading. If a required name appears more than once
-    at level 3, the LAST occurrence is authoritative (mirrors "the contract
-    as currently written," consistent with the PR body being append-only
-    edited over review rounds).
-    """
+    """Return human-readable failures; an empty list means valid."""
     sections = split_sections(body)
     by_name: dict[str, str] = {}
     for section in sections:
@@ -223,7 +229,6 @@ def validate(body: str, required: tuple[str, ...] = REQUIRED_SECTIONS) -> list[s
 def main() -> int:
     import json
     import os
-    import sys
 
     with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as fh:
         event = json.load(fh)
