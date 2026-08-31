@@ -18,7 +18,11 @@ jobs:
 
       - name: Run parser regression tests
         working-directory: .github/scripts
-        run: python3 test_review_contract.py -v
+        # Discover every test_*.py module, not just test_review_contract.py --
+        # regressions have also landed in their own focused file (e.g.
+        # test_review_contract_hidden_regions.py) and a single hardcoded
+        # filename here would silently stop covering them in CI.
+        run: python3 -m unittest discover -s . -p "test_*.py" -v
 
       - name: Validate PR Review Contract
         working-directory: .github/scripts
