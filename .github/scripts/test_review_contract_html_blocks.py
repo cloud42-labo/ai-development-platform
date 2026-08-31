@@ -56,12 +56,18 @@ class HtmlBlockRegressions(unittest.TestCase):
         self.assertIn("Real limitation text", sections["Known Limitations / Non-goals"])
 
     def test_ordinary_inline_html_like_br_is_not_treated_as_a_block(self):
-        # `br` is an inline-level tag under CommonMark's HTML block rules,
-        # not one of the type-6 block tags -- a line starting with it must
-        # not be hidden, so a heading right after it is still real content.
+        # `br` is an inline-level tag: not one of the type-6 block tags, and
+        # here it also appears inline within a real prose line rather than
+        # alone on its own line, so it satisfies neither type 6 (wrong tag
+        # name) nor type 7 (the whole line must be just the one tag) --
+        # unlike a standalone `<br>` line right after a heading, which type 7
+        # *would* legitimately hide under CommonMark (see the type7 tests in
+        # test_review_contract_more_hidden_regions.py): a heading closes
+        # whatever paragraph preceded it, so the line after one is eligible
+        # to start a type-7 block same as after a blank line.
         body = (
             "### Purpose / Contract\n"
-            "<br>\nReal purpose text.\n"
+            "Real purpose text with an inline <br> tag in the middle of it.\n"
             "### Invariants\n\n- Real invariant.\n"
             "### Adversarial Scenarios\n\n- Real scenario.\n"
             "### Validation\n\n- Real validation.\n"

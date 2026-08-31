@@ -75,8 +75,8 @@ _HTML_BLOCK_TAGS = frozenset({
     "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
     "hr", "html", "iframe", "legend", "li", "link", "main", "menu",
     "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
-    "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead",
-    "title", "tr", "track", "ul",
+    "search", "section", "summary", "table", "tbody", "td", "tfoot", "th",
+    "thead", "title", "tr", "track", "ul",
 })
 # "type 1" tags: the block continues until the matching closing tag, not
 # until the next blank line -- pre/script/style/textarea are exactly the
@@ -88,9 +88,11 @@ _HTML_BLOCK_OPEN_RE = re.compile(
 )
 # CommonMark "type 7": a tag name NOT in the type-6 list above still starts a
 # hidden HTML block when the ENTIRE line (after up to 3 leading spaces) is
-# nothing but one complete open or close tag -- but only when it cannot be
-# interrupting an existing paragraph, i.e. the previous line was blank (or
-# this is the first line of the body). Ends at the next blank line, same as
+# nothing but one complete open or close tag -- but only when no paragraph
+# is currently open, i.e. start of body, right after a blank line, right
+# after a heading, or right after any other block-level construct (NOT
+# merely "the previous line was blank" -- a heading closes a paragraph
+# without itself being a blank line). Ends at the next blank line, same as
 # type 6.
 _HTML_BLOCK_TYPE7_LINE_RE = re.compile(
     r"^[ \t]{0,3}(?:</[a-zA-Z][a-zA-Z0-9-]*[ \t]*"
@@ -126,13 +128,22 @@ def _find_span_close(line: str, delimiter: str, search_from: int) -> int:
         search_from = candidate + 1
 
 
-def _mask_inline_code_spans(line: str, span_state: dict) -> str:
+def _paragraph_has_matching_close(paragraph_lookahead: list, delimiter: str) -> bool:
+    """True if some line in `paragraph_lookahead` contains a close for
+    `delimiter`. Used to confirm a backtick run left unmatched on its own
+    line genuinely continues as a code span into a LATER line of the SAME
+    paragraph, rather than being CommonMark's fallback: a backtick run with
+    no matching run ANYWHERE before the paragraph ends is not a code span
+    at all -- just literal backtick characters."""
+    return any(_find_span_close(candidate, delimiter, 0) != -1 for candidate in paragraph_lookahead)
+
+
+def _mask_inline_code_spans(line: str, span_state: dict, paragraph_lookahead: list) -> str:
     """Mask complete backtick code spans while preserving character offsets.
 
     HTML-comment (and processing-instruction/declaration/CDATA) delimiters
     inside code spans are literal text in Markdown and must not change hidden-
-    region state. Unclosed backtick runs are left untouched; they do not form
-    a complete code span on their own line.
+    region state.
 
     A code span's closing delimiter can be on a LATER line than its opener --
     CommonMark allows a span's content to include line breaks (rendered as
@@ -143,6 +154,16 @@ def _mask_inline_code_spans(line: str, span_state: dict) -> str:
     line, mirroring how a blank line ends the paragraph a code span's inline
     parsing happens within -- an unclosed span cannot itself keep hiding
     headings across a real section boundary.
+
+    A backtick run with NO matching close anywhere -- not on this line, and
+    not on any later line before the paragraph ends (`paragraph_lookahead`,
+    the remaining lines of the current paragraph) -- is not a code span at
+    all under CommonMark: it is left as literal, unmasked text, and does not
+    start `span_state["in_span"]`. Treating every unmatched run as an
+    always-continuing span would let it swallow a genuine, real hidden-region
+    opener (e.g. an unterminated HTML comment) on a later line as if it were
+    masked code, hiding it from `validate()` even though a real Markdown
+    renderer would show that comment's own hiding taking effect instead.
     """
     if not line.strip():
         span_state["in_span"] = False
@@ -178,7 +199,13 @@ def _mask_inline_code_spans(line: str, span_state: dict) -> str:
         close_start = _find_span_close(line, delimiter, i)
 
         if close_start == -1:
-            # No close on this line at all -- the span continues past EOL.
+            if not _paragraph_has_matching_close(paragraph_lookahead, delimiter):
+                # No matching run anywhere before the paragraph ends -- not
+                # a code span at all. Leave these backticks as literal text
+                # (already correct in `chars`) and keep scanning past them.
+                continue
+            # A later line in this same paragraph does close it -- the span
+            # continues past EOL.
             for pos in range(run_start, length):
                 chars[pos] = " "
             span_state["in_span"] = True
@@ -217,9 +244,15 @@ def _strip_hidden_regions(body: str) -> str:
     html_block_pre_like = False
     html_block_close_tag = ""
     span_state = {"in_span": False, "delim": ""}
-    prev_line_blank = True  # start-of-body counts as "not interrupting a paragraph"
+    # True whenever no paragraph is currently open -- start of body, right
+    # after a blank line, right after a heading, or right after any other
+    # block-level construct (a heading is its own block and, like a blank
+    # line, closes whatever paragraph came before it without opening one of
+    # its own). Type 7 HTML blocks may only start here; type 6 may start
+    # anywhere.
+    at_block_boundary = True
 
-    for line in lines:
+    for idx, line in enumerate(lines):
         line_is_blank = not line.strip()
 
         if in_fence:
@@ -227,7 +260,7 @@ def _strip_hidden_regions(body: str) -> str:
             if match and match.group(1)[0] == fence_char and len(match.group(1)) >= fence_len:
                 in_fence = False
             visible_lines.append("")
-            prev_line_blank = line_is_blank
+            at_block_boundary = True
             continue
 
         if in_html_block:
@@ -239,7 +272,7 @@ def _strip_hidden_regions(body: str) -> str:
                 visible_lines.append("")
                 if html_block_close_tag in line.lower():
                     in_html_block = False
-                prev_line_blank = line_is_blank
+                at_block_boundary = True
                 continue
             # Every other block tag (CommonMark types 6/7): hidden through the
             # next blank line, which is itself NOT part of the block and
@@ -247,10 +280,10 @@ def _strip_hidden_regions(body: str) -> str:
             if line_is_blank:
                 in_html_block = False
                 visible_lines.append(line)
-                prev_line_blank = line_is_blank
+                at_block_boundary = True
                 continue
             visible_lines.append("")
-            prev_line_blank = line_is_blank
+            at_block_boundary = True
             continue
 
         if hidden_span_kind is None:
@@ -265,7 +298,7 @@ def _strip_hidden_regions(body: str) -> str:
                     fence_char = marker[0]
                     fence_len = len(marker)
                     visible_lines.append("")
-                    prev_line_blank = line_is_blank
+                    at_block_boundary = True
                     continue
 
             html_match = _HTML_BLOCK_OPEN_RE.match(line)
@@ -280,29 +313,36 @@ def _strip_hidden_regions(body: str) -> str:
                     # Opens and closes on the same line (e.g. `<pre>x</pre>`).
                     in_html_block = False
                 visible_lines.append("")
-                prev_line_blank = line_is_blank
+                at_block_boundary = True
                 continue
 
-            if prev_line_blank:
+            if at_block_boundary:
                 # CommonMark type 7: ANY tag name (not just the type-6 list)
                 # alone on its own line -- nothing else, not even prose --
                 # starts a hidden region too, but only when it can't be
-                # interrupting an existing paragraph (the preceding line must
-                # be blank, or this is the very first line of the body).
-                # Tags already covered by type 6/1 above never reach here.
+                # interrupting an existing paragraph: no paragraph is open
+                # right now (start of body, right after a blank line, right
+                # after a heading, or right after another block-level
+                # construct). Tags already covered by type 6/1 above never
+                # reach here.
                 type7_match = _HTML_BLOCK_TYPE7_LINE_RE.match(line)
                 if type7_match:
                     in_html_block = True
                     html_block_pre_like = False
                     html_block_close_tag = ""  # blank-line-terminated, tag irrelevant
                     visible_lines.append("")
-                    prev_line_blank = line_is_blank
+                    at_block_boundary = True
                     continue
 
             if _INDENTED_CODE_RE.match(line):
                 visible_lines.append(line)
-                prev_line_blank = line_is_blank
+                at_block_boundary = True
                 continue
+
+        # A heading line is its own block: it closes whatever paragraph
+        # preceded it, and does not itself open one -- the line right after
+        # a heading is still eligible to start a type-7 HTML block.
+        at_block_boundary = line_is_blank or bool(_ATX_HEADING_RE.match(line))
 
         # Computed lazily, AT MOST ONCE for this physical line: `_mask_inline_
         # code_spans` mutates `span_state`, so calling it more than once per
@@ -310,7 +350,10 @@ def _strip_hidden_regions(body: str) -> str:
         # again for a second such close) would re-scan the same text against
         # state it had already advanced past, corrupting it. One call gives
         # the same masked text regardless of when within the line it runs.
+        # `paragraph_lookahead` is likewise computed lazily -- only needed if
+        # this line turns out to contain a genuinely unmatched backtick run.
         scan_line = None
+        paragraph_lookahead = None
         parts: list[str] = []
         pos = 0
         while True:
@@ -324,7 +367,13 @@ def _strip_hidden_regions(body: str) -> str:
                 continue
 
             if scan_line is None:
-                scan_line = _mask_inline_code_spans(line, span_state)
+                if paragraph_lookahead is None:
+                    paragraph_lookahead = []
+                    for candidate in lines[idx + 1:]:
+                        if not candidate.strip():
+                            break
+                        paragraph_lookahead.append(candidate)
+                scan_line = _mask_inline_code_spans(line, span_state, paragraph_lookahead)
 
             open_match = _HIDDEN_SPAN_OPEN_RE.search(scan_line, pos)
             if not open_match:
