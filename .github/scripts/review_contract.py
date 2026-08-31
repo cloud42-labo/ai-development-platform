@@ -22,17 +22,22 @@ deeper (`####...`) inside a section's own content is not a boundary and is
 treated as ordinary content, matching how the PR template never nests that
 deep.
 
-HTML comments, fenced code blocks, and raw HTML blocks (CommonMark's
-"type 6"/"type 1" HTML blocks -- e.g. `<div>...`, `<pre>...</pre>`) are all
+HTML comments, fenced code blocks, and raw HTML blocks (all of CommonMark's
+HTML block types 1/3/4/5/6/7 -- e.g. `<div>...`, `<pre>...</pre>`,
+`<?processing instructions?>`, `<!DOCTYPE ...>`, `<![CDATA[...]]>`, and a
+standalone custom tag alone on its own paragraph-starting line) are all
 hidden from the ENTIRE body first, in one line-oriented structural pass
 (`_strip_hidden_regions`), before any heading is looked for at all -- not
 per-section after splitting, and not with a single `.sub()` call. Only a
-known block-level tag (the CommonMark type-6 list) starts a hidden HTML
-block; an inline-level tag like `<br>` or `<code>` does not, so it never
-swallows the real prose it appears in. The parser also respects Markdown
-code contexts: an apparent `<!--` inside an inline code span or an
-indented code block is literal code, not an HTML-comment opener, and a fence
-only closes when the closing marker is followed by whitespace only.
+known block-level tag (the CommonMark type-6 list), or type 7's stricter
+"whole line, nothing else, not interrupting a paragraph" form, starts a
+hidden HTML block; an inline-level tag like `<br>` or `<code>` does not, so
+it never swallows the real prose it appears in. The parser also respects
+Markdown code contexts: an apparent `<!--` inside an inline code span
+(including one whose closing delimiter lands on a later line than its
+opener) or an indented code block is literal code, never a hidden-region
+opener, and a fence only closes when the closing marker is followed by
+whitespace only.
 """
 
 from __future__ import annotations
@@ -81,18 +86,85 @@ _PRE_LIKE_HTML_TAGS = frozenset({"pre", "script", "style", "textarea"})
 _HTML_BLOCK_OPEN_RE = re.compile(
     r"^[ \t]{0,3}</?([a-zA-Z][a-zA-Z0-9-]*)(?:[ \t>]|/>|$)"
 )
+# CommonMark "type 7": a tag name NOT in the type-6 list above still starts a
+# hidden HTML block when the ENTIRE line (after up to 3 leading spaces) is
+# nothing but one complete open or close tag -- but only when it cannot be
+# interrupting an existing paragraph, i.e. the previous line was blank (or
+# this is the first line of the body). Ends at the next blank line, same as
+# type 6.
+_HTML_BLOCK_TYPE7_LINE_RE = re.compile(
+    r"^[ \t]{0,3}(?:</[a-zA-Z][a-zA-Z0-9-]*[ \t]*"
+    r"|<[a-zA-Z][a-zA-Z0-9-]*(?:[ \t]+[^<>]*)?[ \t]*/?)>[ \t]*$"
+)
+
+# CommonMark "type 2" (HTML comment), "type 3" (processing instruction, e.g.
+# `<?php ... ?>`), "type 4" (declaration, e.g. `<!DOCTYPE html>`), and
+# "type 5" (CDATA, `<![CDATA[...]]>`) block/span openers -- each hides
+# through its own close marker, possibly spanning multiple lines, same as an
+# HTML comment already did. Alternation order matters: `<!--` and
+# `<![CDATA[` must be tried before the bare `<!`+letter declaration pattern,
+# since all three share the `<!` prefix.
+_HIDDEN_SPAN_OPEN_RE = re.compile(r"<!--|<!\[CDATA\[|<!(?=[A-Za-z])|<\?")
 
 
-def _mask_inline_code_spans(line: str) -> str:
+def _find_span_close(line: str, delimiter: str, search_from: int) -> int:
+    """Return the index of `delimiter` in `line` that closes a code span
+    opened by that same delimiter, or -1. A closing run must be exactly
+    `delimiter`'s length -- not touching a longer backtick run on either
+    side, which would make it part of a different run entirely."""
+    run_len = len(delimiter)
+    length = len(line)
+    while True:
+        candidate = line.find(delimiter, search_from)
+        if candidate == -1:
+            return -1
+        before_ok = candidate == 0 or line[candidate - 1] != "`"
+        after = candidate + run_len
+        after_ok = after >= length or line[after] != "`"
+        if before_ok and after_ok:
+            return candidate
+        search_from = candidate + 1
+
+
+def _mask_inline_code_spans(line: str, span_state: dict) -> str:
     """Mask complete backtick code spans while preserving character offsets.
 
-    HTML-comment delimiters inside code spans are literal text in Markdown and
-    must not change comment state. Unclosed backtick runs are left untouched;
-    they do not form a complete code span.
+    HTML-comment (and processing-instruction/declaration/CDATA) delimiters
+    inside code spans are literal text in Markdown and must not change hidden-
+    region state. Unclosed backtick runs are left untouched; they do not form
+    a complete code span on their own line.
+
+    A code span's closing delimiter can be on a LATER line than its opener --
+    CommonMark allows a span's content to include line breaks (rendered as
+    spaces). `span_state` (`{"in_span": bool, "delim": str}`) threads that
+    across calls: a line entered already inside a span has its own text
+    scanned only for the close; if the close isn't found either, the ENTIRE
+    line is masked and the state carries forward again. Resets at a blank
+    line, mirroring how a blank line ends the paragraph a code span's inline
+    parsing happens within -- an unclosed span cannot itself keep hiding
+    headings across a real section boundary.
     """
+    if not line.strip():
+        span_state["in_span"] = False
+        span_state["delim"] = ""
+        return line
+
     chars = list(line)
-    i = 0
     length = len(line)
+    i = 0
+
+    if span_state["in_span"]:
+        delimiter = span_state["delim"]
+        close_start = _find_span_close(line, delimiter, 0)
+        if close_start == -1:
+            return " " * length
+        close_end = close_start + len(delimiter)
+        for pos in range(0, close_end):
+            chars[pos] = " "
+        i = close_end
+        span_state["in_span"] = False
+        span_state["delim"] = ""
+
     while i < length:
         if line[i] != "`":
             i += 1
@@ -103,23 +175,16 @@ def _mask_inline_code_spans(line: str) -> str:
             i += 1
         run_len = i - run_start
         delimiter = "`" * run_len
-        search_from = i
-        close_start = -1
-
-        while True:
-            candidate = line.find(delimiter, search_from)
-            if candidate == -1:
-                break
-            before_ok = candidate == 0 or line[candidate - 1] != "`"
-            after = candidate + run_len
-            after_ok = after >= length or line[after] != "`"
-            if before_ok and after_ok:
-                close_start = candidate
-                break
-            search_from = candidate + 1
+        close_start = _find_span_close(line, delimiter, i)
 
         if close_start == -1:
-            continue
+            # No close on this line at all -- the span continues past EOL.
+            for pos in range(run_start, length):
+                chars[pos] = " "
+            span_state["in_span"] = True
+            span_state["delim"] = delimiter
+            i = length
+            break
 
         close_end = close_start + run_len
         for pos in range(run_start, close_end):
@@ -130,30 +195,39 @@ def _mask_inline_code_spans(line: str) -> str:
 
 
 def _strip_hidden_regions(body: str) -> str:
-    """Hide fenced code blocks and HTML comments before heading discovery.
+    """Hide fenced code blocks, HTML comments, and other raw HTML regions
+    before heading discovery.
 
     Hidden lines are replaced with empty lines so line count remains stable.
     Fenced blocks only close on valid Markdown closing-fence syntax: the same
     fence character, at least the opening length, and no non-whitespace suffix.
-    Inline code spans and indented code blocks are not interpreted as HTML
-    comments. An unmatched real HTML-comment opener hides through EOF.
+    Inline code spans (including ones spanning multiple lines) and indented
+    code blocks are not interpreted as HTML comments or any other hidden-span
+    opener. An unmatched real opener (HTML comment, processing instruction,
+    or declaration) hides through EOF.
     """
     lines = body.replace("\r\n", "\n").split("\n")
     visible_lines: list[str] = []
     in_fence = False
     fence_char = ""
     fence_len = 0
-    in_comment = False
+    hidden_span_kind = None  # None | "comment" | "pi" | "decl" | "cdata"
+    hidden_span_close = ""
     in_html_block = False
     html_block_pre_like = False
     html_block_close_tag = ""
+    span_state = {"in_span": False, "delim": ""}
+    prev_line_blank = True  # start-of-body counts as "not interrupting a paragraph"
 
     for line in lines:
+        line_is_blank = not line.strip()
+
         if in_fence:
             match = _FENCE_CLOSE_RE.match(line)
             if match and match.group(1)[0] == fence_char and len(match.group(1)) >= fence_len:
                 in_fence = False
             visible_lines.append("")
+            prev_line_blank = line_is_blank
             continue
 
         if in_html_block:
@@ -165,18 +239,21 @@ def _strip_hidden_regions(body: str) -> str:
                 visible_lines.append("")
                 if html_block_close_tag in line.lower():
                     in_html_block = False
+                prev_line_blank = line_is_blank
                 continue
-            # Every other block tag (CommonMark type 6): hidden through the
+            # Every other block tag (CommonMark types 6/7): hidden through the
             # next blank line, which is itself NOT part of the block and
             # stays visible so a real heading right after it is still found.
-            if not line.strip():
+            if line_is_blank:
                 in_html_block = False
                 visible_lines.append(line)
+                prev_line_blank = line_is_blank
                 continue
             visible_lines.append("")
+            prev_line_blank = line_is_blank
             continue
 
-        if not in_comment:
+        if hidden_span_kind is None:
             match = _FENCE_OPEN_RE.match(line)
             if match:
                 marker = match.group(1)
@@ -188,51 +265,86 @@ def _strip_hidden_regions(body: str) -> str:
                     fence_char = marker[0]
                     fence_len = len(marker)
                     visible_lines.append("")
+                    prev_line_blank = line_is_blank
                     continue
 
             html_match = _HTML_BLOCK_OPEN_RE.match(line)
-            if html_match and (
-                html_match.group(1).lower() in _HTML_BLOCK_TAGS
-                or html_match.group(1).lower() in _PRE_LIKE_HTML_TAGS
-            ):
-                tag = html_match.group(1).lower()
+            html_tag = html_match.group(1).lower() if html_match else None
+            if html_match and (html_tag in _HTML_BLOCK_TAGS or html_tag in _PRE_LIKE_HTML_TAGS):
+                # CommonMark type 6/1: a known block-level tag starts a
+                # hidden region regardless of what precedes it.
                 in_html_block = True
-                html_block_pre_like = tag in _PRE_LIKE_HTML_TAGS
-                html_block_close_tag = "</" + tag + ">"
+                html_block_pre_like = html_tag in _PRE_LIKE_HTML_TAGS
+                html_block_close_tag = "</" + html_tag + ">"
                 if html_block_pre_like and html_block_close_tag in line.lower():
                     # Opens and closes on the same line (e.g. `<pre>x</pre>`).
                     in_html_block = False
                 visible_lines.append("")
+                prev_line_blank = line_is_blank
                 continue
+
+            if prev_line_blank:
+                # CommonMark type 7: ANY tag name (not just the type-6 list)
+                # alone on its own line -- nothing else, not even prose --
+                # starts a hidden region too, but only when it can't be
+                # interrupting an existing paragraph (the preceding line must
+                # be blank, or this is the very first line of the body).
+                # Tags already covered by type 6/1 above never reach here.
+                type7_match = _HTML_BLOCK_TYPE7_LINE_RE.match(line)
+                if type7_match:
+                    in_html_block = True
+                    html_block_pre_like = False
+                    html_block_close_tag = ""  # blank-line-terminated, tag irrelevant
+                    visible_lines.append("")
+                    prev_line_blank = line_is_blank
+                    continue
 
             if _INDENTED_CODE_RE.match(line):
                 visible_lines.append(line)
+                prev_line_blank = line_is_blank
                 continue
 
-        scan_line = line if in_comment else _mask_inline_code_spans(line)
+        # Computed lazily, AT MOST ONCE for this physical line: `_mask_inline_
+        # code_spans` mutates `span_state`, so calling it more than once per
+        # line (once when a carried-over hidden span closes mid-line, then
+        # again for a second such close) would re-scan the same text against
+        # state it had already advanced past, corrupting it. One call gives
+        # the same masked text regardless of when within the line it runs.
+        scan_line = None
         parts: list[str] = []
         pos = 0
         while True:
-            if in_comment:
-                close = line.find("-->", pos)
+            if hidden_span_kind:
+                close = line.find(hidden_span_close, pos)
                 if close == -1:
                     pos = len(line)
                     break
-                in_comment = False
-                pos = close + 3
-                scan_line = _mask_inline_code_spans(line)
+                hidden_span_kind = None
+                pos = close + len(hidden_span_close)
                 continue
 
-            open_idx = scan_line.find("<!--", pos)
-            if open_idx == -1:
+            if scan_line is None:
+                scan_line = _mask_inline_code_spans(line, span_state)
+
+            open_match = _HIDDEN_SPAN_OPEN_RE.search(scan_line, pos)
+            if not open_match:
                 parts.append(line[pos:])
                 pos = len(line)
                 break
-            parts.append(line[pos:open_idx])
-            pos = open_idx + 4
-            in_comment = True
+            parts.append(line[pos:open_match.start()])
+            opener = open_match.group(0)
+            pos = open_match.end()
+            if opener == "<!--":
+                hidden_span_kind, hidden_span_close = "comment", "-->"
+            elif opener.startswith("<![CDATA["):
+                hidden_span_kind, hidden_span_close = "cdata", "]]>"
+            elif opener == "<?":
+                hidden_span_kind, hidden_span_close = "pi", "?>"
+            else:  # "<!" followed by a letter -- a declaration (type 4)
+                hidden_span_kind, hidden_span_close = "decl", ">"
 
         visible_lines.append("".join(parts))
+        prev_line_blank = line_is_blank
 
     return "\n".join(visible_lines)
 
