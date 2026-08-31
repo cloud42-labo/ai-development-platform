@@ -22,11 +22,15 @@ deeper (`####...`) inside a section's own content is not a boundary and is
 treated as ordinary content, matching how the PR template never nests that
 deep.
 
-HTML comments and fenced code blocks are hidden from the ENTIRE body
-first, in one line-oriented structural pass (`_strip_hidden_regions`),
-before any heading is looked for at all -- not per-section after
-splitting, and not with a single `.sub()` call. The parser also respects
-Markdown code contexts: an apparent `<!--` inside an inline code span or an
+HTML comments, fenced code blocks, and raw HTML blocks (CommonMark's
+"type 6"/"type 1" HTML blocks -- e.g. `<div>...`, `<pre>...</pre>`) are all
+hidden from the ENTIRE body first, in one line-oriented structural pass
+(`_strip_hidden_regions`), before any heading is looked for at all -- not
+per-section after splitting, and not with a single `.sub()` call. Only a
+known block-level tag (the CommonMark type-6 list) starts a hidden HTML
+block; an inline-level tag like `<br>` or `<code>` does not, so it never
+swallows the real prose it appears in. The parser also respects Markdown
+code contexts: an apparent `<!--` inside an inline code span or an
 indented code block is literal code, not an HTML-comment opener, and a fence
 only closes when the closing marker is followed by whitespace only.
 """
@@ -53,6 +57,30 @@ _EMPTY_BULLET_RE = re.compile(r"(?m)^[ \t]*[-*+][ \t]*$")
 _FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 _FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$")
 _INDENTED_CODE_RE = re.compile(r"^(?: {4}|\t)")
+
+# CommonMark "type 6" HTML block tag names -- block-level elements whose
+# opening (or closing) tag alone on a line starts a raw HTML block that
+# Markdown renders verbatim, never as real section structure. Deliberately
+# excludes inline-level tags (span, code, a, em, strong, b, i, br, img, ...):
+# those can legitimately appear inside real prose and must not be hidden.
+_HTML_BLOCK_TAGS = frozenset({
+    "address", "article", "aside", "base", "basefont", "blockquote", "body",
+    "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir",
+    "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
+    "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
+    "hr", "html", "iframe", "legend", "li", "link", "main", "menu",
+    "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
+    "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead",
+    "title", "tr", "track", "ul",
+})
+# "type 1" tags: the block continues until the matching closing tag, not
+# until the next blank line -- pre/script/style/textarea are exactly the
+# tags CommonMark special-cases this way, since their content is meant to
+# be taken verbatim and commonly contains blank lines of its own.
+_PRE_LIKE_HTML_TAGS = frozenset({"pre", "script", "style", "textarea"})
+_HTML_BLOCK_OPEN_RE = re.compile(
+    r"^[ \t]{0,3}</?([a-zA-Z][a-zA-Z0-9-]*)(?:[ \t>]|/>|$)"
+)
 
 
 def _mask_inline_code_spans(line: str) -> str:
@@ -116,12 +144,35 @@ def _strip_hidden_regions(body: str) -> str:
     fence_char = ""
     fence_len = 0
     in_comment = False
+    in_html_block = False
+    html_block_pre_like = False
+    html_block_close_tag = ""
 
     for line in lines:
         if in_fence:
             match = _FENCE_CLOSE_RE.match(line)
             if match and match.group(1)[0] == fence_char and len(match.group(1)) >= fence_len:
                 in_fence = False
+            visible_lines.append("")
+            continue
+
+        if in_html_block:
+            if html_block_pre_like:
+                # Type-1 tags (pre/script/style/textarea): hidden through the
+                # matching closing tag, not a blank line -- their content is
+                # meant to be taken verbatim and commonly contains blank
+                # lines of its own.
+                visible_lines.append("")
+                if html_block_close_tag in line.lower():
+                    in_html_block = False
+                continue
+            # Every other block tag (CommonMark type 6): hidden through the
+            # next blank line, which is itself NOT part of the block and
+            # stays visible so a real heading right after it is still found.
+            if not line.strip():
+                in_html_block = False
+                visible_lines.append(line)
+                continue
             visible_lines.append("")
             continue
 
@@ -138,6 +189,21 @@ def _strip_hidden_regions(body: str) -> str:
                     fence_len = len(marker)
                     visible_lines.append("")
                     continue
+
+            html_match = _HTML_BLOCK_OPEN_RE.match(line)
+            if html_match and (
+                html_match.group(1).lower() in _HTML_BLOCK_TAGS
+                or html_match.group(1).lower() in _PRE_LIKE_HTML_TAGS
+            ):
+                tag = html_match.group(1).lower()
+                in_html_block = True
+                html_block_pre_like = tag in _PRE_LIKE_HTML_TAGS
+                html_block_close_tag = "</" + tag + ">"
+                if html_block_pre_like and html_block_close_tag in line.lower():
+                    # Opens and closes on the same line (e.g. `<pre>x</pre>`).
+                    in_html_block = False
+                visible_lines.append("")
+                continue
 
             if _INDENTED_CODE_RE.match(line):
                 visible_lines.append(line)
