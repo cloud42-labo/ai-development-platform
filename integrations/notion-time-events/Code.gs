@@ -6,6 +6,17 @@ const DEFAULTS = {
   START_STATUS: 'In Progress',
   REVIEW_STATUS: 'Review',
   DONE_STATUS: 'Done',
+  // `Stories & Tasks`.Status is a `select` property in the real database
+  // schema, not Notion's distinct `status` property type — the two use
+  // different filter and page-property-write shapes ({ select: { equals /
+  // name } } vs { status: { equals / name } }), and sending the wrong one is
+  // rejected outright by the Notion API rather than silently matching zero
+  // rows. Every Status filter and write is built from this single constant
+  // instead of hardcoding the type at each call site, so a real schema
+  // change only needs updating here. See the "Status property schema
+  // contract" tests in test/poll.test.mjs and test/done-gate.test.mjs, which
+  // pin every call site's request body against the real data source schema.
+  STATUS_PROPERTY_TYPE: 'select',
   NOTION_VERSION: '2026-03-11',
   POLL_INTERVAL_MINUTES: 5,
 };
@@ -384,10 +395,10 @@ function backfillResultFingerprints_() {
     const tieOffset = resumeCursor ? Number(props.getProperty('BACKFILL_RESUME_TIE_OFFSET') || '0') : 0;
     const filter = resumeCursor
       ? { and: [
-          { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } },
+          { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.DONE_STATUS } },
           { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
         ] }
-      : { property: 'Status', status: { equals: DEFAULTS.DONE_STATUS } };
+      : { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.DONE_STATUS } };
     const queryPath = '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query';
     const queryBody = {
       page_size: 100,
@@ -609,10 +620,10 @@ function queryActiveInProgressTasks_() {
   const tieOffset = resumeCursor ? Number(props.getProperty('BOOTSTRAP_ACTIVE_RESUME_TIE_OFFSET') || '0') : 0;
   const filter = resumeCursor
     ? { and: [
-        { property: 'Status', status: { equals: DEFAULTS.START_STATUS } },
+        { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } },
         { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
       ] }
-    : { property: 'Status', status: { equals: DEFAULTS.START_STATUS } };
+    : { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } };
   const result = paginateNotionQuery_(
     '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
     {
@@ -1188,7 +1199,7 @@ function stampExecutionBoundary_(eventPage, executionId) {
 function updateTaskStatus_(taskId, statusName) {
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(taskId), {
     properties: {
-      Status: { status: { name: statusName } },
+      Status: { [DEFAULTS.STATUS_PROPERTY_TYPE]: { name: statusName } },
     },
   });
 }

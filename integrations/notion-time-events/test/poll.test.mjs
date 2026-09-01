@@ -17,7 +17,12 @@ function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T'
     parent: { type: 'data_source_id', data_source_id: TASKS_DS },
     properties: {
       Title: { type: 'title', title: [{ plain_text: title }] },
-      Status: { type: 'status', status: { name: status } },
+      // `Stories & Tasks`.Status is a `select` property in the real database
+      // schema, not Notion's distinct `status` property type — this fixture
+      // mirrors that so a regression back to the `status` shape in Code.gs
+      // (see the "Status property schema contract" tests below) shows up
+      // here rather than only against the live API.
+      Status: { type: 'select', select: { name: status } },
       'Assigned Agent': { type: 'select', select: agent ? { name: agent } : null },
       'Started At': { type: 'date', date: startedAt ? { start: startedAt } : null },
       Result: { type: 'rich_text', rich_text: [] },
@@ -2076,4 +2081,81 @@ test('backfillResultFingerprints_ survives a single abnormally slow request, not
   // assumed no single request would ever take. MIN_PROCESSING_RESERVE_MS
   // must be sized to survive this — not just the uniform-cost case.
   assert.equal(summary.timedOut, false, 'expected the reserve to survive one abnormally slow request, not just uniformly slow ones');
+});
+
+// --- Status property schema contract ---------------------------------------
+//
+// `Stories & Tasks`.Status is a Notion `select` property in the real
+// database schema — not the distinct `status` property type, which is an
+// identically-named but incompatible filter/write shape
+// ({ status: { equals / name } } vs { select: { equals / name } }). Sending
+// the wrong one is rejected outright by the real Notion API as a
+// validation_error; it does not silently match zero rows. This was an
+// actual production regression (2026-08-31): every Status filter and the
+// Status write predated DEFAULTS.STATUS_PROPERTY_TYPE and hardcoded
+// `status`, so pollTaskChanges failed against the real database from the
+// moment polling replaced the old webhook receiver, which never filtered by
+// Status at all. The tests below assert the literal request bodies Code.gs
+// sends, not just that a request was made, so a future reintroduction of the
+// wrong property type — at any of the call sites, individually — fails here
+// instead of only in production.
+test('the Done-status backfill query (backfillResultFingerprints_) filters on select, not status', () => {
+  const { sandbox, fetchLog } = harness();
+
+  sandbox.backfillResultFingerprints_();
+
+  const query = JSON.parse(requestsTo(fetchLog, 'POST', TASKS_DS)[0].options.payload);
+  assert.deepEqual(query.filter, { property: 'Status', select: { equals: 'Done' } });
+});
+
+test('a resumed Done-status backfill query filters on select, not status', () => {
+  const { sandbox, fetchLog } = harness({
+    scriptProperties: { BACKFILL_RESUME_CURSOR: '2026-08-30T05:00:00.000Z' },
+  });
+
+  sandbox.backfillResultFingerprints_();
+
+  const query = JSON.parse(requestsTo(fetchLog, 'POST', TASKS_DS)[0].options.payload);
+  assert.deepEqual(query.filter.and[0], { property: 'Status', select: { equals: 'Done' } });
+});
+
+test('the In-Progress bootstrap query (queryActiveInProgressTasks_) filters on select, not status', () => {
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' }, // no LAST_SYNC_CURSOR: fresh deploy bootstraps
+    fetch: notionFetchStub(routes),
+  });
+
+  sandbox.pollTaskChanges();
+
+  const bootstrapQuery = requestsTo(fetchLog, 'POST', TASKS_DS)
+    .map((entry) => JSON.parse(entry.options.payload))
+    .find((body) => body.filter && body.filter.property === 'Status');
+  assert.ok(bootstrapQuery, 'expected a Status-filtered bootstrap query among the requests made');
+  assert.deepEqual(bootstrapQuery.filter, { property: 'Status', select: { equals: 'In Progress' } });
+});
+
+test('a rejected Done rolls Status back with a select write, not a status write', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee01';
+  const doneTask = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Human',
+    lastEdited: '2026-08-30T09:00:00.000Z',
+    startedAt: '2026-08-30T08:00:00.000Z',
+  }); // Result and Completed At left empty — enforceDoneGate_ must reject and roll back.
+  const { sandbox, fetchLog } = harness();
+
+  const outcome = sandbox.enforceDoneGate_(doneTask, [], []);
+
+  assert.match(outcome, /^done_gate_rejected:/);
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/' + taskId);
+  assert.equal(patches.length, 1);
+  const body = JSON.parse(patches[0].options.payload);
+  assert.deepEqual(body.properties.Status, { select: { name: 'Review' } });
 });

@@ -66,7 +66,7 @@ test('Done is rejected when only a past execution left a closed Time Event', () 
   // Rejecting Done must also roll the Task back rather than leaving Done set.
   assert.equal(fetchLog.length, 1);
   const rollbackBody = JSON.parse(fetchLog[0].options.payload);
-  assert.equal(rollbackBody.properties.Status.status.name, 'Review');
+  assert.equal(rollbackBody.properties.Status.select.name, 'Review');
 });
 
 test('Done passes with a closed Time Event that belongs to the current execution', () => {
@@ -213,7 +213,7 @@ test('Done is rejected with an open Time Event even if a current-execution close
   assert.match(outcome, /^done_gate_rejected:/);
   assert.match(outcome, /open_time_event/);
   const rollbackBody = JSON.parse(fetchLog[0].options.payload);
-  assert.equal(rollbackBody.properties.Status.status.name, 'In Progress');
+  assert.equal(rollbackBody.properties.Status.select.name, 'In Progress');
 });
 
 test('Done is rejected when the Task has never recorded a Started At', () => {
