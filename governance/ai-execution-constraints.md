@@ -75,8 +75,9 @@ Trigger: immediately before creating a Stories & Tasks record with `Type = Human
 2. **Criteria classified individually** — every Acceptance Criterion is classified as `AI-verifiable`, `Human evidence already exists`, or `Human-only`. The task as a whole is not classified.
 3. **AI-verifiable work completed first** — every `AI-verifiable` criterion is actually verified and its evidence recorded before any Human is asked for anything.
 4. **No Human-only criterion remains** — if every criterion is `AI-verifiable` or `Human evidence already exists`, do not create the Human Request and do not transition to `Blocked`. Record the evidence and complete the task through the completion post-flight.
-5. **Request minimised** — where `Human-only` criteria remain, the Human Request covers only that remainder, stated as a concrete action with explicit completion evidence. A Blocker must name the specific outstanding criterion and the request carrying it, not the whole task.
-6. **Classification recorded** — the classification and the sources searched are written to `Result` or `Approach Decision`, so the next agent can re-evaluate the gate instead of repeating the search or inheriting a dead end.
+5. **Current-gate relevance checked for every remaining `Human-only` criterion** — name the exact transition currently being evaluated (e.g. "PR review → merge", not the whole task or the whole feature), then verify the Human-only criterion is a mandatory prerequisite of *that* transition specifically, not of a later, independent transition in the same flow (deployment, publication, real-device/environment Acceptance). A `Human-only` criterion that only gates a downstream transition does not block the current one: do not set the current transition to `Blocked` or report it as Human-waiting on that basis. Route it as its own Human Request scoped to the transition it actually gates. See Operating Guide section 11.8 and `governance/state-transition-pre-check-regression-cases.md`. This step never removes a gate that genuinely applies to the current transition — it only stops a downstream gate from being misapplied to an earlier one.
+6. **Request minimised** — where a `Human-only` criterion remains that IS mandatory for the current transition (per step 5), the Human Request covers only that remainder, stated as a concrete action with explicit completion evidence. A Blocker must name the specific outstanding criterion and the request carrying it, not the whole task.
+7. **Classification recorded** — the classification, the current-gate relevance determination, and the sources searched are written to `Result` or `Approach Decision`, so the next agent can re-evaluate the gate instead of repeating the search or inheriting a dead end.
 
 ## Human Queue WIP constraint
 
@@ -92,9 +93,10 @@ During each daily/hourly autonomous execution, prefer AI work that shrinks the A
 
 ## Standing re-evaluation of Human gates
 
-During each daily autonomous execution, re-run the Human gate pre-flight over every open `Type = Human Request` and every task whose `Status = Blocked` for a Human reason.
+During each daily autonomous execution, re-run the Human gate pre-flight over every open `Type = Human Request` and every task whose `Status = Blocked` for a Human reason. Apply this equally to reporting a PR or task as Human-waiting during a backlog sweep, not only to creating a new gate — PM-8 (`serendipity-spot #27`, `experimental #85`) was caught by an Owner questioning exactly such a sweep report, not by a Human Request being newly created.
 
 - Correct any gate whose evidence has since arrived: verify the satisfied criteria, write the correcting reason and evidence links into `Result`, and move the task out of the gate.
+- Re-check current-gate relevance (Human gate pre-flight step 5) for every remaining `Human-only` criterion: a criterion that gates a downstream transition (deployment, publication, real-device/environment Acceptance) does not block a current transition (e.g. PR merge) that has already cleared its own gates. Demote a gate found misapplied this way and record the correction.
 - Clear stale Blockers on parent Stories/Tasks whose blocking child has already completed. Write Blockers that name the specific task or request they wait on, so this check costs one lookup.
 - Where the Human portion is satisfied but AI work remains, return the task to `Ready` with the residual named. Do not mark it `Done`, and do not leave it `Blocked`.
 - Correct only what located evidence supports. Where evidence cannot be found, leave the state unchanged and record why the gate remains open.

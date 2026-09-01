@@ -34,14 +34,15 @@ schema_version: 0.1.0-experimental
 # governance/ai-execution-constraints.md, governance/source-of-truth.md,
 # governance/research-security-policy.md,
 # governance/authority-stop-gate-regression-cases.md,
+# governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 0.2.0
+rules_version: 0.3.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
 # governance/monthly-risk-management-review.md,
 # docs/product-design-doc-standard.md).
-workflow_version: 0.2.0
+workflow_version: 0.3.0
 
 # Version of the Templates asset class (templates/README.md,
 # templates/monthly-risk-review.md, templates/product-vision.md,
@@ -141,3 +142,43 @@ migration_path:
       docs/product-design-doc-standard.md. Additive: no existing template
       changed.
     action_required: none
+  - field: rules_version
+    from: "0.2.0"
+    to: "0.3.0"
+    date: "2026-09-01"
+    change: >-
+      ADP-043-O (Postmortem PM-8): the Human gate pre-flight in
+      governance/ai-execution-constraints.md gained a new step
+      ("Current-gate relevance checked") between classifying a criterion
+      Human-only and creating the Human Request for it. Added
+      governance/state-transition-pre-check-regression-cases.md and
+      Pattern 4 in docs/human-gate-pre-check-examples.md. Additive
+      (MINOR per docs/versioning-policy.md's Rules judgment): no existing
+      gate, field, or required step was removed or redefined — this
+      narrows when a Human-only criterion may block the *current*
+      transition, it does not waive any criterion's own classification
+      or any gate genuinely applicable to that transition.
+    action_required: >-
+      An adopter following this Rule must, before setting a task/PR to a
+      Human-reason Blocked state or reporting one as Human-waiting
+      (including during a backlog sweep, not only when first creating the
+      gate), name the exact transition being evaluated and confirm each
+      remaining Human-only criterion is a mandatory prerequisite of that
+      transition specifically — not of a later, independent transition in
+      the same flow (deployment, publication, real-device/environment
+      Acceptance). A criterion that only gates a downstream transition
+      must not block the current one; route it as its own Human Request
+      scoped to the transition it actually gates.
+  - field: workflow_version
+    from: "0.2.0"
+    to: "0.3.0"
+    date: "2026-09-01"
+    change: >-
+      ADP-043-O (Postmortem PM-8): docs/operating-guide.md gained new
+      section 11.8 "Current-gate relevance (state transition boundary)",
+      and 11.6's standing re-evaluation gained a cross-reference to it.
+      Additive: no existing Stage/Gate/step/closure criterion changed.
+    action_required: >-
+      Same as the paired rules_version 0.3.0 entry above — this Workflow
+      bump is the durable-destination half of the same additive check;
+      adopt both together.

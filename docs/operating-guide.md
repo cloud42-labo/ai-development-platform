@@ -242,6 +242,23 @@ Even after the Human Gate Pre-check removes false gates, genuinely Human-only wo
 - **This changes AI task selection too.** When the Actionable Human Queue is over its limit, an autonomous AI run (Claude daily execution, Chris hourly execution) should prefer work that reduces the queue — the substitution/consolidation/pre-processing above — over starting new work that would create additional Human gates.
 - Record queue size before/after and the reclassification results in the initiating Task's `Result` (see ADP-043-I for the initial application). Track the Actionable Queue count and its trend as a Human-bottleneck indicator in Sprint Review.
 
+### 11.8 Current-gate relevance (state transition boundary)
+
+Sections 11.2–11.6 classify each Acceptance Criterion. That classification alone is not sufficient to decide whether the **transition currently being evaluated** should wait — a criterion correctly classified `Human-only` can still belong to a *later, independent* transition in the same End-to-End flow, and blocking the current one on it is a false gate of a different shape than the ones 11.2–11.6 already catch.
+
+This section exists because of a real incident (Postmortem PM-8, 2026-09-01): `serendipity-spot #27` and `experimental #85` were both classified `Human待ち` and their PR merge treated as stopped, even though `#27`'s real-device UI check was never a merge precondition and `#85`'s real-environment deployment/secrets Acceptance is a *post-merge* step. The wrong implicit logic was `Human-only work exists somewhere → current transition must wait`. The correct logic is `Human-only work exists → identify the current transition → verify the Human judgment/evidence is a mandatory prerequisite of this exact transition → block only if yes`.
+
+**This is a narrowing filter on top of 11.2–11.6, not a new Stop Gate.** It never blocks a transition that 11.2–11.6 would otherwise clear; it only prevents a `Human-only` criterion belonging to a *different* transition from stopping the *current* one. An existing, genuinely mandatory gate for the current transition is untouched.
+
+Before setting a task/PR to a Human-reason `Blocked` state, or reporting a PR as "waiting on Human" in a backlog sweep, for every criterion classified `Human-only` in 11.4:
+
+1. **Name the current transition precisely** — e.g. "PR review → merge", not "task completion" or "ship the feature" in general. A flow like design → implement → PR review → merge → deploy → real-device Acceptance → publish has several distinct transitions; the check applies separately to whichever one is actually being evaluated right now.
+2. **Ask whether the Human-only criterion is a mandatory prerequisite of that exact transition**, or whether it belongs to a transition that comes *after* it (deployment, publication, real-device/environment Acceptance, or any other downstream step). A criterion that only needs to be true before a *later* transition is not a precondition of the current one.
+3. **Block the current transition only when the answer to step 2 is yes.** When the Human-only criterion belongs to a downstream transition instead, the current transition proceeds on its own actual gates (e.g. required review, CI, mergeability) — do not report the current transition as Human-blocked. Route the downstream Human-only work as its own Human Request, scoped to the transition it actually gates (e.g. "confirm real-device rendering after merge", not "confirm before merge").
+4. **Record the transition, the criterion, and the step-2 answer** in the same place 11.6 records the classification (`Result` or `Approach Decision`), so a later re-check does not need to re-derive it.
+
+This check runs alongside the standing re-evaluation in 11.6: a PR backlog sweep that finds a Human-only criterion must apply this section before reporting the PR as Human-blocked, not only when a new gate is first created. Two worked regression cases (`#27`, `#85`) and their pass criteria are in [`../governance/state-transition-pre-check-regression-cases.md`](../governance/state-transition-pre-check-regression-cases.md); the executable form of this check is in [`../governance/ai-execution-constraints.md`](../governance/ai-execution-constraints.md).
+
 ## 12. Chris → Claude handoff
 
 Treat the transition from Epic design to executable implementation design as a formal AI-to-AI baton pass.
