@@ -36,7 +36,7 @@ schema_version: 0.1.0-experimental
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 0.3.0
+rules_version: 1.0.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -144,7 +144,7 @@ migration_path:
     action_required: none
   - field: rules_version
     from: "0.2.0"
-    to: "0.3.0"
+    to: "1.0.0"
     date: "2026-09-01"
     change: >-
       ADP-043-O (Postmortem PM-8): the Human gate pre-flight in
@@ -152,12 +152,21 @@ migration_path:
       ("Current-gate relevance checked") between classifying a criterion
       Human-only and creating the Human Request for it. Added
       governance/state-transition-pre-check-regression-cases.md and
-      Pattern 4 in docs/human-gate-pre-check-examples.md. Additive
-      (MINOR per docs/versioning-policy.md's Rules judgment): no existing
-      gate, field, or required step was removed or redefined — this
-      narrows when a Human-only criterion may block the *current*
-      transition, it does not waive any criterion's own classification
-      or any gate genuinely applicable to that transition.
+      Pattern 4 in docs/human-gate-pre-check-examples.md. MAJOR per
+      docs/versioning-policy.md's Rules judgment, not MINOR as first
+      classified (corrected after Codex review on ai-development-platform
+      PR #19): the prior gate's own written form (old step 4/5, now
+      renumbered 4/6/7) blocked/permitted a Human Request whenever ANY
+      `Human-only` criterion remained, regardless of which transition it
+      belonged to — the exact behavior that produced PM-8. The new step 5
+      makes that same previously-compliant behavior (creating a Human
+      Request or Blocked state for a `Human-only` criterion that gates a
+      *different*, downstream transition) non-compliant, and narrows the
+      condition under which the existing gate fires. That is a loosening
+      of a relied-upon safety gate per the policy's own MAJOR criteria,
+      not a purely additive new constraint — even though its purpose is
+      to prevent the gate from being *misapplied*, not to remove it from
+      cases where it genuinely applies.
     action_required: >-
       An adopter following this Rule must, before setting a task/PR to a
       Human-reason Blocked state or reporting one as Human-waiting
@@ -166,9 +175,17 @@ migration_path:
       remaining Human-only criterion is a mandatory prerequisite of that
       transition specifically — not of a later, independent transition in
       the same flow (deployment, publication, real-device/environment
-      Acceptance). A criterion that only gates a downstream transition
-      must not block the current one; route it as its own Human Request
-      scoped to the transition it actually gates.
+      Acceptance) — before treating it as blocking. A criterion that only
+      gates a downstream transition must not block the current one; route
+      it as its own Human Request scoped to the transition it actually
+      gates. Demoting an existing Human gate under this step still
+      requires the same evidence standard as the rest of the Human gate
+      pre-flight (see governance/state-transition-pre-check-regression-cases.md
+      Case 2): a criterion an accountable reviewer has explicitly and
+      currently tied to the transition being evaluated stays blocking
+      until that same authority revises it — this step narrows AI-invented
+      over-blocking, it does not let an agent unilaterally override an
+      explicit, still-current reviewer decision.
   - field: workflow_version
     from: "0.2.0"
     to: "0.3.0"
@@ -178,7 +195,12 @@ migration_path:
       section 11.8 "Current-gate relevance (state transition boundary)",
       and 11.6's standing re-evaluation gained a cross-reference to it.
       Additive: no existing Stage/Gate/step/closure criterion changed.
+      Stays MINOR even though the paired rules_version entry above was
+      corrected to MAJOR — this file is the descriptive policy source
+      (Operating Guide), not the executable guardrail (Rules); it only
+      gained a new described step, it did not itself narrow when an
+      existing Workflow Stage/Gate/closure criterion applies.
     action_required: >-
-      Same as the paired rules_version 0.3.0 entry above — this Workflow
-      bump is the durable-destination half of the same additive check;
+      Same as the paired rules_version 1.0.0 entry above — this Workflow
+      bump is the durable-destination half of the same behavior change;
       adopt both together.
