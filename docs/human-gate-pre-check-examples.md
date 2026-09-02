@@ -40,6 +40,18 @@ The pre-check exists because a Human gate is a claim about the present ("no reco
 
 **Action:** the task can stay `Blocked`, but the Blocker text is rewritten to name only the residual — the specific checkpoints still needing a person — with the satisfied portions and their evidence recorded in `Result`. An unscoped gate ("verify this is understandable") has no defined completion and drifts; a narrowed one ("confirm these two specific points at the next session that's happening anyway") fits into work already scheduled. Narrowing converts a stalled dependency into a scheduled one, even when the gate itself survives.
 
+## Pattern 4 — Downstream Human work mistaken for the current gate
+
+**Shape:** a criterion is correctly classified `Human-only` (Patterns 1–3 apply the three classes correctly), but it belongs to a *later, independent* transition in the same End-to-End flow — deployment, publication, or real-device/environment Acceptance that happens *after* the transition actually being evaluated (typically PR review → merge). The task/PR is reported as Human-waiting on that basis, even though nothing about the current transition's own gates (review, CI, mergeability) actually depends on it.
+
+**How it differs from Patterns 1–3:** those patterns are about whether the classification itself is correct (already satisfied, genuinely needed, or partially needed). Pattern 4's classification can be entirely correct — the criterion really is `Human-only` — and the gate is still wrong, because it was applied to the wrong transition.
+
+**Classification approach:** name the transition currently being evaluated precisely (e.g. "PR review → merge", not "ship the feature"). For each `Human-only` criterion, ask whether it is a mandatory prerequisite of *that* transition specifically, or of a transition that comes after it. See Operating Guide section 11.8.
+
+**Action:** if the criterion gates a downstream transition **and no accountable reviewer has already explicitly tied it to the current transition**, do not block the current one on it — let the current transition proceed on its own actual gates, and route the Human-only work as its own request scoped to the transition it actually gates. The downstream gate itself is not removed, only prevented from propagating backward to a transition it does not govern. If an accountable reviewer HAS already explicitly gated the current transition on this criterion (e.g. a standing "will not merge until X"), that stays in force until the same standard of evidence — a dated comment/review from an equally accountable authority — revises it; this pattern narrows an AI-invented over-block, it never authorizes overriding a still-current human decision on the AI's own reasoning.
+
+Two worked regression cases — a criterion that turned out not to be a merge precondition at all, and a genuine downstream gate (real-environment deployment Acceptance) that stayed a real merge precondition until its own author later revised it in a dated comment — are in [`../governance/state-transition-pre-check-regression-cases.md`](../governance/state-transition-pre-check-regression-cases.md), drawn from Postmortem PM-8.
+
 ## What the first inventory pass found
 
 The pre-check was first applied across every open `Type = Human Request` and every task `Blocked` for a Human reason in one pass (28 records). A small minority were false gates (Pattern 1/1b); the large majority were correct and left alone (Pattern 2, or legitimate pending dependencies). See `ADP-043-H`'s `Result` in Notion for the exact count and the specific tasks corrected on that pass.
@@ -49,12 +61,16 @@ Every false gate found in that pass had the same shape: **a Human act had comple
 - **Check the named dependency first.** A Blocker that names a task or request is verified with one lookup. This is what makes clearing stale gates cheap enough to do daily.
 - **A satisfied Human gate does not mean the task is Done.** Where the Human portion is complete but AI work remains, the correct move is to return the task to `Ready` with the residual AI work named — not to close it, and not to leave it `Blocked`. `Blocked` and `Done` are both wrong answers for "the person finished; the machine has not started".
 
-## Reading the three patterns together
+## Reading Patterns 1–3 together
+
+Patterns 1–3 share one axis — whether the classification of a criterion (already satisfied / genuinely needed / partially needed) is correct:
 
 | | Pattern 1 | Pattern 2 | Pattern 3 |
 |---|---|---|---|
 | Human act already performed and recorded? | Yes | No | Partly |
 | AI-verifiable portion completed before asking? | N/A — nothing left | Often, e.g. content pre-drafted | Often, ahead of time |
 | Outcome | Gate removed, task completed | Gate kept unchanged | Gate kept, scope narrowed to the residual |
+
+Pattern 4 is a different axis and can co-occur with any of the three above: even a correctly classified `Human-only` criterion can be misapplied to a transition it does not actually gate.
 
 The pre-check does not decide in advance that Humans are unnecessary. It decides that a Human gate must be justified by the current absence of evidence, and that the absence must be established by searching rather than assumed by inheritance from an earlier, possibly stale, gate.

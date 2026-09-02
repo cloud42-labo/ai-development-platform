@@ -100,6 +100,8 @@ The Notion connection used by Apps Script must have access to both `Stories & Ta
 
 Creating Task Time Events through the Notion API requires **Insert Content** capability. Do not continue to E2E if the connection is read/update-only.
 
+`Stories & Tasks`.`Status` is a Notion **`select`** property, not the distinct **`status`** property type — the two use identically-shaped but incompatible filter/write payloads (`{ select: { equals / name } }` vs `{ status: { equals / name } }`), and the Notion API rejects the wrong one outright as a `validation_error` rather than silently matching zero rows. Every Status filter (`backfillResultFingerprints_`, `queryActiveInProgressTasks_`) and the Done-gate rollback write (`updateTaskStatus_`) are built from the single `DEFAULTS.STATUS_PROPERTY_TYPE` constant so a real schema change only needs updating in one place. This was an actual production regression when polling replaced the old webhook receiver (which never filtered by Status at all): `pollTaskChanges` failed with HTTP 400 on the live database from day one, undetected because the test fixtures also modeled Status as the wrong property type. `test/poll.test.mjs` now asserts the literal request bodies for all four call sites against the `select` shape — see "Status property schema contract" in that file.
+
 ## Setup
 
 1. Open the PoC Google Sheet → **Extensions → Apps Script**.
