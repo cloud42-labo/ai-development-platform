@@ -83,6 +83,19 @@ class FakeSheet {
           },
         };
       },
+      getValues() {
+        const result = [];
+        for (let rowOffset = 0; rowOffset < numRows; rowOffset++) {
+          const sourceRow = sheet.rows[row - 1 + rowOffset] || [];
+          const rowValues = [];
+          for (let columnOffset = 0; columnOffset < numColumns; columnOffset++) {
+            const value = sourceRow[column - 1 + columnOffset];
+            rowValues.push(value === undefined ? '' : value);
+          }
+          result.push(rowValues);
+        }
+        return result;
+      },
     };
   }
 }

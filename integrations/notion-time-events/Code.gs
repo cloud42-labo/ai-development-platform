@@ -840,24 +840,33 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // Task Time Events reporting — read by nothing in this file's own
       // control flow (Done gate, idempotency, cursor advancement), so a
       // classification miss here costs a mis-labeled report row, never a
-      // correctness bug. A reassignment replacement inherits both from the
-      // outgoing event exactly like Execution= above (reassigning never
-      // starts a new execution, so it never changes what kind of work this
-      // is); only a genuinely first-ever-open computes them fresh. Legacy
-      // outgoing events (predating this field) inherit nothing (both find()
-      // calls yield ''), so the first poll to touch such a Task after this
-      // upgrade classifies it fresh instead of propagating a blank forever.
-      const outgoingWorkType = otherActor.length
-        ? (otherActor.map(function (eventPage) {
-            return parseNoteMeta_(propertyText_(eventPage.properties.Note)).workType;
-          }).find(Boolean) || '')
-        : '';
-      const outgoingReviewSource = otherActor.length
-        ? (otherActor.map(function (eventPage) {
-            return parseNoteMeta_(propertyText_(eventPage.properties.Note)).reviewSource;
-          }).find(Boolean) || '')
-        : '';
-      const workType = outgoingWorkType || classifyWorkType_(allEvents);
+      // correctness bug. Continuity (same execution, still churning through
+      // reassignment) always inherits both from the prior same-execution
+      // event unchanged — reassigning never starts a new execution, so it
+      // never changes what kind of work this is, or who reviewed it. This is
+      // NOT limited to `otherActor` (an outgoing event closed THIS SAME poll
+      // call): an assignee cleared in one poll and only reassigned in a
+      // LATER one closes the outgoing event with `otherActor` empty by the
+      // time the reassignment is observed (nothing left open to compare
+      // against), which would otherwise look like a genuinely fresh
+      // execution and (a) reclassify Work Type from scratch and (b) spend a
+      // second GitHub call that can attribute the SAME continuous fix to a
+      // different, newer reviewer. `mostRecentChurnEvent_` finds the same
+      // signal regardless of which poll produced it: the most recently
+      // closed event that is same-execution churn (reassignment/duplicate,
+      // never a genuine boundary), not just `otherActor`. Only a genuinely
+      // first-ever-open (no churn event at all) computes fresh. Legacy churn
+      // events (predating this field) inherit nothing (both find() calls
+      // yield ''), so the first poll to touch such a Task after this upgrade
+      // classifies it fresh instead of propagating a blank forever.
+      const churnEvents = otherActor.length ? otherActor : [mostRecentChurnEvent_(allEvents)].filter(Boolean);
+      const outgoingWorkType = churnEvents.map(function (eventPage) {
+        return parseNoteMeta_(propertyText_(eventPage.properties.Note)).workType;
+      }).find(Boolean) || '';
+      const outgoingReviewSource = churnEvents.map(function (eventPage) {
+        return parseNoteMeta_(propertyText_(eventPage.properties.Note)).reviewSource;
+      }).find(Boolean) || '';
+      const workType = outgoingWorkType || classifyWorkType_(allEvents, taskId);
       // Review Source only means anything for a Review Fix — an Initial Work
       // event was never preceded by review feedback to attribute. Resolved
       // against the most recent GENUINE close (mostRecentGenuineClose_
@@ -1285,14 +1294,92 @@ function genuineCloseEndedAt_(events) {
   return close ? propertyDate_(close.properties['Ended At']) : null;
 }
 
-// Initial Work: the Task's first-ever active execution (no genuine prior
-// close at all). Review Fix: a re-open whose immediately preceding genuine
-// close left the Task in Review — matching the Approach Decision's own
-// binary rule ("初回の In Progress は Initial Work、Review → In Progress の
-// 再着手は Review Fix") exactly. A re-open following any OTHER status
-// (Blocked, Ready, Backlog) is Initial Work by the same rule — there is no
-// third category, deliberately: see the non-goals above.
-function classifyWorkType_(allEvents) {
+// The most recently closed Time Event that is same-execution churn — a
+// reassignment/duplicate-reconciliation close with NO genuine-boundary
+// marker of its own (see mostRecentGenuineClose_) — regardless of which
+// poll produced it. This is deliberately broader than `otherActor` (an
+// outgoing event closed in THIS SAME poll call): an assignee cleared in one
+// poll and only reassigned in a later one closes the outgoing event with
+// `otherActor` empty by the time the reassignment is observed (nothing is
+// left open to compare against that call), which would otherwise look
+// indistinguishable from a genuinely fresh execution to a caller checking
+// only `otherActor`. Used to extend Work Type/Review Source continuity
+// (ADP-051) across such a gap without touching Execution=/Started-At
+// trust — those already have their own, separately-reasoned-about handling
+// elsewhere in this file, which this deliberately does not touch. Excludes
+// anything mostRecentGenuineClose_ would already claim: a genuine boundary
+// is a PRIOR execution's ending, never same-execution churn, however
+// recently it happens to have closed.
+function mostRecentChurnEvent_(events) {
+  let found = null;
+  (events || []).forEach(function (eventPage) {
+    const endedAt = propertyDate_(eventPage.properties['Ended At']);
+    if (!endedAt) return;
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    const isGenuineBoundary = meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
+    if (isGenuineBoundary) return;
+    if (!found || endedAt.getTime() > propertyDate_(found.properties['Ended At']).getTime()) {
+      found = eventPage;
+    }
+  });
+  return found;
+}
+
+// Sync Log (see logSnapshot_/ensureSyncLogSheet_) records one row per
+// genuinely distinct Task snapshot ever observed by a poll — including
+// passive status wandering (e.g. Review -> Backlog -> Ready) that never
+// opens or closes a Time Event and so leaves no trace there at all. Called
+// from classifyWorkType_ BEFORE this same reconciliation's own logSnapshot_
+// call (see reconcileTaskPage_'s call order), so it only ever sees status
+// history strictly prior to the observation being classified right now.
+// Returns '' when Sync Log has nothing for this Task yet (a brand-new Task,
+// or a manually cleared log) — the caller falls back to the Time-Event-only
+// heuristic in that case.
+function mostRecentLoggedStatus_(taskId) {
+  if (!taskId) return '';
+  const sheet = ensureSyncLogSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return '';
+  // Columns: Snapshot ID, Source, Task ID, Status, Reconciled At, Outcome.
+  const rows = sheet.getRange(2, 3, lastRow - 1, 3).getValues();
+  let latestStatus = '';
+  let latestAt = null;
+  rows.forEach(function (row) {
+    if (String(row[0] || '') !== taskId) return;
+    const at = row[2] instanceof Date ? row[2] : parseTimestamp_(row[2]);
+    if (isNaN(at.getTime())) return;
+    if (!latestAt || at.getTime() > latestAt.getTime()) {
+      latestAt = at;
+      latestStatus = String(row[1] || '');
+    }
+  });
+  return latestStatus;
+}
+
+// Initial Work: the Task's first-ever active execution. Review Fix: a
+// re-open whose immediately preceding observed status was Review — matching
+// the Approach Decision's own binary rule ("初回の In Progress は Initial
+// Work、Review → In Progress の再着手は Review Fix") exactly. A re-open
+// following any OTHER status (Blocked, Ready, Backlog) is Initial Work by
+// the same rule — there is no third category, deliberately: see the
+// non-goals above.
+//
+// Prefers Sync Log's complete status history (mostRecentLoggedStatus_) over
+// the Time-Event-only heuristic (mostRecentGenuineClose_) whenever Sync Log
+// has an answer: a Task that passed through Backlog/Ready — genuinely
+// changing what "the immediately preceding status" means — after its last
+// Time Event closed from Review leaves no trace in Time Events at all
+// (nothing opens or closes on those transitions), so the Time-Event-only
+// view would keep seeing the stale Review close and misclassify the
+// eventual reopen as Review Fix. Sync Log has no such gap: `logSnapshot_`
+// runs for every genuinely distinct Task snapshot regardless of Status, so
+// it directly answers "what status was this Task last actually observed
+// in" rather than inferring it from unrelated Time-Event bookkeeping. Falls
+// back to the Time-Event heuristic only when Sync Log has nothing yet (a
+// brand-new Task, or bootstrap onto a fresh deploy with no prior log).
+function classifyWorkType_(allEvents, taskId) {
+  const loggedStatus = mostRecentLoggedStatus_(taskId);
+  if (loggedStatus) return loggedStatus === DEFAULTS.REVIEW_STATUS ? 'Review Fix' : 'Initial Work';
   const priorClose = mostRecentGenuineClose_(allEvents);
   if (!priorClose) return 'Initial Work';
   const priorEndStatus = parseNoteMeta_(propertyText_(priorClose.properties.Note)).endStatus;

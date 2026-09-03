@@ -2283,6 +2283,144 @@ test('stampExecutionBoundary_ records the status observed when the boundary is r
   }]), 'Review Fix');
 });
 
+test('classifyWorkType_ prefers Sync Log\'s complete status history over the Time-Event-only heuristic', () => {
+  // Codex-reported gap: a Task closes into Review, is later observed in
+  // Backlog (an ordinary re-observation — nothing opens or closes a Time
+  // Event for Backlog/Ready/Review transitions with no open event to touch),
+  // and only THEN reopens to In Progress. The Time-Event-only heuristic
+  // still sees the OLD Review close (nothing else ever touched Time Events)
+  // and would misclassify this as Review Fix — but the Task's real
+  // immediately-preceding status was Backlog, not Review, so this must be
+  // Initial Work. Sync Log has no such gap: logSnapshot_ runs for every
+  // genuinely distinct snapshot regardless of Status.
+  const taskId = 'task-sync-log-1';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('snap-1', 'notion_poll', taskId, 'Review', new Date('2026-08-30T05:00:00.000Z'), 'closed:evt-1');
+  sandbox.logSnapshot_('snap-2', 'notion_poll', taskId, 'Backlog', new Date('2026-08-30T06:00:00.000Z'), 'no_change:Backlog');
+
+  const closedFromReview = eventPage('evt-1', {
+    actor: 'Claude', startedAt: '2026-08-30T04:00:00.000Z', endedAt: '2026-08-30T05:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress',
+  });
+
+  // Without a taskId (no Sync Log lookup possible), the Time-Event-only
+  // heuristic alone resolves to 'Review Fix' — the whole point of this test
+  // is that supplying taskId, and thus consulting Sync Log, changes the
+  // answer to the correct one.
+  assert.equal(sandbox.classifyWorkType_([closedFromReview]), 'Review Fix');
+  assert.equal(sandbox.classifyWorkType_([closedFromReview], taskId), 'Initial Work');
+});
+
+test('classifyWorkType_ falls back to the Time-Event heuristic when Sync Log has nothing for this Task yet', () => {
+  const { sandbox } = harness();
+  const closedFromReview = eventPage('evt-2', {
+    actor: 'Claude', startedAt: '2026-08-30T04:00:00.000Z', endedAt: '2026-08-30T05:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress',
+  });
+  // A brand-new taskId with no Sync Log rows at all — mostRecentLoggedStatus_
+  // returns '', and the caller must not treat that as "Initial Work by
+  // definition"; it must fall back to the Time-Event heuristic instead.
+  assert.equal(sandbox.classifyWorkType_([closedFromReview], 'never-seen-before'), 'Review Fix');
+});
+
+test('mostRecentChurnEvent_ finds same-execution churn regardless of which poll closed it, but never a genuine boundary', () => {
+  const { sandbox } = harness();
+  assert.equal(sandbox.mostRecentChurnEvent_([]), null);
+
+  const churn = eventPage('evt-churn', {
+    actor: 'Claude', startedAt: '2026-08-30T05:00:00.000Z', endedAt: '2026-08-30T05:30:00.000Z',
+    note: 'End Status=In Progress | Reason=reassignment | Work Type=Review Fix | Review Source=Human',
+  });
+  assert.equal(sandbox.mostRecentChurnEvent_([churn]).id, 'evt-churn');
+
+  // A genuine boundary is a PRIOR execution's end, never same-execution
+  // churn — must be excluded even though it closed more recently than the
+  // churn event above.
+  const genuineBoundary = eventPage('evt-boundary', {
+    actor: 'Claude', startedAt: '2026-08-29T05:00:00.000Z', endedAt: '2026-08-30T06:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress',
+  });
+  assert.equal(sandbox.mostRecentChurnEvent_([churn, genuineBoundary]).id, 'evt-churn');
+});
+
+test('Work Type/Review Source survive an assignee cleared in one poll and reassigned only in a later one', () => {
+  // Codex-reported gap: closing an outgoing actor's event and opening the
+  // replacement's, within the SAME poll call, is the only path the original
+  // inheritance logic covered (via `otherActor`). Clearing the assignee
+  // entirely for a while (still In Progress throughout — never touching the
+  // "nothing open" boundary branch, since Status itself never changes) and
+  // only reassigning in a LATER, separate poll call closes the outgoing
+  // event with `otherActor` empty by the time the reassignment is observed
+  // — nothing is left open to compare against in THAT call. Without
+  // mostRecentChurnEvent_, this looks like a genuinely fresh execution:
+  // Work Type gets reclassified from scratch and Review Source spends a
+  // second, unnecessary GitHub call that can attribute the SAME continuous
+  // fix to a different, newer reviewer.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43df020';
+  const outgoingEvent = eventPage('evt-outgoing-2', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: null,
+    note: 'Execution=2026-08-30T05:00:00.000Z | Work Type=Review Fix | Review Source=Codex',
+  });
+  const routes = {
+    [TASKS_QUERY]: () => ({
+      results: [taskPage(taskId, {
+        status: 'In Progress',
+        agent: null, // cleared
+        lastEdited: '2026-08-30T05:30:00.000Z',
+        startedAt: '2026-08-30T05:00:00.000Z',
+      })],
+      has_more: false,
+    }),
+    [EVENTS_QUERY]: () => ({ results: [outgoingEvent], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    // Simulate the write actually landing in Notion: mutate the in-memory
+    // fixture so the NEXT poll call's query sees the closed state, exactly
+    // like re-querying the real API after the first poll's PATCH would.
+    'PATCH *': (body) => {
+      if (body && body.properties && body.properties['Ended At']) {
+        outgoingEvent.properties['Ended At'] = { type: 'date', date: body.properties['Ended At'].date };
+      }
+      if (body && body.properties && body.properties.Note) {
+        outgoingEvent.properties.Note = {
+          type: 'rich_text',
+          rich_text: [{ plain_text: body.properties.Note.rich_text[0].text.content }],
+        };
+      }
+      return {};
+    },
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  // Poll 1: the assignee is cleared. The outgoing event closes via
+  // 'reassignment'; there is no mapped actor to open a new event for.
+  const summary1 = sandbox.pollTaskChanges();
+  assert.match(summary1.outcomes[0], /closed_reassigned:evt-outgoing-2/);
+  assert.ok(outgoingEvent.properties['Ended At'].date, 'expected poll 1 to actually close the outgoing event');
+
+  // Poll 2, a separate call: a new actor is assigned. `otherActor` is now
+  // empty — the outgoing event was already closed by poll 1, not this one.
+  routes[TASKS_QUERY] = () => ({
+    results: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-30T05:00:00.000Z',
+    })],
+    has_more: false,
+  });
+  sandbox.pollTaskChanges();
+
+  const created = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload)).pop();
+  const note = created.properties.Note.rich_text[0].text.content;
+  assert.match(note, /Work Type=Review Fix/, 'must inherit across the poll boundary, not reclassify fresh');
+  assert.match(note, /Review Source=Codex/, 'must inherit across the poll boundary, not call GitHub again');
+});
+
 test('resolveReviewSource_ is Other with no Pull Request, and makes no GitHub call', () => {
   const { sandbox, fetchLog } = harness({ scriptProperties: { GITHUB_TOKEN: 'gh-token' } });
   const task = taskPage('t-1', { status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z' });
