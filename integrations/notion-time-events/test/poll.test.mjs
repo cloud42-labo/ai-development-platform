@@ -7,7 +7,7 @@ const EVENTS_DS = '544b9a17-2653-47aa-b62c-bb52425b3bf2';
 const TASKS_QUERY = 'POST /v1/data_sources/' + TASKS_DS + '/query';
 const EVENTS_QUERY = 'POST /v1/data_sources/' + EVENTS_DS + '/query';
 
-function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T' }) {
+function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T', pullRequest = null }) {
   return {
     object: 'page',
     id,
@@ -27,6 +27,9 @@ function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T'
       'Started At': { type: 'date', date: startedAt ? { start: startedAt } : null },
       Result: { type: 'rich_text', rich_text: [] },
       'Completed At': { type: 'date', date: null },
+      // `Stories & Tasks`.`Pull Request` is a `url` property in the real
+      // schema, not rich_text — see propertyText_'s `url` branch (ADP-051).
+      'Pull Request': { type: 'url', url: pullRequest },
     },
   };
 }
@@ -2158,4 +2161,269 @@ test('a rejected Done rolls Status back with a select write, not a status write'
   assert.equal(patches.length, 1);
   const body = JSON.parse(patches[0].options.payload);
   assert.deepEqual(body.properties.Status, { select: { name: 'Review' } });
+});
+
+// --- ADP-051: Work Type / Review Source ------------------------------------
+//
+// Both fields are informational-only — nothing in reconcileTaskPage_'s
+// control flow (Done gate, idempotency, cursor advancement) reads them back.
+// These tests cover the classification rules and the GitHub best-effort
+// lookup in isolation, plus one end-to-end pass through pollTaskChanges to
+// confirm the wiring actually reaches the created Time Event's Note.
+
+test('classifyReviewerLogin_ recognizes Codex, Claude, a plain human login, an unrelated bot, and blank', () => {
+  const { sandbox } = harness();
+  assert.equal(sandbox.classifyReviewerLogin_('chatgpt-codex-connector'), 'Codex');
+  assert.equal(sandbox.classifyReviewerLogin_('Claude-Review-Bot'), 'Claude');
+  assert.equal(sandbox.classifyReviewerLogin_('komaba'), 'Human');
+  assert.equal(sandbox.classifyReviewerLogin_('dependabot[bot]'), 'Other');
+  assert.equal(sandbox.classifyReviewerLogin_(''), 'Other');
+  assert.equal(sandbox.classifyReviewerLogin_(undefined), 'Other');
+});
+
+test('parseGithubPullRequestUrl_ extracts owner/repo/number and rejects anything else', () => {
+  const { sandbox } = harness();
+  assert.deepEqual(
+    plain(sandbox.parseGithubPullRequestUrl_('https://github.com/cloud42-labo/ai-development-platform/pull/19')),
+    { owner: 'cloud42-labo', repo: 'ai-development-platform', number: '19' }
+  );
+  assert.equal(sandbox.parseGithubPullRequestUrl_(''), null);
+  assert.equal(sandbox.parseGithubPullRequestUrl_('https://github.com/cloud42-labo/repo/issues/3'), null);
+  assert.equal(sandbox.parseGithubPullRequestUrl_(null), null);
+});
+
+test('classifyWorkType_ is Initial Work with no prior genuine close, and Review Fix only right after one that left the Task in Review', () => {
+  const { sandbox } = harness();
+
+  assert.equal(sandbox.classifyWorkType_([]), 'Initial Work');
+
+  const closedFromBlocked = eventPage('evt-1', {
+    actor: 'Claude', startedAt: '2026-08-30T05:00:00.000Z', endedAt: '2026-08-30T06:00:00.000Z',
+    note: 'End Status=Blocked | Reason=left_in_progress',
+  });
+  assert.equal(sandbox.classifyWorkType_([closedFromBlocked]), 'Initial Work');
+
+  const closedFromReview = eventPage('evt-2', {
+    actor: 'Claude', startedAt: '2026-08-30T05:00:00.000Z', endedAt: '2026-08-30T06:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress',
+  });
+  assert.equal(sandbox.classifyWorkType_([closedFromReview]), 'Review Fix');
+
+  // A reassignment/duplicate close is same-execution churn, never a genuine
+  // boundary — even though closeNotionTimeEvent_ always stamps its End
+  // Status as the CURRENT status (here, coincidentally 'Review' would be
+  // impossible for a reassignment since reassignment only fires while still
+  // In Progress — the real risk this guards is a reassignment close being
+  // mistaken for the genuine boundary at all).
+  const reassigned = eventPage('evt-3', {
+    actor: 'Claude', startedAt: '2026-08-30T05:00:00.000Z', endedAt: '2026-08-30T06:00:00.000Z',
+    note: 'End Status=In Progress | Reason=reassignment',
+  });
+  assert.equal(sandbox.classifyWorkType_([reassigned]), 'Initial Work');
+
+  // Ties: the most recent genuine close by Ended At wins, not array order.
+  assert.equal(sandbox.classifyWorkType_([closedFromReview, closedFromBlocked].reverse()), 'Initial Work');
+});
+
+test('resolveReviewSource_ is Other with no Pull Request, and makes no GitHub call', () => {
+  const { sandbox, fetchLog } = harness({ scriptProperties: { GITHUB_TOKEN: 'gh-token' } });
+  const task = taskPage('t-1', { status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z' });
+
+  assert.equal(sandbox.resolveReviewSource_(task, null), 'Other');
+  assert.equal(fetchLog.filter((e) => e.url.includes('api.github.com')).length, 0);
+});
+
+test('resolveReviewSource_ is Other with a Pull Request but no GITHUB_TOKEN configured, and makes no GitHub call', () => {
+  const { sandbox, fetchLog } = harness(); // no GITHUB_TOKEN
+  const task = taskPage('t-2', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(sandbox.resolveReviewSource_(task, null), 'Other');
+  assert.equal(fetchLog.filter((e) => e.url.includes('api.github.com')).length, 0);
+});
+
+test('resolveReviewSource_ picks the most recent qualifying review and ignores ones before the prior close', () => {
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews': () => ([
+      { user: { login: 'komaba' }, submitted_at: '2026-08-29T00:00:00.000Z' }, // before `since` — must be ignored
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-31T00:00:00.000Z' },
+      { user: { login: 'komaba' }, submitted_at: '2026-08-30T12:00:00.000Z' },
+    ]),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-3', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(sandbox.resolveReviewSource_(task, new Date('2026-08-30T00:00:00.000Z')), 'Codex');
+});
+
+test('resolveReviewSource_ degrades to Other, never throws, when the GitHub call itself fails', () => {
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      if (url.includes('api.github.com')) {
+        return { getResponseCode: () => 500, getContentText: () => 'boom' };
+      }
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-4', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.doesNotThrow(function () {
+    assert.equal(sandbox.resolveReviewSource_(task, null), 'Other');
+  });
+});
+
+test('opening the first-ever event stamps Work Type=Initial Work and no Review Source', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('3cafbd82-6f3b-8158-9622-d795b43df001', {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T05:10:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+    })],
+    events: [],
+  });
+
+  sandbox.pollTaskChanges();
+
+  const created = JSON.parse(requestsTo(fetchLog, 'POST', '/v1/pages')[0].options.payload);
+  const note = created.properties.Note.rich_text[0].text.content;
+  assert.match(note, /Work Type=Initial Work/);
+  assert.doesNotMatch(note, /Review Source=/);
+});
+
+test('re-opening a Task whose most recent genuine close left it in Review stamps Work Type=Review Fix and resolves Review Source', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43df002';
+  const routes = {
+    [TASKS_QUERY]: () => ({
+      results: [taskPage(taskId, {
+        status: 'In Progress',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-30T09:00:00.000Z',
+        startedAt: '2026-08-30T09:00:00.000Z',
+        pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+      })],
+      has_more: false,
+    }),
+    [EVENTS_QUERY]: () => ({
+      results: [eventPage('evt-prior', {
+        actor: 'Claude',
+        startedAt: '2026-08-30T05:00:00.000Z',
+        endedAt: '2026-08-30T06:00:00.000Z',
+        note: 'End Status=Review | Reason=left_in_progress',
+      })],
+      has_more: false,
+    }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T07:00:00.000Z' },
+    ]),
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const path = url.replace('https://api.notion.com', '');
+      const handler = routes[method + ' ' + path] || routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options ? JSON.parse(options.payload || '{}') : {}) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+
+  sandbox.pollTaskChanges();
+
+  const created = JSON.parse(requestsTo(fetchLog, 'POST', '/v1/pages')[0].options.payload);
+  const note = created.properties.Note.rich_text[0].text.content;
+  assert.match(note, /Work Type=Review Fix/);
+  assert.match(note, /Review Source=Codex/);
+});
+
+test('a reassignment replacement inherits Work Type and Review Source from the outgoing event without a fresh GitHub call', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43df003';
+  const routes = {
+    [TASKS_QUERY]: () => ({
+      results: [taskPage(taskId, {
+        status: 'In Progress',
+        agent: 'Claude Sonnet', // different from the open event's own actor below
+        lastEdited: '2026-08-30T09:10:00.000Z',
+        startedAt: '2026-08-30T05:00:00.000Z', // unchanged since the original open — still the current execution
+        pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+      })],
+      has_more: false,
+    }),
+    [EVENTS_QUERY]: () => ({
+      results: [eventPage('evt-outgoing', {
+        actor: 'Human', // the OLD actor — mismatches Assigned Agent above (maps to 'Claude'), triggering reassignment
+        startedAt: '2026-08-30T05:00:00.000Z',
+        note: 'Execution=2026-08-30T05:00:00.000Z | Work Type=Review Fix | Review Source=Human',
+      })],
+      has_more: false,
+    }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T07:00:00.000Z' },
+    ]),
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const path = url.replace('https://api.notion.com', '');
+      const handler = routes[method + ' ' + path] || routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options ? JSON.parse(options.payload || '{}') : {}) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+
+  sandbox.pollTaskChanges();
+
+  const created = JSON.parse(requestsTo(fetchLog, 'POST', '/v1/pages')[0].options.payload);
+  const note = created.properties.Note.rich_text[0].text.content;
+  assert.match(note, /Work Type=Review Fix/);
+  assert.match(note, /Review Source=Human/, 'expected the outgoing event\'s own Review Source, not a freshly resolved one');
+  assert.equal(fetchLog.filter((e) => e.url.includes('api.github.com')).length, 0, 'inheriting must not call GitHub again');
+});
+
+test('upsertSheetProjection_ writes Work Type and Review Source into their own trailing columns', () => {
+  const { sandbox, spreadsheet } = harness();
+  const event = eventPage('evt-proj', {
+    actor: 'Claude',
+    startedAt: '2026-08-30T05:00:00.000Z',
+    endedAt: '2026-08-30T06:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress | Work Type=Review Fix | Review Source=Codex',
+  });
+
+  sandbox.setup(); // writes the header row, including the two new trailing columns
+  sandbox.upsertSheetProjection_(event, 'task-1', 'My Task', 'https://notion.so/task-1', 'Review', 'user:1', 'snap-1');
+
+  const sheet = spreadsheet.getSheetByName('Time Events');
+  assert.deepEqual(plain(sheet.rows[0].slice(13, 15)), ['Work Type', 'Review Source']);
+  assert.deepEqual(plain(sheet.rows[1].slice(13, 15)), ['Review Fix', 'Codex']);
 });

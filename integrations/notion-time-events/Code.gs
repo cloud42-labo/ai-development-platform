@@ -833,7 +833,38 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const executionId = otherActor.length
         ? outgoingExecutionId
         : startAt.toISOString();
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId);
+      // Work Type / Review Source (ADP-051): purely informational fields for
+      // Task Time Events reporting — read by nothing in this file's own
+      // control flow (Done gate, idempotency, cursor advancement), so a
+      // classification miss here costs a mis-labeled report row, never a
+      // correctness bug. A reassignment replacement inherits both from the
+      // outgoing event exactly like Execution= above (reassigning never
+      // starts a new execution, so it never changes what kind of work this
+      // is); only a genuinely first-ever-open computes them fresh. Legacy
+      // outgoing events (predating this field) inherit nothing (both find()
+      // calls yield ''), so the first poll to touch such a Task after this
+      // upgrade classifies it fresh instead of propagating a blank forever.
+      const outgoingWorkType = otherActor.length
+        ? (otherActor.map(function (eventPage) {
+            return parseNoteMeta_(propertyText_(eventPage.properties.Note)).workType;
+          }).find(Boolean) || '')
+        : '';
+      const outgoingReviewSource = otherActor.length
+        ? (otherActor.map(function (eventPage) {
+            return parseNoteMeta_(propertyText_(eventPage.properties.Note)).reviewSource;
+          }).find(Boolean) || '')
+        : '';
+      const workType = outgoingWorkType || classifyWorkType_(allEvents);
+      // Review Source only means anything for a Review Fix — an Initial Work
+      // event was never preceded by review feedback to attribute. Resolved
+      // against the most recent GENUINE close (mostRecentGenuineClose_
+      // inside classifyWorkType_'s own lookup, recomputed here since
+      // classifyWorkType_ does not expose it) so only review activity after
+      // the Task actually entered Review counts toward this fix.
+      const reviewSource = workType === 'Review Fix'
+        ? (outgoingReviewSource || resolveReviewSource_(task, genuineCloseEndedAt_(allEvents)))
+        : '';
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, workType, reviewSource);
       actions.push('opened:' + created.id);
     }
   } else if (openEvents.length) {
@@ -1196,6 +1227,139 @@ function stampExecutionBoundary_(eventPage, executionId) {
   });
 }
 
+// ADP-051: Work Type / Review Source classification. Both are informational
+// fields for Task Time Events reporting (Review Fix Cost, Review Fix Ratio,
+// Reviewer Cost — see README) — nothing in this file's own reconciliation
+// control flow (Done gate, idempotency, cursor advancement) ever reads them
+// back, so a classification miss costs a mis-labeled report row, never a
+// correctness bug. That is a deliberate scope boundary, not an oversight: see
+// the Notion Task's own non-goals (no new Time Events DB, no per-comment
+// timers, no scoring model beyond this).
+
+// The most recently closed Time Event that represents a genuine execution
+// boundary — the Task actually left its status there — as opposed to an
+// internal same-execution churn event (a reassignment or duplicate-
+// reconciliation close, which closeNotionTimeEvent_ always stamps with
+// End Status = the CURRENT status, i.e. In Progress, not whatever the Task's
+// status genuinely was before this open). Deliberately independent of the
+// `mostRecentClosed` lookup in reconcileAuthoritativeTimeEvents_'s own
+// no-open-events branch just above (that one intentionally considers ANY
+// closed event, any reason, to decide whether IT needs a retroactive
+// Boundary stamp) — the two answer different questions and must not be
+// merged into one helper. Returns null when no genuine boundary exists yet
+// (this is the Task's first-ever execution).
+function mostRecentGenuineClose_(events) {
+  let found = null;
+  (events || []).forEach(function (eventPage) {
+    const endedAt = propertyDate_(eventPage.properties['Ended At']);
+    if (!endedAt) return;
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    const isGenuine = meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
+    if (!isGenuine) return;
+    if (!found || endedAt.getTime() > propertyDate_(found.properties['Ended At']).getTime()) {
+      found = eventPage;
+    }
+  });
+  return found;
+}
+
+function genuineCloseEndedAt_(events) {
+  const close = mostRecentGenuineClose_(events);
+  return close ? propertyDate_(close.properties['Ended At']) : null;
+}
+
+// Initial Work: the Task's first-ever active execution (no genuine prior
+// close at all). Review Fix: a re-open whose immediately preceding genuine
+// close left the Task in Review — matching the Approach Decision's own
+// binary rule ("初回の In Progress は Initial Work、Review → In Progress の
+// 再着手は Review Fix") exactly. A re-open following any OTHER status
+// (Blocked, Ready, Backlog) is Initial Work by the same rule — there is no
+// third category, deliberately: see the non-goals above.
+function classifyWorkType_(allEvents) {
+  const priorClose = mostRecentGenuineClose_(allEvents);
+  if (!priorClose) return 'Initial Work';
+  const priorEndStatus = parseNoteMeta_(propertyText_(priorClose.properties.Note)).endStatus;
+  return priorEndStatus === DEFAULTS.REVIEW_STATUS ? 'Review Fix' : 'Initial Work';
+}
+
+// Best-effort attribution of a Review Fix to whoever most recently reviewed
+// the Task's own Pull Request: Codex / Claude / Human / Other. Read-only
+// against GitHub and never required for the Notion reconciliation this
+// integration exists to run — any reason this can't produce a real answer
+// (no Pull Request recorded, an unparseable URL, no GITHUB_TOKEN configured,
+// a network or API error, an unexpected response shape) degrades to 'Other'
+// rather than ever throwing out of here or blocking the underlying Time
+// Event from being created.
+function resolveReviewSource_(task, sincePriorClose) {
+  try {
+    const parsed = parseGithubPullRequestUrl_(propertyText_(task.properties['Pull Request']));
+    if (!parsed) return 'Other';
+    const token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
+    if (!token) return 'Other';
+    const reviews = githubRequest_(
+      token,
+      '/repos/' + parsed.owner + '/' + parsed.repo + '/pulls/' + parsed.number + '/reviews'
+    );
+    if (!Array.isArray(reviews)) return 'Other';
+    const sinceMs = sincePriorClose ? sincePriorClose.getTime() : 0;
+    let latest = null;
+    reviews.forEach(function (review) {
+      if (!review || !review.submitted_at) return;
+      const submittedAtMs = parseTimestamp_(review.submitted_at).getTime();
+      // Only review activity after the Task's own most recent genuine close
+      // (when it actually entered Review) is what this specific fix
+      // responds to — earlier reviews belong to a prior execution.
+      if (submittedAtMs < sinceMs) return;
+      if (!latest || submittedAtMs >= latest.submittedAtMs) {
+        latest = { submittedAtMs: submittedAtMs, login: (review.user && review.user.login) || '' };
+      }
+    });
+    return latest ? classifyReviewerLogin_(latest.login) : 'Other';
+  } catch (err) {
+    return 'Other';
+  }
+}
+
+function classifyReviewerLogin_(login) {
+  const normalized = String(login || '').toLowerCase();
+  if (!normalized) return 'Other';
+  if (normalized.indexOf('codex') >= 0) return 'Codex';
+  if (normalized.indexOf('claude') >= 0) return 'Claude';
+  // A recognizable bot login that is neither of the above (dependabot,
+  // github-actions[bot], …) is automation but not one this integration
+  // knows how to name — 'Other', not 'Human'.
+  if (normalized.indexOf('[bot]') >= 0) return 'Other';
+  return 'Human';
+}
+
+function parseGithubPullRequestUrl_(url) {
+  const match = /github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/i.exec(String(url || ''));
+  if (!match) return null;
+  return { owner: match[1], repo: match[2], number: match[3] };
+}
+
+// GitHub counterpart to notionRequest_. GITHUB_TOKEN is optional — unlike
+// NOTION_TOKEN, its absence never fails a run outright (resolveReviewSource_
+// checks for it before ever calling here); this only throws once a call was
+// actually attempted with a token configured, exactly like notionRequest_.
+function githubRequest_(token, path) {
+  const options = {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/vnd.github+json',
+    },
+    muteHttpExceptions: true,
+  };
+  const response = UrlFetchApp.fetch('https://api.github.com' + path, options);
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+  if (code < 200 || code >= 300) {
+    throw new Error('GitHub API failed: GET ' + path + ' HTTP ' + code);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
 function updateTaskStatus_(taskId, statusName) {
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(taskId), {
     properties: {
@@ -1204,12 +1368,14 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, workType, reviewSource) {
   const note = buildNote_({
     source: 'notion_reconcile',
     execution: executionId,
     snapshotId: snapshotId,
     changedBy: changedBy,
+    workType: workType,
+    reviewSource: reviewSource,
   });
 
   return notionRequest_('post', '/v1/pages', {
@@ -1292,7 +1458,7 @@ function upsertSheetProjection_(eventPage, taskId, taskTitle, taskUrl, currentSt
   const changedBy = meta.changedBy || fallbackChangedBy || '';
   const sourceSnapshotId = meta.snapshotId || fallbackSnapshotId || '';
 
-  sheet.getRange(row, 1, 1, 13).setValues([[
+  sheet.getRange(row, 1, 1, 15).setValues([[
     eventPage.id,
     taskId,
     taskTitle,
@@ -1306,6 +1472,8 @@ function upsertSheetProjection_(eventPage, taskId, taskTitle, taskUrl, currentSt
     taskUrl || ('https://www.notion.so/' + taskId.replace(/-/g, '')),
     sourceSnapshotId,
     new Date(),
+    meta.workType || '',
+    meta.reviewSource || '',
   ]]);
   sheet.getRange(row, 7).setFormula('=IF(OR(E' + row + '="",F' + row + '=""),"",24*(F' + row + '-E' + row + '))');
 }
@@ -1482,6 +1650,10 @@ function propertyText_(property) {
   if (property.type === 'status') return property.status ? property.status.name : '';
   if (property.type === 'title') return (property.title || []).map(function (x) { return x.plain_text || ''; }).join('');
   if (property.type === 'rich_text') return (property.rich_text || []).map(function (x) { return x.plain_text || ''; }).join('');
+  // `Stories & Tasks`.`Pull Request` is a `url` property (see resolveReviewSource_,
+  // ADP-051) — its value sits directly on `.url`, not inside a nested
+  // named object the way select/status do.
+  if (property.type === 'url') return property.url || '';
   return '';
 }
 
@@ -1503,6 +1675,8 @@ function buildNote_(fields) {
   if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
   if (fields.changedBy) parts.push('Changed By=' + fields.changedBy);
   if (fields.resultFingerprint) parts.push('Result Fingerprint=' + fields.resultFingerprint);
+  if (fields.workType) parts.push('Work Type=' + fields.workType);
+  if (fields.reviewSource) parts.push('Review Source=' + fields.reviewSource);
   return parts.join(' | ');
 }
 
@@ -1548,6 +1722,12 @@ function parseNoteMeta_(note) {
     // fingerprint match that noteField_'s last-occurrence-only view can't
     // see, since it's no longer the last "Result Fingerprint=" segment.
     resultFingerprints: noteFieldAll_(note, 'Result Fingerprint'),
+    // ADP-051: stamped once, at creation, same inheritance rule as
+    // Execution= above (a reassignment replacement inherits the outgoing
+    // event's value unchanged). Blank on legacy events that predate this
+    // field. See classifyWorkType_ / resolveReviewSource_.
+    workType: noteField_(note, 'Work Type'),
+    reviewSource: noteField_(note, 'Review Source'),
   };
 }
 
@@ -1601,7 +1781,7 @@ function ensureProjectionHeaders_() {
   const headers = [
     'Event ID', 'Task ID', 'Task Title', 'Actor', 'Started At', 'Ended At',
     'Duration (h)', 'Start Status', 'End Status', 'Changed By', 'Notion URL',
-    'Source Snapshot ID', 'Recorded At'
+    'Source Snapshot ID', 'Recorded At', 'Work Type', 'Review Source'
   ];
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
 }

@@ -43,6 +43,25 @@ Actor mapping:
 
 Normal conversation and non-Task activity are outside this integration because no managed Task state is reconciled.
 
+## Reporting: Work Type & Review Source (ADP-051)
+
+Every newly opened Time Event also carries two informational fields, purely for reporting — neither is read back by any reconciliation control flow (Done gate, idempotency, cursor advancement), so a classification miss here costs a mis-labeled report row, never a correctness bug:
+
+- **Work Type** — `Initial Work` for a Task's first-ever execution, `Review Fix` when the immediately preceding genuine close (the Task actually leaving a status, not an internal reassignment/duplicate-cleanup churn event — see `mostRecentGenuineClose_`) left it in `Review`. Any other preceding status (`Blocked`, `Ready`, `Backlog`) also classifies as `Initial Work` — there is deliberately no third category.
+- **Review Source** — `Codex` / `Claude` / `Human` / `Other`, resolved only for a `Review Fix` (an `Initial Work` event was never preceded by review feedback to attribute). Best-effort: reads the Task's own `Pull Request` URL, fetches that PR's reviews from the GitHub REST API (`GET /repos/{owner}/{repo}/pulls/{number}/reviews`), and classifies the most recent reviewer login submitted after the prior genuine close by substring match (`codex` → Codex, `claude` → Claude, a `[bot]` login that matches neither → Other, anything else → Human). Degrades to `Other` — never throws, never blocks the underlying Time Event from being created — when there is no `Pull Request` recorded, no `GITHUB_TOKEN` configured, the GitHub call fails, or the response shape is unexpected.
+- A reassignment replacement **inherits** both fields from the outgoing event unchanged (reassigning never starts a new execution, so it never changes what kind of work this is, and never re-triggers a GitHub call) — same rule `Execution=` already follows.
+- Both are stored in the Time Event's `Note` (`Work Type=` / `Review Source=`, alongside the existing markers — see `buildNote_`/`parseNoteMeta_`) and projected into their own trailing Sheet columns (see below). Blank on legacy events created before this field existed.
+
+`GITHUB_TOKEN` (Script Property, optional) is a GitHub personal access token with `pull_requests: read` on the repos this integration's Tasks reference. Its absence is not an error: Review Source simply always resolves to `Other`. Never set it from committed code.
+
+Report the three metrics ADP-051 defines directly from the Sheet's `Work Type` (col N) / `Review Source` (col O) / `Duration (h)` (col G) columns — no new Time Events database, no per-comment timers:
+
+- `Review Fix Cost` = `SUMIF(N:N, "Review Fix", G:G)`
+- `Review Fix Ratio` = `SUMIF(N:N, "Review Fix", G:G) / SUMIF(N:N, "Initial Work", G:G)`
+- `Reviewer Cost` (e.g. Codex's share) = `SUMIFS(G:G, N:N, "Review Fix", O:O, "Codex")`
+
+Scope by Task with an added `SUMIFS(..., B:B, "<Task ID>")`/`FILTER` clause, or by Task Title (col C) for a human-readable pivot. Review Round is not tracked as a separate field — it is the count of `Review Fix` rows for a Task (`COUNTIFS(B:B, "<Task ID>", N:N, "Review Fix")`).
+
 ## Why there is no webhook receiver
 
 The earlier design in this directory used a Notion webhook subscription. Notion proves a webhook delivery's authenticity **only** through the `X-Notion-Signature` request header, computed as HMAC-SHA256 of the raw body under the subscription's verification token.
@@ -86,7 +105,7 @@ Tabs:
 
 Spreadsheet timezone must remain `Asia/Tokyo`.
 
-`Event ID` is the authoritative Notion Task Time Event page ID. `Source Snapshot ID` is a hash of authoritative Task state used only for idempotency/projection diagnostics.
+`Event ID` is the authoritative Notion Task Time Event page ID. `Source Snapshot ID` is a hash of authoritative Task state used only for idempotency/projection diagnostics. The two trailing columns, `Work Type` and `Review Source`, are the reporting fields described above — see that section for the SUMIF/SUMIFS formulas that turn them into Review Fix Cost / Review Fix Ratio / Reviewer Cost.
 
 ## Notion connection requirements
 
@@ -109,6 +128,7 @@ Creating Task Time Events through the Notion API requires **Insert Content** cap
 3. Confirm `NOTION_TOKEN` is present under **Project Settings → Script Properties**. Add it there through the editor UI if it is missing; never set it from committed code.
 4. Run `setup()` once. It records the spreadsheet/data-source IDs, ensures the `Time Events` and `Sync Log` tabs, and installs the `pollTaskChanges` time-driven trigger. Authorize the script when prompted.
 5. Run `showSetupInfo()` and confirm `notionTokenConfigured: true`, `syncTriggersInstalled: 1`, and the expected `pollIntervalMinutes`.
+6. Optionally add `GITHUB_TOKEN` (Script Property) to enable Review Source resolution — see **Reporting: Work Type & Review Source** above. Skipping this is safe: Review Source then always resolves to `Other`.
 
 There is nothing to deploy: the project is not a Web App. If a Web App deployment from the earlier webhook design still exists, archive it (**Deploy → Manage deployments → Archive**) so no public endpoint remains.
 
