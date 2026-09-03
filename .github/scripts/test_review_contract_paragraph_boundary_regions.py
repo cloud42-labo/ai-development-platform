@@ -42,6 +42,27 @@ class CodeSpanLookaheadBoundaryRegression(unittest.TestCase):
         for name in REQUIRED_SECTIONS:
             self.assertIn(f"missing heading: {name}", failures)
 
+    def test_lookahead_stops_when_first_candidate_is_setext_underline(self):
+        # The unmatched backtick is on the Setext heading text line itself.
+        # Lookahead therefore STARTS on the underline. That underline closes
+        # the current paragraph immediately, so a later matching backtick
+        # cannot retroactively turn the opener into a multiline code span.
+        body = (
+            "Text with unmatched `\n"
+            "====================\n"
+            "<!--\n"
+            "later matching backtick `\n"
+            "\n"
+            "### Purpose / Contract\n\nReal purpose.\n"
+            "### Invariants\n\n- Real invariant.\n"
+            "### Adversarial Scenarios\n\n- Real scenario.\n"
+            "### Validation\n\n- Real validation.\n"
+            "### Known Limitations / Non-goals\n\n- Real limitation.\n"
+        )
+        failures = validate(body)
+        for name in REQUIRED_SECTIONS:
+            self.assertIn(f"missing heading: {name}", failures)
+
 
 class Type7SetextBoundaryRegression(unittest.TestCase):
     def test_type7_can_start_right_after_a_setext_heading(self):
