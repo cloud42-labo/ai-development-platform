@@ -2389,6 +2389,25 @@ test('mostRecentChurnEvent_ finds same-execution churn regardless of which poll 
   assert.equal(sandbox.mostRecentChurnEvent_([oldChurnInsideClosedExecution, priorGenuineClose]), null);
 });
 
+test('mostRecentChurnEvent_ still finds a churn that ties exactly with the prior genuine close\'s own Ended At', () => {
+  // Codex-reported gap in the cutoff above: `Ended At` is minute-granular,
+  // so a reopen whose assignee is cleared within the same Notion-reported
+  // minute the PRIOR execution's genuine close landed in can tie exactly
+  // with it. That churn still belongs to the CURRENT execution — a
+  // strictly-before cutoff must not exclude it on a mere timestamp tie.
+  const { sandbox } = harness();
+  const tiedAt = '2026-08-30T06:00:00.000Z';
+  const priorGenuineClose = eventPage('evt-prior-close-2', {
+    actor: 'Human', startedAt: '2026-08-30T05:00:00.000Z', endedAt: tiedAt,
+    note: 'End Status=Review | Reason=left_in_progress',
+  });
+  const tiedChurn = eventPage('evt-tied-churn', {
+    actor: 'Claude', startedAt: tiedAt, endedAt: tiedAt,
+    note: 'End Status=In Progress | Reason=reassignment | Work Type=Review Fix | Review Source=Codex',
+  });
+  assert.equal(sandbox.mostRecentChurnEvent_([priorGenuineClose, tiedChurn]).id, 'evt-tied-churn');
+});
+
 test('Work Type/Review Source survive an assignee cleared in one poll and reassigned only in a later one', () => {
   // Codex-reported gap: closing an outgoing actor's event and opening the
   // replacement's, within the SAME poll call, is the only path the original

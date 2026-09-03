@@ -1321,13 +1321,23 @@ function mostRecentChurnEvent_(events) {
   // would silently inherit a stale prior execution's Work Type/Review
   // Source instead of computing fresh, potentially mislabeling every
   // subsequent Review Fix as Initial Work.
+  // Strictly-before, not on-or-before: `Ended At` is minute-granular, so a
+  // reopen whose assignee is cleared within the same Notion-reported minute
+  // the prior execution's own genuine close landed in can tie exactly with
+  // it. That churn is still the CURRENT execution's — excluding it on a
+  // tie would wrongly treat it as prior-execution evidence and force an
+  // unnecessary fresh classification (and, for Review Source, a second
+  // GitHub call that can attribute one execution's two intervals to
+  // different reviewers) — the same class of coincidental-tie ambiguity
+  // enforceDoneGate_'s own tie-seed already treats as "equally current"
+  // rather than arbitrarily excluding.
   const cutoff = mostRecentGenuineClose_(events);
   const cutoffMs = cutoff ? propertyDate_(cutoff.properties['Ended At']).getTime() : null;
   let found = null;
   (events || []).forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
     if (!endedAt) return;
-    if (cutoffMs !== null && endedAt.getTime() <= cutoffMs) return;
+    if (cutoffMs !== null && endedAt.getTime() < cutoffMs) return;
     const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
     const isGenuineBoundary = meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
     if (isGenuineBoundary) return;

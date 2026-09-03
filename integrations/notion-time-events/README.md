@@ -60,7 +60,7 @@ Report the three metrics ADP-051 defines directly from the Sheet's `Work Type` (
 - `Review Fix Ratio` = `SUMIF(N:N, "Review Fix", G:G) / SUMIF(N:N, "Initial Work", G:G)`
 - `Reviewer Cost` (e.g. Codex's share) = `SUMIFS(G:G, N:N, "Review Fix", O:O, "Codex")`
 
-Scope by Task with an added `SUMIFS(..., B:B, "<Task ID>")`/`FILTER` clause, or by Task Title (col C) for a human-readable pivot. Review Round is not tracked as a separate field — it is the count of `Review Fix` rows for a Task (`COUNTIFS(B:B, "<Task ID>", N:N, "Review Fix")`).
+Scope by Task with an added `SUMIFS(..., B:B, "<Task ID>")`/`FILTER` clause, or by Task Title (col C) for a human-readable pivot. Review Round is not tracked as a separate field — per the Approach Decision, it is the count of `Review Fix` rows for a Task (`COUNTIFS(B:B, "<Task ID>", N:N, "Review Fix")`). **Caveat**: this counts `Review Fix` *rows* (Time Events), not distinct review-fix executions — a reassignment mid-fix (Work Type/Review Source are inherited across it unchanged, see "Behavior") opens a second `Review Fix` row for the same continuous fix, so a round reassigned once counts as 2 here, not 1. Exact round counts would need a distinct-`Execution=` count instead, which requires parsing the Note field or projecting `Execution=` into its own Sheet column — deliberately out of scope per the same Approach Decision ("no separate field").
 
 ## Why there is no webhook receiver
 
