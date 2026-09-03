@@ -868,13 +868,13 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       }).find(Boolean) || '';
       const workType = outgoingWorkType || classifyWorkType_(allEvents, taskId);
       // Review Source only means anything for a Review Fix — an Initial Work
-      // event was never preceded by review feedback to attribute. Resolved
-      // against the most recent GENUINE close (mostRecentGenuineClose_
-      // inside classifyWorkType_'s own lookup, recomputed here since
-      // classifyWorkType_ does not expose it) so only review activity after
-      // the Task actually entered Review counts toward this fix.
+      // event was never preceded by review feedback to attribute. The
+      // "since" cutoff mirrors classifyWorkType_'s own Sync-Log-first
+      // preference (reviewFixSinceTimestamp_) so review activity is scoped
+      // to the SAME Review period that produced this fix, not a stale
+      // earlier one a passive Backlog/Ready detour left behind.
       const reviewSource = workType === 'Review Fix'
-        ? (outgoingReviewSource || resolveReviewSource_(task, genuineCloseEndedAt_(allEvents)))
+        ? (outgoingReviewSource || resolveReviewSource_(task, reviewFixSinceTimestamp_(allEvents, taskId)))
         : '';
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, workType, reviewSource);
       actions.push('opened:' + created.id);
@@ -1372,15 +1372,14 @@ function mostRecentChurnEvent_(events) {
 // Returns '' when Sync Log has nothing for this Task yet (a brand-new Task,
 // or a manually cleared log) — the caller falls back to the Time-Event-only
 // heuristic in that case.
-function mostRecentLoggedStatus_(taskId) {
-  if (!taskId) return '';
+function mostRecentLoggedEntry_(taskId) {
+  if (!taskId) return null;
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return '';
+  if (lastRow < 2) return null;
   // Columns: Snapshot ID, Source, Task ID, Status, Reconciled At, Outcome.
   const rows = sheet.getRange(2, 3, lastRow - 1, 3).getValues();
-  let latestStatus = '';
-  let latestAt = null;
+  let latest = null;
   rows.forEach(function (row) {
     if (String(row[0] || '') !== taskId) return;
     const status = String(row[1] || '');
@@ -1402,12 +1401,37 @@ function mostRecentLoggedStatus_(taskId) {
     // later-appended row (processed later in this same forEach, since
     // array order already matches append order) is the more recent
     // observation and must win, not whichever happened to be seen first.
-    if (!latestAt || at.getTime() >= latestAt.getTime()) {
-      latestAt = at;
-      latestStatus = status;
+    if (!latest || at.getTime() >= latest.at.getTime()) {
+      latest = { status: status, at: at };
     }
   });
-  return latestStatus;
+  return latest;
+}
+
+function mostRecentLoggedStatus_(taskId) {
+  const entry = mostRecentLoggedEntry_(taskId);
+  return entry ? entry.status : '';
+}
+
+// Review Source (ADP-051) must only count review activity from the SAME
+// Review period that produced this fix, not a stale, already-superseded
+// earlier one — mirrors classifyWorkType_'s own Sync-Log-first preference
+// exactly, and for the identical reason: a Task that passed through
+// Backlog/Ready (untouched by any Time Event) before this reopen has no
+// Time Event marking when the CURRENT Review period began, only the
+// genuine close from whichever earlier Review period a Time Event happened
+// to close from. Using that stale timestamp as the "since" cutoff would
+// let a review submitted during that earlier, unrelated Review period
+// attribute cost to a reviewer who had nothing to do with this fix. Reuses
+// the exact same Sync Log entry classifyWorkType_ itself relied on to call
+// this a Review Fix in the first place — never an independent lookup that
+// could disagree with it — and falls back to the Time-Event heuristic's
+// own cutoff only when Sync Log had no answer at all, same as
+// classifyWorkType_'s own fallback.
+function reviewFixSinceTimestamp_(allEvents, taskId) {
+  const logged = mostRecentLoggedEntry_(taskId);
+  if (logged && logged.status === DEFAULTS.REVIEW_STATUS) return logged.at;
+  return genuineCloseEndedAt_(allEvents);
 }
 
 // Initial Work: the Task's first-ever active execution. Review Fix: a

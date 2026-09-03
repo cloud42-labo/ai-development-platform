@@ -2311,6 +2311,38 @@ test('classifyWorkType_ prefers Sync Log\'s complete status history over the Tim
   assert.equal(sandbox.classifyWorkType_([closedFromReview], taskId), 'Initial Work');
 });
 
+test('reviewFixSinceTimestamp_ uses the current Review period\'s own start, not a stale Time Event close from an earlier one', () => {
+  // Codex-reported gap: classifyWorkType_ was fixed to use Sync Log (the
+  // Task's real status history) instead of the Time-Event-only heuristic,
+  // but the Review Source "since" cutoff still used the old heuristic
+  // (genuineCloseEndedAt_) even after that fix. A Task that closes into
+  // Review, passes through Backlog/Ready (no Time Event touched), and
+  // re-enters Review before finally reopening has its CURRENT Review
+  // period begin later than whatever Time Event last closed from the
+  // FIRST, superseded Review period — using that stale close as "since"
+  // would let a review submitted during the first period attribute cost to
+  // a reviewer who had nothing to do with this actual fix.
+  const taskId = 'task-sync-log-4';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('s1', 'notion_poll', taskId, 'Review', new Date('2026-08-30T05:00:00.000Z'), 'closed:evt-old');
+  sandbox.logSnapshot_('s2', 'notion_poll', taskId, 'Backlog', new Date('2026-08-30T06:00:00.000Z'), 'no_change:Backlog');
+  sandbox.logSnapshot_('s3', 'notion_poll', taskId, 'Review', new Date('2026-08-30T07:00:00.000Z'), 'no_change:Review');
+
+  const staleClose = eventPage('evt-old', {
+    actor: 'Claude', startedAt: '2026-08-30T04:00:00.000Z', endedAt: '2026-08-30T05:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress',
+  });
+
+  const since = sandbox.reviewFixSinceTimestamp_([staleClose], taskId);
+  assert.equal(new Date(since).toISOString(), '2026-08-30T07:00:00.000Z', 'expected the CURRENT Review period\'s own start, not the stale 05:00 close');
+
+  // Falls back to the Time-Event heuristic's own cutoff when Sync Log has
+  // no Review entry for this Task at all (mirrors classifyWorkType_'s own
+  // fallback exactly).
+  const sinceNoLog = sandbox.reviewFixSinceTimestamp_([staleClose], 'never-seen-before');
+  assert.equal(new Date(sinceNoLog).toISOString(), '2026-08-30T05:00:00.000Z');
+});
+
 test('classifyWorkType_ falls back to the Time-Event heuristic when Sync Log has nothing for this Task yet', () => {
   const { sandbox } = harness();
   const closedFromReview = eventPage('evt-2', {
