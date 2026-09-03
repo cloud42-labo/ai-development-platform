@@ -22,7 +22,9 @@
 - Recurrence by rule family:
 - Preventive Tasks — Open / Done / Blocked:
 - Unresolved preventive-work age:
+- Trigger-to-detection latency — median/typical / notable outliers:
 - Detection path — Human / AI self / other AI / automated:
+- False gates by failure mode — already-satisfied evidence / downstream-work promotion / optional-validation promotion:
 - Owner/Human escalations:
 - Controls upgraded to executable gates/automation:
 
@@ -42,7 +44,10 @@
 
 ## Postmortem closure candidates
 
-For each candidate, confirm: root cause recorded; preventive Task Done; durable control updated; representative retest passed; recurrence correct; no residual corrective action.
+For each candidate, confirm the standard sections and independent review are complete, then use the applicable closure path:
+
+- **Preventive-action path:** root cause recorded; preventive Task Done; durable control updated; representative retest passed; recurrence correct; no residual corrective action.
+- **No-action path:** independent reviewer explicitly approves the evidence-backed rationale that no preventive action is warranted; existing-control/residual-risk evidence is recorded; no unresolved corrective action or required risk-acceptance decision remains.
 
 - 
 
