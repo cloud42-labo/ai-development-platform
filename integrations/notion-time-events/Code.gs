@@ -1296,10 +1296,7 @@ function resolveReviewSource_(task, sincePriorClose) {
     if (!parsed) return 'Other';
     const token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
     if (!token) return 'Other';
-    const reviews = githubRequest_(
-      token,
-      '/repos/' + parsed.owner + '/' + parsed.repo + '/pulls/' + parsed.number + '/reviews'
-    );
+    const reviews = fetchAllGithubReviews_(token, parsed);
     if (!Array.isArray(reviews)) return 'Other';
     const sinceMs = sincePriorClose ? sincePriorClose.getTime() : 0;
     let latest = null;
@@ -1318,6 +1315,31 @@ function resolveReviewSource_(task, sincePriorClose) {
   } catch (err) {
     return 'Other';
   }
+}
+
+// GitHub paginates /reviews (30 per page by default) — a single request
+// only ever sees the first page. A PR with more reviews than that would
+// silently hide its true latest reviewer on a later page, misattributing
+// Review Source to an older reviewer instead (or 'Other', if nothing on the
+// first page passes the since-cutoff) — exactly the corruption the reviewer-
+// cost metrics this change introduces exist to avoid. Walks every page at
+// the maximum page size until a short page signals the end, capped by
+// GITHUB_REVIEWS_PAGE_SAFETY_LIMIT (mirroring paginateNotionQuery_'s own
+// safety limit) so a pathological review count cannot loop unbounded.
+const GITHUB_REVIEWS_PAGE_SAFETY_LIMIT = 20; // 20 * 100 = 2000 reviews — generous for one PR
+
+function fetchAllGithubReviews_(token, parsed) {
+  const all = [];
+  for (let page = 1; page <= GITHUB_REVIEWS_PAGE_SAFETY_LIMIT; page++) {
+    const pageResults = githubRequest_(
+      token,
+      '/repos/' + parsed.owner + '/' + parsed.repo + '/pulls/' + parsed.number + '/reviews?per_page=100&page=' + page
+    );
+    if (!Array.isArray(pageResults) || pageResults.length === 0) break;
+    all.push.apply(all, pageResults);
+    if (pageResults.length < 100) break; // a short page is necessarily the last one
+  }
+  return all;
 }
 
 function classifyReviewerLogin_(login) {

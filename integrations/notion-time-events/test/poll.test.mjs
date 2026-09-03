@@ -2248,7 +2248,7 @@ test('resolveReviewSource_ picks the most recent qualifying review and ignores o
   const routes = {
     [TASKS_QUERY]: () => ({ results: [], has_more: false }),
     [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
-    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews': () => ([
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
       { user: { login: 'komaba' }, submitted_at: '2026-08-29T00:00:00.000Z' }, // before `since` — must be ignored
       { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-31T00:00:00.000Z' },
       { user: { login: 'komaba' }, submitted_at: '2026-08-30T12:00:00.000Z' },
@@ -2269,6 +2269,70 @@ test('resolveReviewSource_ picks the most recent qualifying review and ignores o
   });
 
   assert.equal(sandbox.resolveReviewSource_(task, new Date('2026-08-30T00:00:00.000Z')), 'Codex');
+});
+
+test('resolveReviewSource_ walks every page of Reviews instead of only the first', () => {
+  // Regression for the Codex-reported gap: GitHub paginates /reviews (30 per
+  // page by default) — the true latest reviewer can sit on a later page,
+  // which a single unpaginated request would never see, misattributing
+  // Review Source to whatever stale reviewer happens to be on page 1.
+  const page1 = [];
+  for (let i = 0; i < 100; i++) {
+    page1.push({ user: { login: 'komaba' }, submitted_at: '2026-08-30T00:0' + (i % 10) + ':00.000Z' });
+  }
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => page1,
+    // The genuinely latest review sits on page 2, the only page short
+    // enough to signal the end of pagination.
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=2': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-31T00:00:00.000Z' },
+    ]),
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-5', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(sandbox.resolveReviewSource_(task, new Date('2026-08-30T00:00:00.000Z')), 'Codex');
+  assert.equal(fetchLog.filter((e) => e.url.includes('api.github.com')).length, 2, 'expected both pages to be fetched');
+});
+
+test('resolveReviewSource_ stops pagination as soon as a short page is returned, never fetching a needless next page', () => {
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-31T00:00:00.000Z' },
+    ]),
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      if (!handler) throw new Error('unexpected fetch: ' + url); // page 2 must never be requested
+      const body = handler(options);
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-6', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(sandbox.resolveReviewSource_(task, new Date('2026-08-30T00:00:00.000Z')), 'Codex');
+  assert.equal(fetchLog.filter((e) => e.url.includes('api.github.com')).length, 1);
 });
 
 test('resolveReviewSource_ degrades to Other, never throws, when the GitHub call itself fails', () => {
@@ -2341,7 +2405,7 @@ test('re-opening a Task whose most recent genuine close left it in Review stamps
     }),
     'POST /v1/pages': () => ({ id: 'evt-created' }),
     'PATCH *': () => ({}),
-    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews': () => ([
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
       { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T07:00:00.000Z' },
     ]),
   };
@@ -2387,7 +2451,7 @@ test('a reassignment replacement inherits Work Type and Review Source from the o
     }),
     'POST /v1/pages': () => ({ id: 'evt-created' }),
     'PATCH *': () => ({}),
-    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews': () => ([
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
       { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T07:00:00.000Z' },
     ]),
   };
