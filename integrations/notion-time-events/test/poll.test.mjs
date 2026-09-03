@@ -2711,6 +2711,71 @@ test('resolveReviewSource_ stops pagination as soon as a short page is returned,
   assert.equal(fetchLog.filter((e) => e.url.includes('api.github.com')).length, 1);
 });
 
+test('resolveReviewSource_ excludes reviews submitted after the fix itself began', () => {
+  // Regression for the Codex-reported gap: polling runs on a delay, so a
+  // review can land in the window between the actual Review -> In Progress
+  // reopen and this code finally observing/reacting to it. Such a review
+  // could not have triggered a fix that was already underway, so it must be
+  // excluded even though it is otherwise the most recent qualifying review.
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T12:00:00.000Z' }, // before the reopen — eligible
+      { user: { login: 'komaba' }, submitted_at: '2026-08-30T18:00:00.000Z' }, // after the reopen — must be excluded
+    ]),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-7', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(
+    sandbox.resolveReviewSource_(
+      task,
+      new Date('2026-08-30T00:00:00.000Z'),
+      new Date('2026-08-30T15:00:00.000Z') // the reopen happened here, well before komaba's review
+    ),
+    'Codex',
+    'expected the review after the reopen to be excluded, leaving the earlier Codex review as the qualifying one'
+  );
+});
+
+test('resolveReviewSource_ has no upper bound when untilFixStarted is omitted, matching every prior call site', () => {
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T12:00:00.000Z' },
+      { user: { login: 'komaba' }, submitted_at: '2099-01-01T00:00:00.000Z' }, // far future, still no upper bound given
+    ]),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-8', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(sandbox.resolveReviewSource_(task, new Date('2026-08-30T00:00:00.000Z')), 'Human');
+});
+
 test('resolveReviewSource_ degrades to Other, never throws, when the GitHub call itself fails', () => {
   const routes = {
     [TASKS_QUERY]: () => ({ results: [], has_more: false }),

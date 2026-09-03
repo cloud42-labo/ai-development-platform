@@ -877,7 +877,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // to the SAME Review period that produced this fix, not a stale
       // earlier one a passive Backlog/Ready detour left behind.
       const reviewSource = workType === 'Review Fix'
-        ? (outgoingReviewSource || resolveReviewSource_(task, reviewFixSinceTimestamp_(allEvents, taskId)))
+        ? (outgoingReviewSource || resolveReviewSource_(task, reviewFixSinceTimestamp_(allEvents, taskId), startAt))
         : '';
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, workType, reviewSource);
       actions.push('opened:' + created.id);
@@ -1529,7 +1529,19 @@ function classifyWorkType_(allEvents, taskId) {
 // a network or API error, an unexpected response shape) degrades to 'Other'
 // rather than ever throwing out of here or blocking the underlying Time
 // Event from being created.
-function resolveReviewSource_(task, sincePriorClose) {
+//
+// `untilFixStarted` bounds the window from above as well as below: polling
+// runs on a delay, so the actual `Review → In Progress` reopen this call is
+// classifying can sit minutes behind when this code finally observes and
+// reacts to it. A review submitted in that gap — after the reopen already
+// happened, before this poll got around to looking — could not possibly be
+// what triggered the fix, yet an unbounded "most recent qualifying review"
+// search would still credit (or blame) its author. Bounding by the new
+// event's own start (`startAt` at the call site) excludes exactly that
+// impossible-causation window. Optional and defaults to no upper bound so
+// existing call sites/tests that only ever cared about the lower bound keep
+// working unchanged.
+function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
   try {
     const parsed = parseGithubPullRequestUrl_(propertyText_(task.properties['Pull Request']));
     if (!parsed) return 'Other';
@@ -1538,14 +1550,18 @@ function resolveReviewSource_(task, sincePriorClose) {
     const reviews = fetchAllGithubReviews_(token, parsed);
     if (!Array.isArray(reviews)) return 'Other';
     const sinceMs = sincePriorClose ? sincePriorClose.getTime() : 0;
+    const untilMs = untilFixStarted ? untilFixStarted.getTime() : Infinity;
     let latest = null;
     reviews.forEach(function (review) {
       if (!review || !review.submitted_at) return;
       const submittedAtMs = parseTimestamp_(review.submitted_at).getTime();
       // Only review activity after the Task's own most recent genuine close
       // (when it actually entered Review) is what this specific fix
-      // responds to — earlier reviews belong to a prior execution.
+      // responds to — earlier reviews belong to a prior execution. Activity
+      // after the fix itself began (see comment above) is equally out of
+      // scope — it couldn't have caused a fix that was already underway.
       if (submittedAtMs < sinceMs) return;
+      if (submittedAtMs > untilMs) return;
       if (!latest || submittedAtMs >= latest.submittedAtMs) {
         latest = { submittedAtMs: submittedAtMs, login: (review.user && review.user.login) || '' };
       }
