@@ -173,6 +173,7 @@ function pollIntervalMinutes_() {
 // authenticated API call using the private NOTION_TOKEN.
 function pollTaskChanges() {
   return withPollLock_(function () {
+    resetSyncLogRowsCache_();
     const props = PropertiesService.getScriptProperties();
     const runStartedAt = new Date();
     const cursor = props.getProperty('LAST_SYNC_CURSOR');
@@ -359,6 +360,7 @@ function reconcileTaskById(pageId) {
   const normalized = normalizeUuid_(pageId);
   if (!normalized) throw new Error('reconcileTaskById requires a Notion page ID.');
   return withPollLock_(function () {
+    resetSyncLogRowsCache_();
     return reconcileTaskPage_(retrieveNotionPage_(normalized));
   });
 }
@@ -381,6 +383,7 @@ function reconcileTaskById(pageId) {
 // with no pre-existing Done history.
 function backfillResultFingerprints_() {
   return withPollLock_(function () {
+    resetSyncLogRowsCache_();
     const runStartedAt = new Date();
     const props = PropertiesService.getScriptProperties();
     const resumeCursor = props.getProperty('BACKFILL_RESUME_CURSOR');
@@ -1372,51 +1375,91 @@ function mostRecentChurnEvent_(events) {
 // Returns '' when Sync Log has nothing for this Task yet (a brand-new Task,
 // or a manually cleared log) — the caller falls back to the Time-Event-only
 // heuristic in that case.
-function mostRecentLoggedEntry_(taskId) {
-  if (!taskId) return null;
+// Populated on first read within a single script execution and cleared at
+// the start of each top-level entry point that can call reconcileTaskPage_
+// in a loop (pollTaskChanges, reconcileTaskById, backfillResultFingerprints_)
+// — see resetSyncLogRowsCache_. Apps Script gives each trigger execution a
+// fresh global scope, but everything called within ONE execution shares its
+// top-level variables for that execution's lifetime, and a given Task is
+// reconciled at most once per run (mergeTasksById_ dedupes tasksToProcess),
+// so caching the whole read for the run's duration is safe: no task's
+// classification ever depends on seeing another task's freshly-written row,
+// and a task's own read (inside reconcileAuthoritativeTimeEvents_) always
+// happens before its own write (logSnapshot_, at the end of
+// reconcileTaskPage_) regardless of caching. Without this, classifyWorkType_
+// and reviewFixSinceTimestamp_ would each re-read the ENTIRE Sync Log sheet
+// from scratch for every single event opened in a run (up to twice per
+// event, and Sync Log only ever grows, append-only) — and
+// MAX_RUN_DURATION_MS is only re-checked BETWEEN loop iterations, never
+// during one, so a slow enough per-event read on a mature log could push a
+// single reconciliation past Apps Script's own hard execution limit before
+// that check runs again, risking exactly the uncaught-kill/lost-progress
+// failure mode MAX_RUN_DURATION_MS otherwise exists to prevent.
+let syncLogRowsCache_ = null;
+
+function syncLogRows_() {
+  if (syncLogRowsCache_) return syncLogRowsCache_;
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return null;
   // Columns: Snapshot ID, Source, Task ID, Status, Reconciled At, Outcome.
+  syncLogRowsCache_ = lastRow < 2 ? [] : sheet.getRange(2, 3, lastRow - 1, 3).getValues();
+  return syncLogRowsCache_;
+}
+
+function resetSyncLogRowsCache_() {
+  syncLogRowsCache_ = null;
+}
+
+function mostRecentLoggedEntry_(taskId) {
+  if (!taskId) return null;
   // Sheet rows are read in the same order they were appended — Google
   // Sheets appendRow always adds after the last row, and logSnapshot_ is
   // only ever called from a single, lock-serialized poll at a time — so
   // this list is already chronological; no separate sort or tie-breaking
   // pass is needed to get "most recent" or "earliest" right.
-  const rows = sheet.getRange(2, 3, lastRow - 1, 3).getValues();
   const entries = [];
-  rows.forEach(function (row) {
+  syncLogRows_().forEach(function (row) {
     if (String(row[0] || '') !== taskId) return;
     const status = String(row[1] || '');
-    // Skip past In Progress itself — it is the status the CURRENT execution
-    // is starting into, never one that PRECEDED it, so it can never be a
-    // valid answer to "what came before this reopen". `logSnapshot_` still
-    // logs Status=In Progress even for an unmapped/cleared Assigned Agent
-    // (reconcileAuthoritativeTimeEvents_'s 'in_progress_without_mapped_actor'
-    // outcome opens nothing but still reaches logSnapshot_), so a
-    // reassignment gap can otherwise leave one or more trailing In Progress
-    // rows that would hide the status that actually began this execution.
-    if (status === DEFAULTS.START_STATUS) return;
     const at = row[2] instanceof Date ? row[2] : parseTimestamp_(row[2]);
     if (isNaN(at.getTime())) return;
+    // In Progress rows are KEPT here (not filtered out) — they act as
+    // period SEPARATORS below, not just noise to skip past. Dropping them
+    // entirely before grouping would let two Review periods from two
+    // DIFFERENT executions (Review -> In Progress -> Review -> In
+    // Progress) collapse into looking like one consecutive run, walking
+    // the backward scan below straight through the intervening execution
+    // into a stale, unrelated earlier Review period.
     entries.push({ status: status, at: at });
   });
   if (!entries.length) return null;
-  // The most recent (last-appended) entry decides WHICH status this is.
-  const lastStatus = entries[entries.length - 1].status;
-  // But the entry's own `at` is only the LATEST time the Task was
+  // Skip only TRAILING In Progress rows — it is the status the CURRENT
+  // execution is starting into, never one that PRECEDED it, so it can
+  // never be a valid answer to "what came before this reopen" on its own.
+  // `logSnapshot_` still logs Status=In Progress even for an
+  // unmapped/cleared Assigned Agent
+  // (reconcileAuthoritativeTimeEvents_'s 'in_progress_without_mapped_actor'
+  // outcome opens nothing but still reaches logSnapshot_), so a
+  // reassignment gap can otherwise leave one or more trailing In Progress
+  // rows that would hide the status that actually began this execution.
+  let lastIndex = entries.length - 1;
+  while (lastIndex >= 0 && entries[lastIndex].status === DEFAULTS.START_STATUS) lastIndex--;
+  if (lastIndex < 0) return null; // nothing but In Progress logged for this Task so far
+  const lastStatus = entries[lastIndex].status;
+  // The entry at lastIndex is only the LATEST time the Task was
   // re-observed still in that status, not when it actually transitioned
   // into it — logSnapshot_ logs every genuinely distinct edit even when
   // Status itself hasn't changed (e.g. an unrelated field edited while
   // still in Review), which can land well after review activity relevant
-  // to this exact period already happened. Walk backward from the end
-  // while the status keeps matching to find where this consecutive run
-  // actually began, and report THAT timestamp instead — the moment the
-  // Task genuinely entered its current status, which is what "the status
-  // immediately preceding this reopen" and "since this Review period
-  // began" both really mean.
-  let periodStartAt = entries[entries.length - 1].at;
-  for (let i = entries.length - 1; i >= 0 && entries[i].status === lastStatus; i--) {
+  // to this exact period already happened. Walk backward from lastIndex
+  // while the status keeps matching — stopping at a genuine status change
+  // OR at an In Progress separator, whichever comes first — to find where
+  // this consecutive run actually began, and report THAT timestamp
+  // instead: the moment the Task genuinely (re-)entered its current
+  // status, which is what "the status immediately preceding this reopen"
+  // and "since this Review period began" both really mean.
+  let periodStartAt = entries[lastIndex].at;
+  for (let i = lastIndex; i >= 0 && entries[i].status === lastStatus; i--) {
     periodStartAt = entries[i].at;
   }
   return { status: lastStatus, at: periodStartAt };

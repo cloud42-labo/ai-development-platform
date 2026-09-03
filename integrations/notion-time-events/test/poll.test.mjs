@@ -2363,6 +2363,46 @@ test('reviewFixSinceTimestamp_ uses the START of the current Review period, not 
   assert.equal(new Date(since).toISOString(), '2026-08-30T05:00:00.000Z', 'expected the period\'s own start (05:00), not the later re-observation (05:30)');
 });
 
+test('mostRecentLoggedEntry_ treats In Progress as a period separator, not a value to drop before grouping', () => {
+  // Codex-reported regression in round 11's own fix: filtering OUT every
+  // In Progress row before grouping into consecutive runs let two Review
+  // periods from two DIFFERENT executions (Review -> In Progress -> Review
+  // -> In Progress) collapse into looking like one single consecutive run
+  // once In Progress was dropped, walking the backward scan straight
+  // through the intervening execution into a stale, unrelated earlier
+  // Review period.
+  const taskId = 'task-sync-log-6';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('s1', 'notion_poll', taskId, 'Review', new Date('2026-08-30T05:00:00.000Z'), 'closed:evt-old');
+  sandbox.logSnapshot_('s2', 'notion_poll', taskId, 'In Progress', new Date('2026-08-30T06:00:00.000Z'), 'opened:evt-mid');
+  sandbox.logSnapshot_('s3', 'notion_poll', taskId, 'Review', new Date('2026-08-30T07:00:00.000Z'), 'closed:evt-mid');
+
+  assert.equal(sandbox.mostRecentLoggedStatus_(taskId), 'Review');
+  const since = sandbox.reviewFixSinceTimestamp_([], taskId);
+  assert.equal(new Date(since).toISOString(), '2026-08-30T07:00:00.000Z', 'expected the CURRENT (second) Review period\'s own start, not the first one from before the intervening execution');
+});
+
+test('syncLogRows_ caches the Sync Log for one execution; resetSyncLogRowsCache_ clears it', () => {
+  // Codex-reported performance concern: without caching, classifyWorkType_
+  // and reviewFixSinceTimestamp_ each re-read the entire (append-only, ever-
+  // growing) Sync Log sheet from scratch for every single event opened in a
+  // run. This test verifies the cache actually caches (a row appended
+  // without a reset is NOT yet visible) and that the designated entry
+  // points' reset call actually clears it (visible again afterward) —
+  // not just that behavior is unchanged when reads always happen to be
+  // fresh, which every other Sync Log test here already exercises.
+  const taskId = 'task-sync-log-cache';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('s1', 'notion_poll', taskId, 'Review', new Date('2026-08-30T05:00:00.000Z'), 'closed:evt-1');
+  assert.equal(sandbox.mostRecentLoggedStatus_(taskId), 'Review');
+
+  sandbox.logSnapshot_('s2', 'notion_poll', taskId, 'Backlog', new Date('2026-08-30T06:00:00.000Z'), 'no_change:Backlog');
+  assert.equal(sandbox.mostRecentLoggedStatus_(taskId), 'Review', 'expected the stale cached read, not the just-appended row');
+
+  sandbox.resetSyncLogRowsCache_();
+  assert.equal(sandbox.mostRecentLoggedStatus_(taskId), 'Backlog', 'expected the fresh row to be visible once the cache is reset');
+});
+
 test('classifyWorkType_ falls back to the Time-Event heuristic when Sync Log has nothing for this Task yet', () => {
   const { sandbox } = harness();
   const closedFromReview = eventPage('evt-2', {
