@@ -26,7 +26,7 @@ The following are automated by default and must not be delegated to a Human mere
 - reassignment and ownership transitions;
 - regression cases that can be represented deterministically in code or fixtures.
 
-Human Acceptance is limited to the smallest representative happy path plus the Human-only input/output that cannot be automated.
+Human Acceptance is limited to the smallest representative path **only when that path itself depends on a Human-only capability**, plus any other Human-only input/output that cannot be automated or verified through connected evidence. There is no mandatory manual happy-path check when the representative path is fully automatable or AI/connector-verifiable.
 
 ## Human-task preflight agreement
 
@@ -42,12 +42,16 @@ Do not begin the Human step before agreement. If the procedure changes after wor
 
 ## More than three Human test items
 
-If a Human Request contains more than three test items, re-run the automation review before handing it off. The task must be marked `Revise` or `Blocked` until the author records why each remaining item is genuinely Human-only.
+If a Human Request contains more than three test items, re-run the automation review before handing it off. Keep the task `Blocked` until the author records in `Approach Decision` or `Result` why each remaining item is genuinely Human-only, and make the `Blocker` state that the Human-test minimization review is required. Return it to `Ready` only after the reduced Human-only remainder is explicit.
 
 ## Completion rule
 
-A Human Request is complete when the Human-only evidence is recorded. AI-verifiable follow-up work remains assigned to AI and must not keep the Human task open.
+Recording the required Human-only evidence is necessary but not sufficient to mark the Human Request `Done`. Once that evidence is recorded, execute the normal managed-work completion post-flight in `governance/ai-execution-constraints.md`: verify Acceptance Criteria, record Result evidence, close the applicable Time Event, record `Completed At`, close the AI Work Session where applicable, and transition `Status = Done` last.
+
+AI-verifiable follow-up work must remain assigned to AI and must not keep the Human task open merely because separate AI work remains. Route that residual AI work separately rather than weakening the completion post-flight for the Human Request itself.
 
 ## Relationship to existing governance
 
-This rule narrows the Human Gate Pre-check in `docs/operating-guide.md` and `governance/ai-execution-constraints.md`: classify each criterion first, automate deterministic coverage, and reserve Human work for the irreducible remainder. It does not override authority, merge, release, billing, legal, or real-device gates that are genuinely mandatory for the current transition.
+This rule is a mandatory executable supplement to the Human Gate Pre-check in `docs/operating-guide.md` and `governance/ai-execution-constraints.md`. `AGENTS.md` routes Human Request / Human E2E work through this rule as part of the mandatory read path. Classify each criterion first, automate deterministic coverage, and reserve Human work for the irreducible remainder.
+
+It does not override authority, merge, release, billing, legal, or real-device gates that are genuinely mandatory for the current transition, and it does not weaken the managed-work completion post-flight.
