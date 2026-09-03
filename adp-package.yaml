@@ -31,12 +31,14 @@ version: 0.1.0
 schema_version: 0.1.0-experimental
 
 # Version of the Rules asset class (README.md, AGENTS.md,
-# governance/ai-execution-constraints.md, governance/source-of-truth.md,
+# governance/ai-execution-constraints.md,
+# governance/human-test-minimization.md,
+# governance/source-of-truth.md,
 # governance/research-security-policy.md,
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 1.0.0
+rules_version: 1.1.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -204,3 +206,20 @@ migration_path:
       Same as the paired rules_version 1.0.0 entry above — this Workflow
       bump is the durable-destination half of the same behavior change;
       adopt both together.
+  - field: rules_version
+    from: "1.0.0"
+    to: "1.1.0"
+    date: "2026-09-03"
+    change: >-
+      Added governance/human-test-minimization.md to the mandatory Rules
+      path. Human Request and Human E2E criteria must be classified as
+      automatable, AI/connector-verifiable, or Human-only; deterministic
+      coverage stays automated, and manual Acceptance is limited to the
+      irreducible Human-only remainder. AGENTS.md now routes Human work
+      through this rule explicitly. Additive MINOR: existing Human Gate
+      authority and completion post-flight remain unchanged.
+    action_required: >-
+      Before creating, starting, re-evaluating, or completing Human Request
+      or Human E2E work, read governance/human-test-minimization.md, remove
+      automatable and AI/connector-verifiable checks from the Human scope,
+      and preserve the normal completion post-flight before marking Done.
