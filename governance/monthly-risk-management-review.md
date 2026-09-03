@@ -68,7 +68,7 @@ Every material risk must end in one of these decisions:
 - **Accept / monitor** — current residual risk is acceptable; define the next observation signal.
 - **Strengthen control** — create or reprioritize preventive work, moving from documentation to executable gate/automation where appropriate.
 - **Escalate to Owner/Human** — business-risk acceptance, authority, cost, legal/privacy/security, or irreversible decision is required.
-- **Close** — only when the Postmortem closure criteria are satisfied, including preventive task completion and representative retest.
+- **Close** — only when the Postmortem closure criteria are satisfied, including the applicable preventive-work or independently-approved no-action closure path.
 
 ## Mandatory escalation to Owner/Human
 
@@ -100,9 +100,13 @@ At minimum record:
 - recurrence count/rate by rule family;
 - preventive tasks Open / Done / Blocked;
 - median/typical age of unresolved preventive work when measurable;
+- trigger-to-detection latency (median/typical and notable outliers where timestamps exist);
 - detection-path distribution: Human / AI self / other AI / automated;
+- false-gate count by failure mode: already-satisfied evidence / downstream-work promotion / optional-validation promotion;
 - material risks escalated to Owner/Human;
 - controls upgraded from documentation-only to executable gate/automation.
+
+For false-gate metrics, classify every counted incident into exactly one named failure-mode bucket above. Do not omit an incident merely because it involved optional validation rather than an explicit downstream Human task. If one event contains multiple failure modes, record the primary mode and note secondary modes in the risk detail rather than double-counting the incident total.
 
 Metrics are diagnostic. Do not optimize them by suppressing incident reporting or closing items without evidence.
 
