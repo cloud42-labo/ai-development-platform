@@ -2223,6 +2223,64 @@ test('classifyWorkType_ is Initial Work with no prior genuine close, and Review 
 
   // Ties: the most recent genuine close by Ended At wins, not array order.
   assert.equal(sandbox.classifyWorkType_([closedFromReview, closedFromBlocked].reverse()), 'Initial Work');
+
+  // Codex-reported gap: a reassignment/duplicate close that WAS later
+  // retroactively boundary-stamped (see stampExecutionBoundary_) is a
+  // genuine execution boundary — but its End Status= was originally
+  // recorded as 'In Progress' (a reassignment/duplicate close can only ever
+  // fire while still In Progress; only the later boundary-stamp write
+  // itself observes where the execution really ended). stampExecutionBoundary_
+  // appends a fresh, corrected End Status= alongside Boundary=, and
+  // noteField_ always reads the LAST occurrence of a key — so this must
+  // read the corrected value, not the stale original one, or a genuine
+  // Review Fix is silently misclassified as Initial Work.
+  const reassignedThenBoundaryStamped = eventPage('evt-4', {
+    actor: 'Claude', startedAt: '2026-08-30T05:00:00.000Z', endedAt: '2026-08-30T06:00:00.000Z',
+    note: 'End Status=In Progress | Reason=reassignment | Boundary=left_in_progress | End Status=Review',
+  });
+  assert.equal(sandbox.classifyWorkType_([reassignedThenBoundaryStamped]), 'Review Fix');
+});
+
+test('stampExecutionBoundary_ records the status observed when the boundary is recognized, not the stale original End Status', () => {
+  // End-to-end regression for the same Codex-reported gap: an assignee is
+  // cleared while In Progress (closing via 'reassignment' with End
+  // Status=In Progress — a reassignment/duplicate close only ever fires
+  // while still In Progress), and the Task is next observed already in
+  // Review with nothing open. The retroactive boundary stamp must capture
+  // THIS status (Review), not repeat the stale one already on the event.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43df010';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Review',
+      agent: 'Human', // no mapped actor left In Progress
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-30T05:00:00.000Z',
+    })],
+    events: [
+      eventPage('evt-cleared', {
+        actor: 'Claude',
+        startedAt: '2026-08-30T05:00:00.000Z',
+        endedAt: '2026-08-30T05:30:00.000Z',
+        note: 'End Status=In Progress | Reason=reassignment',
+      }),
+    ],
+  });
+
+  sandbox.pollTaskChanges();
+
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-cleared');
+  assert.equal(patches.length, 1);
+  const note = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.match(note, /Boundary=left_in_progress/);
+  // The corrected End Status=Review must be the LAST occurrence so
+  // noteField_ (last-wins) resolves to it, not the original stale value.
+  assert.equal(note.split(' | ').filter((s) => s.indexOf('End Status=') === 0).pop(), 'End Status=Review');
+  assert.equal(sandbox.classifyWorkType_([{
+    properties: {
+      'Ended At': { type: 'date', date: { start: '2026-08-30T05:30:00.000Z' } },
+      Note: { type: 'rich_text', rich_text: [{ plain_text: note }] },
+    },
+  }]), 'Review Fix');
 });
 
 test('resolveReviewSource_ is Other with no Pull Request, and makes no GitHub call', () => {

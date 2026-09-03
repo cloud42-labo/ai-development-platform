@@ -82,7 +82,7 @@ Trade-off, stated plainly: reconciliation is no longer near-instant. A change is
 
 The integration has no inbound attack surface: nothing outside the Apps Script project can invoke the reconciler, so there is no request to authenticate.
 
-- **One secret, one place.** `NOTION_TOKEN` lives only in Apps Script Script Properties. There is no webhook verification token and no relay secret to generate, duplicate across systems, rotate in lockstep, or leak. Never put the token in source code, GitHub, the Sheet, a URL, or logs.
+- **Two secrets at most, both only in Script Properties, neither required in source, the Sheet, a URL, or logs.** `NOTION_TOKEN` is required. `GITHUB_TOKEN` (see **Reporting: Work Type & Review Source** above) is optional — it exists only to resolve Review Source, is never required for the reconciler's own Notion↔Sheet loop, and its absence just means Review Source always resolves to `Other`. There is no webhook verification token and no relay secret to generate, duplicate across systems, rotate in lockstep, or leak. Include `GITHUB_TOKEN` in credential inventory, access review, and rotation procedures wherever `NOTION_TOKEN` is, once it's configured.
 - **No public endpoint.** The project defines no `doGet` / `doPost`, and the Web App deployment is removed. An attacker who learns the script ID has nothing to call.
 - **No credential in any URL.** Satisfied by construction rather than by mitigation — there is no receiver URL.
 - **Notion remains the only source of operational truth.** Every mutation is derived from a page Notion returned over an authenticated call; the reconciler can only move Task Time Events toward the state Notion already holds, and repeating a pass over the same page is a no-op.

@@ -117,7 +117,7 @@ function setup() {
   ensureProjectionHeaders_();
   ensureSyncLogSheet_();
   installSyncTrigger();
-  Logger.log('Setup complete. This project has no public endpoint and stores only NOTION_TOKEN.');
+  Logger.log('Setup complete. This project has no public endpoint. It stores NOTION_TOKEN (required) and, optionally, GITHUB_TOKEN (see README — enables Review Source resolution; its absence is not an error).');
 }
 
 function showSetupInfo() {
@@ -126,8 +126,11 @@ function showSetupInfo() {
     spreadsheetId: props.getProperty('SPREADSHEET_ID'),
     tasksDataSourceId: tasksDataSourceId_(),
     timeEventsDataSourceId: timeEventsDataSourceId_(),
-    // Presence only. The token value is never logged.
+    // Presence only. Token values are never logged.
     notionTokenConfigured: Boolean(props.getProperty('NOTION_TOKEN')),
+    // Optional — see README "Reporting: Work Type & Review Source". false
+    // just means Review Source always resolves to 'Other', not an error.
+    githubTokenConfigured: Boolean(props.getProperty('GITHUB_TOKEN')),
     pollIntervalMinutes: pollIntervalMinutes_(),
     syncTriggersInstalled: syncTriggers_().length,
     lastSyncCursor: props.getProperty('LAST_SYNC_CURSOR') || '(never run)',
@@ -933,7 +936,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         // accepting a stale-Result reopen for the second — the Boundary=
         // stamp alone (still applied below) is enough for the legacy
         // heuristic to keep working for both.
-        stampExecutionBoundary_(mostRecentClosed, '');
+        stampExecutionBoundary_(mostRecentClosed, '', currentStatus);
         actions.push('boundary:' + mostRecentClosed.id);
       }
     }
@@ -1217,9 +1220,23 @@ function markResultValidated_(eventPage, result) {
 // silently break). Kept as a parameter rather than dropped so a future,
 // genuinely safe backfill path (one with enough information to tell the
 // two cases apart) has an existing, tested hook to call into.
-function stampExecutionBoundary_(eventPage, executionId) {
+function stampExecutionBoundary_(eventPage, executionId, observedStatus) {
   const existingNote = propertyText_(eventPage.properties.Note);
-  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId });
+  // Also refreshes End Status= to the Task's status *now* (when this
+  // execution is recognized as genuinely over), not left at whatever stale
+  // value the original close recorded — which, for a reassignment/
+  // duplicate_reconciliation close, is necessarily 'In Progress' (that
+  // close only ever fires while the Task is still In Progress; the branch
+  // calling this one is the one place that later observes where the
+  // execution actually ended). `noteField_`/`parseNoteMeta_` already read
+  // only the LAST occurrence of a key, so appending a fresh End Status=
+  // segment updates it without touching the original — same "last one
+  // wins" pattern every other repeatedly-stamped field in this Note already
+  // uses. Without this, classifyWorkType_ (ADP-051) reads the stale
+  // pre-boundary End Status off this exact event once it becomes the
+  // mostRecentGenuineClose_ for the Task's next execution, misclassifying a
+  // genuine Review Fix as Initial Work and silently skipping Review Source.
+  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId, endStatus: observedStatus });
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
     properties: {
       Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
@@ -1889,9 +1906,24 @@ function appendNote_(existingNote, marker, maxLength) {
   // losing Execution=/Boundary= can flip an event's own current/prior
   // classification outright. Protected even more than fingerprints:
   // evicted only once every fingerprint segment is already gone.
+  //
+  // Work Type=/Review Source= (ADP-051) get the identical protection for a
+  // different reason: they are this event's *only* persisted copy of those
+  // fields (nothing recomputes or backfills them once written — a
+  // reassignment replacement only ever inherits them from here, and the
+  // Sheet projection just mirrors whatever the Note currently holds), each
+  // stamped exactly once and never repeated, so protecting them costs at
+  // most a small, constant amount of space per event — nothing like
+  // Result Fingerprint='s unbounded, ever-growing accumulation. Evicting
+  // them here would silently blank the Sheet's Work Type/Review Source
+  // columns on a later re-projection and break reassignment inheritance,
+  // corrupting the exact reporting fields this feature exists to produce.
   const isExecutionOrBoundarySegment = function (segment) {
     const trimmed = segment.trim();
-    return trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0;
+    return trimmed.indexOf('Execution=') === 0 ||
+      trimmed.indexOf('Boundary=') === 0 ||
+      trimmed.indexOf('Work Type=') === 0 ||
+      trimmed.indexOf('Review Source=') === 0;
   };
   const segments = existingNote.split(separator);
   let combined = segments.concat([clippedMarker]).join(separator);

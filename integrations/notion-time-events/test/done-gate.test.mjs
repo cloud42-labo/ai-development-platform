@@ -575,6 +575,38 @@ test('appendNote_ evicts Execution=/Boundary= only as an absolute last resort, o
   assert.equal(combined, newMarker);
 });
 
+test('appendNote_ protects Work Type=/Review Source= (ADP-051) exactly like Execution=/Boundary=', () => {
+  // Codex-reported gap: Work Type=/Review Source= are each event's ONLY
+  // persisted copy of those fields — nothing recomputes or backfills them,
+  // a reassignment replacement only ever inherits them from here, and the
+  // Sheet projection just mirrors whatever the Note currently holds.
+  // Evicting them as ordinary segments (the pre-fix behavior) would
+  // silently blank the Sheet's Work Type/Review Source columns on a later
+  // re-projection once enough Result Fingerprint stamps accumulate to force
+  // compaction — corrupting the exact reporting fields ADP-051 exists to
+  // produce. They must survive everything but Execution=/Boundary=
+  // themselves, exactly like a fingerprint does.
+  const { sandbox } = harnessWithNotionStub();
+  const oldFingerprint = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v1');
+  const existingNote = 'Work Type=Review Fix | Review Source=Codex | ' + oldFingerprint;
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v2');
+
+  // A budget that forces eviction but is still large enough to keep both
+  // reporting fields alongside both fingerprints — proving they are NOT
+  // evicted before the (deliberately oversized) filler segment is.
+  const combined = sandbox.appendNote_(existingNote + ' | Snapshot=' + 'x'.repeat(1700), newMarker, 1800);
+
+  assert.ok(combined.indexOf('Work Type=Review Fix') >= 0, 'Work Type= must survive the eviction');
+  assert.ok(combined.indexOf('Review Source=Codex') >= 0, 'Review Source= must survive the eviction');
+  assert.ok(combined.indexOf(oldFingerprint) >= 0, 'the older fingerprint must also survive');
+  assert.equal(combined.indexOf('Snapshot='), -1, 'the ordinary segment should have been evicted instead');
+
+  // Only once nothing else (not even a fingerprint) is left does eviction
+  // reach Work Type=/Review Source= — same last-resort tier as Execution=/Boundary=.
+  const tinyBudget = sandbox.appendNote_(existingNote, newMarker, newMarker.length + 2);
+  assert.equal(tinyBudget, newMarker);
+});
+
 test('Done passes when multiple events close simultaneously on first observing the Task leaving In Progress', () => {
   const { sandbox } = harnessWithNotionStub();
   // A Task with two open events (e.g. an unresolved duplicate) is first
