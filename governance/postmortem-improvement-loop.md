@@ -111,6 +111,15 @@ Action items should improve the system, not instruct an individual to "be more c
 
 When the root cause is a missed execution-time control, documentation-only action is insufficient unless the review explains why an executable control is impossible or disproportionate.
 
+If the independent reviewer concludes that **no preventive action is warranted**, the Postmortem MUST instead record all of the following before that exception can satisfy closure:
+- the specific evidence supporting the no-action conclusion;
+- why a new or stronger control would not provide proportionate risk reduction, or why the failure is already covered by a verified existing control;
+- the existing control or residual-risk basis that makes recurrence acceptably bounded;
+- the independent reviewer's explicit approval of the no-action rationale;
+- any residual risk that still requires an existing Owner/Human risk-acceptance boundary under the normal authority rules.
+
+The no-action exception is not a shortcut around independent review, evidence, corrective work, or an already-required risk-acceptance decision. It only replaces preventive-task / durable-control-change / new-control retest requirements when the independent reviewer has established that no preventive change is warranted.
+
 ### 9. AI-native Gate Boundary Review
 
 For managed AI workflows, explicitly answer all of the following:
@@ -159,7 +168,7 @@ A Postmortem's first analysis is written by the AI closest to the incident, whic
   1. **Facts** — do the described event and evidence match what actually happened (commits, PRs, Task/Time records, logs)?
   2. **Cause-and-effect** — does the causal chain from trigger to impact actually hold, or does it skip steps / assume a link that isn't shown?
   3. **Root Cause classification** — is the Root Cause Category correct, or does the author's framing (e.g. blaming an actor instead of a missing gate) misclassify it?
-  4. **Preventive Action fit** — does the Preventive Action actually address the recorded root cause, or does it treat a symptom / a different cause?
+  4. **Preventive Action fit** — does the Preventive Action actually address the recorded root cause, or does it treat a symptom / a different cause? If no preventive action is proposed, does the evidence support that exception and bound the residual risk?
   5. **No new false gate** — does the Preventive Action introduce a new Human/Stop Gate that isn't actually required, echoing the false-gate failure mode this loop exists to reduce?
   6. **Format completeness** — are Impact, Timeline, Detection, Root Cause/Trigger, Lessons Learned, Gate Boundary Review, Evidence, and Action Items complete enough to support the conclusion?
 - **Record the review**, not just its outcome: which criteria were checked, what (if anything) the reviewer changed, and the reviewer's identity. This is tracked on the Postmortem record (`Author`, `Reviewer`, `Review Status`, `Review Notes`) alongside the existing fields. `Author` is who wrote the first analysis — set it explicitly rather than assuming it equals `Owner` (`Owner` is who is accountable for the incident/Postmortem, which is not always the same actor who drafted the analysis; comparing `Reviewer` against `Owner` instead of `Author` would let the actual drafter review their own text merely because someone else was recorded as `Owner`).
@@ -171,11 +180,11 @@ A rule violation is not closed by documenting it. Follow this loop:
 1. **Record** — write the standard Postmortem sections and preserve primary evidence.
 2. **Analyze** — identify trigger, direct cause, structural root cause, contributing factors, and the exact failed state-transition/gate boundary. Prefer causes that explain why the control failed, not labels about the actor.
 3. **Correct** — repair current task/evidence/state without erasing the fact that the violation occurred.
-4. **Create preventive work** — create an explicit preventive Task. New affiliation follows the normal placement pre-flight; if placement is not evidenced, use MISC / Backlog.
-5. **Make the control executable** — update the appropriate Operating Guide, `AGENTS.md`, Skill, workflow, automated check, or pre/post-flight gate. Documentation-only action is insufficient when the cause was a missed execution-time check.
-6. **Retest** — run a representative managed-work scenario after the preventive control is implemented and preserve evidence that the new gate was applied before the risky action.
-7. **Independent review** — a different AI reviews the facts, causal model, preventive-action fit, format completeness, and false-gate risk.
-8. **Close** — close the Postmortem only after preventive work is Done, the retest passes, and independent review is Approved.
+4. **Choose preventive path** — either create an explicit preventive Task, or have the independent reviewer approve the evidence-backed no-action exception defined above. New Task affiliation follows the normal placement pre-flight; if placement is not evidenced, use MISC / Backlog.
+5. **Make the control executable when preventive work exists** — update the appropriate Operating Guide, `AGENTS.md`, Skill, workflow, automated check, or pre/post-flight gate. Documentation-only action is insufficient when the cause was a missed execution-time check.
+6. **Retest the applicable control path** — when a preventive control is implemented, run a representative managed-work scenario and preserve evidence that the new gate was applied before the risky action. For an approved no-action case, preserve evidence that the existing control/residual-risk basis cited by the reviewer is current and valid rather than inventing a new-control retest.
+7. **Independent review** — a different AI reviews the facts, causal model, preventive-action fit or no-action exception, format completeness, and false-gate risk.
+8. **Close** — close the Postmortem only after the applicable closure path below is satisfied and independent review is Approved.
 
 ## Control destination by cause
 
@@ -184,6 +193,7 @@ A rule violation is not closed by documenting it. Follow this loop:
 - **Authority error** → Human/AI authority gate and explicit transfer path.
 - **False Human gate: evidence already satisfiable** → Human gate pre-flight and its standing re-evaluation.
 - **False Human gate: downstream work promoted to current blocker** → state-transition/gate-boundary pre-flight. Human-only downstream deployment, acceptance, publication, or environment setup does not block an earlier transition unless the governing rule explicitly couples them.
+- **False Human/Stop gate: optional validation promoted to mandatory current gate** → state-transition/gate-boundary pre-flight plus explicit classification of which acceptance/evidence items are mandatory for the current transition versus optional validation.
 - **Source-of-truth / traceability gap** → required Notion/GitHub relation/evidence before transition.
 - **Time/evidence recording gap** → managed-work completion post-flight.
 - **External data / secret / billing risk** → `governance/research-security-policy.md`.
@@ -191,25 +201,38 @@ A rule violation is not closed by documenting it. Follow this loop:
 
 ## High-risk period
 
-From incident detection until the preventive Task is implemented and retested, treat the failed control as high risk. The acting AI MUST perform an explicit manual check of that rule at each relevant execution point. A future automated gate may replace the manual check only after the automated behavior is verified.
+From incident detection until the preventive Task is implemented and retested, or until the independent reviewer approves the evidence-backed no-action path, treat the failed control as high risk. The acting AI MUST perform an explicit manual check of that rule at each relevant execution point. A future automated gate may replace the manual check only after the automated behavior is verified.
 
 ## Closure criteria
 
-A Postmortem can be closed only when all are true:
+A Postmortem can be closed only when all **common criteria** are true:
 
 - the standard Postmortem sections are complete enough to reproduce the factual and causal chain;
 - root cause, trigger, and existing rule are recorded;
 - Impact, Timeline, Detection, Lessons Learned, Gate Boundary Review, and Evidence are recorded;
-- preventive Task is linked and Done;
-- each preventive action has a verifiable completion condition;
-- the durable control destination is updated;
-- a representative retest passed;
-- evidence of the retest is recorded;
 - recurrence status is correct;
 - no unresolved corrective action remains;
 - **an AI-caused Postmortem has completed independent review by a different AI** (see "Independent review" above), with `Reviewer` ≠ `Author` (the actor who wrote the first analysis — not necessarily `Owner`) and `Review Status = Approved`.
 
-A `Review Status` of `Revise Requested` blocks `Closed` until the author addresses the reviewer's findings and the reviewer re-approves. The reviewer re-approving is not optional busywork: if the reviewer finds the causal chain, Root Cause classification, Preventive Action fit, Gate Boundary analysis, or factual completeness does not hold up, that finding overrides the author's own closure request.
+In addition, exactly one of these closure paths must be satisfied:
+
+### Preventive-action closure path
+
+- preventive Task is linked and Done;
+- each preventive action has a verifiable completion condition;
+- the durable control destination is updated;
+- a representative retest passed;
+- evidence of the retest is recorded.
+
+### Independently-approved no-action closure path
+
+- the independent reviewer explicitly records that no preventive action is warranted;
+- the evidence supporting that conclusion is linked and independently reproducible;
+- the Postmortem explains why a new/stronger control would not provide proportionate risk reduction, or identifies the verified existing control that already bounds the failure mode;
+- any residual risk requiring an already-defined Owner/Human acceptance boundary has been handled through that existing authority path; no new Human gate is created merely because the no-action path was used;
+- there is no preventive Task, control update, or new-control retest still required by the approved analysis.
+
+A `Review Status` of `Revise Requested` blocks `Closed` until the author addresses the reviewer's findings and the reviewer re-approves. The reviewer re-approving is not optional busywork: if the reviewer finds the causal chain, Root Cause classification, Preventive Action fit or no-action rationale, Gate Boundary analysis, or factual completeness does not hold up, that finding overrides the author's own closure request.
 
 If the same rule fails again before these criteria are met, the earlier Postmortem remains an active risk and the new event is a recurrence signal, not evidence that the process has completed.
 
@@ -220,9 +243,9 @@ Portfolio-level governance should periodically review at least:
 - violation count;
 - recurrence rate by rule family;
 - time from trigger to detection where timestamps exist;
-- time from detection to preventive-action Done;
+- time from detection to preventive-action Done where preventive work exists;
 - Human vs AI-self vs other-AI vs automated detection path;
-- false-gate count by failure mode (already-satisfied evidence vs downstream-work promotion);
+- false-gate count by failure mode (already-satisfied evidence / downstream-work promotion / optional-validation promotion);
 - proportion of preventive actions implemented as executable gates rather than reference documentation only.
 
 The objective is not to hide or minimize incident counts. It is to reduce recurrence and move detection/prevention earlier in the execution flow.
