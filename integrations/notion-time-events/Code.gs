@@ -1321,24 +1321,38 @@ function mostRecentChurnEvent_(events) {
   // would silently inherit a stale prior execution's Work Type/Review
   // Source instead of computing fresh, potentially mislabeling every
   // subsequent Review Fix as Initial Work.
-  // Strictly-before, not on-or-before: `Ended At` is minute-granular, so a
-  // reopen whose assignee is cleared within the same Notion-reported minute
-  // the prior execution's own genuine close landed in can tie exactly with
-  // it. That churn is still the CURRENT execution's — excluding it on a
-  // tie would wrongly treat it as prior-execution evidence and force an
-  // unnecessary fresh classification (and, for Review Source, a second
-  // GitHub call that can attribute one execution's two intervals to
-  // different reviewers) — the same class of coincidental-tie ambiguity
-  // enforceDoneGate_'s own tie-seed already treats as "equally current"
-  // rather than arbitrarily excluding.
+  //
+  // A churn event tying EXACTLY with the cutoff's own `Ended At` (minute-
+  // granular, so routine, not rare) is genuinely ambiguous by timestamp
+  // alone, in either direction: it could be the very first churn of a
+  // BRAND NEW execution that happened to open and immediately churn again
+  // within that same minute (current — must be found), or it could be
+  // same-execution churn belonging to the execution the cutoff itself just
+  // ended (e.g. actor A's reassignment close and actor B's own later
+  // genuine close, both landing in the same minute — stale, must be
+  // excluded exactly like the cutoff itself is). Ended At cannot tell these
+  // apart on its own. `Execution=` can: every event stamps it at creation,
+  // and a reassignment replacement always inherits the outgoing event's own
+  // value unchanged (reassigning never starts a new execution) — so a tied
+  // candidate sharing the cutoff's own Execution= is definitively the SAME,
+  // now-completed execution, and only that positive identity match is
+  // excluded. A tie with no match (a genuinely different Execution=, or a
+  // legacy event on either side with none to compare) falls through as
+  // "current" — the same residual ambiguity Execution= itself already
+  // accepts for legacy data elsewhere in this file, not a new one.
   const cutoff = mostRecentGenuineClose_(events);
   const cutoffMs = cutoff ? propertyDate_(cutoff.properties['Ended At']).getTime() : null;
+  const cutoffExecution = cutoff ? parseNoteMeta_(propertyText_(cutoff.properties.Note)).execution : '';
   let found = null;
   (events || []).forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
     if (!endedAt) return;
-    if (cutoffMs !== null && endedAt.getTime() < cutoffMs) return;
     const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    if (cutoffMs !== null) {
+      const endedAtMs = endedAt.getTime();
+      if (endedAtMs < cutoffMs) return;
+      if (endedAtMs === cutoffMs && cutoffExecution && meta.execution === cutoffExecution) return;
+    }
     const isGenuineBoundary = meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
     if (isGenuineBoundary) return;
     if (!found || endedAt.getTime() > propertyDate_(found.properties['Ended At']).getTime()) {

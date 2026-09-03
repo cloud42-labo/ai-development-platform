@@ -2408,6 +2408,29 @@ test('mostRecentChurnEvent_ still finds a churn that ties exactly with the prior
   assert.equal(sandbox.mostRecentChurnEvent_([priorGenuineClose, tiedChurn]).id, 'evt-tied-churn');
 });
 
+test('mostRecentChurnEvent_ excludes a tied churn that shares the cutoff\'s own Execution= (same, now-completed execution)', () => {
+  // Codex-reported gap in the OPPOSITE direction from the test above: a
+  // Task is reassigned (actor A's event closes via 'reassignment') and the
+  // Task ALSO leaves for Review within that same Notion-reported minute
+  // (actor B's own event then closes via 'left_in_progress') — actor A's
+  // churn and actor B's genuine close can tie on Ended At, but they belong
+  // to the SAME just-completed execution (both carry its Execution=), not
+  // a not-yet-existing later one. Ended At alone cannot tell this apart
+  // from the sibling test above — Execution= can.
+  const { sandbox } = harness();
+  const tiedAt = '2026-08-30T06:00:00.000Z';
+  const executionId = '2026-08-30T05:00:00.000Z';
+  const actorAChurn = eventPage('evt-actor-a-churn', {
+    actor: 'Human', startedAt: executionId, endedAt: tiedAt,
+    note: 'Execution=' + executionId + ' | End Status=In Progress | Reason=reassignment',
+  });
+  const actorBGenuineClose = eventPage('evt-actor-b-close', {
+    actor: 'Claude', startedAt: tiedAt, endedAt: tiedAt,
+    note: 'Execution=' + executionId + ' | End Status=Review | Reason=left_in_progress',
+  });
+  assert.equal(sandbox.mostRecentChurnEvent_([actorAChurn, actorBGenuineClose]), null);
+});
+
 test('Work Type/Review Source survive an assignee cleared in one poll and reassigned only in a later one', () => {
   // Codex-reported gap: closing an outgoing actor's event and opening the
   // replacement's, within the SAME poll call, is the only path the original
