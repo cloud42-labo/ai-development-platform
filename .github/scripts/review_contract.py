@@ -126,12 +126,14 @@ def _paragraph_lookahead_lines(lines: list, start_idx: int) -> list:
     any line that would itself end the paragraph -- not just a blank line,
     but any other block-level construct this parser recognizes: an ATX or
     Setext heading, a fenced-code opener, or a raw-HTML-block (type 1/6)
-    opener. (Type 7 is deliberately not checked here: whether a given line
-    qualifies for type 7 already depends on paragraph state, which would
-    make this recursive for comparatively little benefit -- a known,
-    documented residual gap.) A backtick match found only past one of these
-    boundaries is not actually reachable within the same paragraph and must
-    not count.
+    opener. When the first lookahead candidate is itself a Setext underline,
+    it is paired with the immediately preceding current line so the heading
+    boundary is recognized before scanning beyond it. (Type 7 is deliberately
+    not checked here: whether a given line qualifies for type 7 already
+    depends on paragraph state, which would make this recursive for
+    comparatively little benefit -- a known, documented residual gap.) A
+    backtick match found only past one of these boundaries is not actually
+    reachable within the same paragraph and must not count.
     """
     result: list = []
     n = len(lines)
@@ -139,6 +141,8 @@ def _paragraph_lookahead_lines(lines: list, start_idx: int) -> list:
     while idx < n:
         candidate = lines[idx]
         if not candidate.strip():
+            break
+        if idx == start_idx and idx > 0 and _is_setext_heading_pair(lines[idx - 1], candidate):
             break
         if _ATX_HEADING_RE.match(candidate):
             break
