@@ -55,13 +55,16 @@ REQUIRED_SECTIONS = (
 
 _ATX_HEADING_RE = re.compile(r"(?m)^(#{1,3})[ \t]+(.*?)[ \t]*$")
 _SETEXT_HEADING_RE = re.compile(
-    r"(?m)^(?![ \t]*(?:#{1,6}[ \t]|[-*+][ \t]|>))[ \t]*(\S.*?)[ \t]*\n(=+|-{2,})[ \t]*$"
+    r"(?m)^(?![ \t]*(?:#{1,6}[ \t]|[-*+][ \t]|>))[ \t]*(\S.*?)[ \t]*\n {0,3}(=+|-{2,})[ \t]*$"
 )
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _EMPTY_BULLET_RE = re.compile(r"(?m)^[ \t]*[-*+][ \t]*$")
 _FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 _FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$")
 _INDENTED_CODE_RE = re.compile(r"^(?: {4}|\t)")
+_THEMATIC_BREAK_RE = re.compile(
+    r"^ {0,3}(?:\*(?:[ \t]*\*){2,}|-(?:[ \t]*-){2,}|_(?:[ \t]*_){2,})[ \t]*$"
+)
 
 # CommonMark "type 6" HTML block tag names -- block-level elements whose
 # opening (or closing) tag alone on a line starts a raw HTML block that
@@ -90,10 +93,9 @@ _HTML_BLOCK_OPEN_RE = re.compile(
 # hidden HTML block when the ENTIRE line (after up to 3 leading spaces) is
 # nothing but one complete open or close tag -- but only when no paragraph
 # is currently open, i.e. start of body, right after a blank line, right
-# after a heading, or right after any other block-level construct (NOT
-# merely "the previous line was blank" -- a heading closes a paragraph
-# without itself being a blank line). Ends at the next blank line, same as
-# type 6.
+# after a heading, thematic break, or any other block-level construct (NOT
+# merely "the previous line was blank" -- a block closes a paragraph without
+# itself being a blank line). Ends at the next blank line, same as type 6.
 _HTML_BLOCK_TYPE7_LINE_RE = re.compile(
     r"^[ \t]{0,3}(?:</[a-zA-Z][a-zA-Z0-9-]*[ \t]*"
     r"|<[a-zA-Z][a-zA-Z0-9-]*(?:[ \t]+[^<>]*)?[ \t]*/?)>[ \t]*$"
@@ -114,8 +116,10 @@ def _is_setext_heading_pair(text_line: str, underline_line: str) -> bool:
     genuine Setext heading -- reuses `_SETEXT_HEADING_RE` itself (rather than
     a fresh, potentially-diverging regex) so this shares the exact same
     exclusions it already encodes (a `- item` list line, a blank-line-
-    preceded horizontal rule, ...). A paragraph closes at (and including)
-    `underline_line` when this is true, same as any other heading."""
+    preceded horizontal rule, ...). A valid underline may have up to three
+    leading spaces; four-space indentation is code, not Setext syntax. A
+    paragraph closes at (and including) `underline_line` when this is true,
+    same as any other heading."""
     return bool(_SETEXT_HEADING_RE.match(text_line + "\n" + underline_line))
 
 
@@ -125,12 +129,12 @@ def _paragraph_lookahead_lines(lines: list, start_idx: int) -> list:
     multiline code span (see `_paragraph_has_matching_close`). Stops BEFORE
     any line that would itself end the paragraph -- not just a blank line,
     but any other block-level construct this parser recognizes: an ATX or
-    Setext heading, a fenced-code opener, or a raw-HTML-block (type 1/6)
-    opener. When the first lookahead candidate is itself a Setext underline,
-    it is paired with the immediately preceding current line so the heading
-    boundary is recognized before scanning beyond it. (Type 7 is deliberately
-    not checked here: whether a given line qualifies for type 7 already
-    depends on paragraph state, which would make this recursive for
+    Setext heading, thematic break, fenced-code opener, or raw-HTML-block
+    (type 1/6) opener. When the first lookahead candidate is itself a Setext
+    underline, it is paired with the immediately preceding current line so
+    the heading boundary is recognized before scanning beyond it. (Type 7 is
+    deliberately not checked here: whether a given line qualifies for type 7
+    already depends on paragraph state, which would make this recursive for
     comparatively little benefit -- a known, documented residual gap.) A
     backtick match found only past one of these boundaries is not actually
     reachable within the same paragraph and must not count.
@@ -147,6 +151,8 @@ def _paragraph_lookahead_lines(lines: list, start_idx: int) -> list:
         if _ATX_HEADING_RE.match(candidate):
             break
         if idx + 1 < n and _is_setext_heading_pair(candidate, lines[idx + 1]):
+            break
+        if _THEMATIC_BREAK_RE.match(candidate):
             break
         fence_match = _FENCE_OPEN_RE.match(candidate)
         if fence_match:
@@ -299,10 +305,8 @@ def _strip_hidden_regions(body: str) -> str:
     html_block_close_tag = ""
     span_state = {"in_span": False, "delim": ""}
     # True whenever no paragraph is currently open -- start of body, right
-    # after a blank line, right after a heading, or right after any other
-    # block-level construct (a heading is its own block and, like a blank
-    # line, closes whatever paragraph came before it without opening one of
-    # its own). Type 7 HTML blocks may only start here; type 6 may start
+    # after a blank line, heading, thematic break, or any other block-level
+    # construct. Type 7 HTML blocks may only start here; type 6 may start
     # anywhere.
     at_block_boundary = True
 
@@ -375,10 +379,9 @@ def _strip_hidden_regions(body: str) -> str:
                 # alone on its own line -- nothing else, not even prose --
                 # starts a hidden region too, but only when it can't be
                 # interrupting an existing paragraph: no paragraph is open
-                # right now (start of body, right after a blank line, right
-                # after a heading, or right after another block-level
-                # construct). Tags already covered by type 6/1 above never
-                # reach here.
+                # right now (start of body, right after a blank line, heading,
+                # thematic break, or another block-level construct). Tags
+                # already covered by type 6/1 above never reach here.
                 type7_match = _HTML_BLOCK_TYPE7_LINE_RE.match(line)
                 if type7_match:
                     in_html_block = True
@@ -393,13 +396,14 @@ def _strip_hidden_regions(body: str) -> str:
                 at_block_boundary = True
                 continue
 
-        # A heading line is its own block: it closes whatever paragraph
-        # preceded it, and does not itself open one -- the line right after
-        # a heading is still eligible to start a type-7 HTML block.
+        # A block boundary closes whatever paragraph preceded it and does not
+        # itself open one. The line right after a heading or thematic break
+        # is therefore eligible to start a type-7 HTML block.
         at_block_boundary = (
             line_is_blank
             or bool(_ATX_HEADING_RE.match(line))
             or (idx > 0 and _is_setext_heading_pair(lines[idx - 1], line))
+            or bool(_THEMATIC_BREAK_RE.match(line))
         )
 
         # Computed lazily, AT MOST ONCE for this physical line: `_mask_inline_
