@@ -1311,10 +1311,23 @@ function genuineCloseEndedAt_(events) {
 // is a PRIOR execution's ending, never same-execution churn, however
 // recently it happens to have closed.
 function mostRecentChurnEvent_(events) {
+  // A churn event only counts if it belongs to the execution AFTER the most
+  // recent genuine close — otherwise a completed PRIOR execution's own
+  // internal reassignment (which closed, chronologically, before that
+  // execution's own final genuine close) can outlive the boundary that
+  // ended it: nothing else here checked that a genuine close happened SINCE
+  // that churn event. Without this cutoff, a Task's brand-new execution
+  // with no churn of its own yet — genuinely a fresh, unclassified case —
+  // would silently inherit a stale prior execution's Work Type/Review
+  // Source instead of computing fresh, potentially mislabeling every
+  // subsequent Review Fix as Initial Work.
+  const cutoff = mostRecentGenuineClose_(events);
+  const cutoffMs = cutoff ? propertyDate_(cutoff.properties['Ended At']).getTime() : null;
   let found = null;
   (events || []).forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
     if (!endedAt) return;
+    if (cutoffMs !== null && endedAt.getTime() <= cutoffMs) return;
     const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
     const isGenuineBoundary = meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
     if (isGenuineBoundary) return;
@@ -1346,11 +1359,28 @@ function mostRecentLoggedStatus_(taskId) {
   let latestAt = null;
   rows.forEach(function (row) {
     if (String(row[0] || '') !== taskId) return;
+    const status = String(row[1] || '');
+    // Skip past In Progress itself — it is the status the CURRENT execution
+    // is starting into, never one that PRECEDED it, so it can never be a
+    // valid answer to "what came before this reopen". `logSnapshot_` still
+    // logs Status=In Progress even for an unmapped/cleared Assigned Agent
+    // (reconcileAuthoritativeTimeEvents_'s 'in_progress_without_mapped_actor'
+    // outcome opens nothing but still reaches logSnapshot_), so a
+    // reassignment gap can otherwise leave one or more trailing In Progress
+    // rows that would hide the status that actually began this execution.
+    if (status === DEFAULTS.START_STATUS) return;
     const at = row[2] instanceof Date ? row[2] : parseTimestamp_(row[2]);
     if (isNaN(at.getTime())) return;
-    if (!latestAt || at.getTime() > latestAt.getTime()) {
+    // `>=`, not `>`: rows are scanned in the same order they were appended
+    // (chronological), and Notion's last_edited_time — the source of every
+    // Reconciled At here — is minute-granular, so two genuinely different,
+    // consecutive observations for this Task can easily tie. On a tie, the
+    // later-appended row (processed later in this same forEach, since
+    // array order already matches append order) is the more recent
+    // observation and must win, not whichever happened to be seen first.
+    if (!latestAt || at.getTime() >= latestAt.getTime()) {
       latestAt = at;
-      latestStatus = String(row[1] || '');
+      latestStatus = status;
     }
   });
   return latestStatus;

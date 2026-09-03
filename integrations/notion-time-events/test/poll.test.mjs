@@ -2323,7 +2323,41 @@ test('classifyWorkType_ falls back to the Time-Event heuristic when Sync Log has
   assert.equal(sandbox.classifyWorkType_([closedFromReview], 'never-seen-before'), 'Review Fix');
 });
 
-test('mostRecentChurnEvent_ finds same-execution churn regardless of which poll closed it, but never a genuine boundary', () => {
+test('classifyWorkType_ looks past unassigned In Progress observations in Sync Log to the status that actually began the execution', () => {
+  // Codex-reported gap: reconcileAuthoritativeTimeEvents_'s
+  // 'in_progress_without_mapped_actor' outcome (an unmapped/cleared
+  // Assigned Agent while Status is already In Progress) opens no Time
+  // Event, but reconcileTaskPage_ still calls logSnapshot_ with
+  // Status=In Progress regardless. Taking the literal last Sync Log row
+  // blindly would then read "In Progress" as the status that PRECEDED this
+  // reopen — meaningless, since In Progress is what the execution IS, not
+  // what came before it — hiding the genuine Review that actually began it.
+  const taskId = 'task-sync-log-2';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('s1', 'notion_poll', taskId, 'Review', new Date('2026-08-30T05:00:00.000Z'), 'closed:evt-1');
+  sandbox.logSnapshot_('s2', 'notion_poll', taskId, 'In Progress', new Date('2026-08-30T05:30:00.000Z'), 'in_progress_without_mapped_actor');
+  sandbox.logSnapshot_('s3', 'notion_poll', taskId, 'In Progress', new Date('2026-08-30T05:40:00.000Z'), 'in_progress_without_mapped_actor');
+
+  assert.equal(sandbox.mostRecentLoggedStatus_(taskId), 'Review');
+  assert.equal(sandbox.classifyWorkType_([], taskId), 'Review Fix');
+});
+
+test('mostRecentLoggedStatus_ breaks a Reconciled-At tie by preferring the later-appended row', () => {
+  // Codex-reported gap: this integration explicitly expects Notion edit
+  // times (the source of every Reconciled At here) to be minute-granular,
+  // so two genuinely different, consecutive observations for the same Task
+  // routinely tie. The strict `>` this used to use kept whichever row was
+  // scanned first regardless of which was actually appended later.
+  const taskId = 'task-sync-log-3';
+  const { sandbox } = harness();
+  const tiedAt = new Date('2026-08-30T05:00:00.000Z');
+  sandbox.logSnapshot_('s1', 'notion_poll', taskId, 'Review', tiedAt, 'closed:evt-1');
+  sandbox.logSnapshot_('s2', 'notion_poll', taskId, 'Backlog', tiedAt, 'no_change:Backlog');
+
+  assert.equal(sandbox.mostRecentLoggedStatus_(taskId), 'Backlog');
+});
+
+test('mostRecentChurnEvent_ finds same-execution churn regardless of which poll closed it, but never a genuine boundary or a completed prior execution\'s own churn', () => {
   const { sandbox } = harness();
   assert.equal(sandbox.mostRecentChurnEvent_([]), null);
 
@@ -2333,14 +2367,26 @@ test('mostRecentChurnEvent_ finds same-execution churn regardless of which poll 
   });
   assert.equal(sandbox.mostRecentChurnEvent_([churn]).id, 'evt-churn');
 
-  // A genuine boundary is a PRIOR execution's end, never same-execution
-  // churn — must be excluded even though it closed more recently than the
-  // churn event above.
-  const genuineBoundary = eventPage('evt-boundary', {
-    actor: 'Claude', startedAt: '2026-08-29T05:00:00.000Z', endedAt: '2026-08-30T06:00:00.000Z',
+  // A genuine boundary from an EARLIER, already-completed execution,
+  // followed by the CURRENT execution's own churn — the churn (after the
+  // boundary) belongs to the current execution and must still be found.
+  const priorGenuineClose = eventPage('evt-prior-close', {
+    actor: 'Human', startedAt: '2026-08-29T05:00:00.000Z', endedAt: '2026-08-29T06:00:00.000Z',
     note: 'End Status=Review | Reason=left_in_progress',
   });
-  assert.equal(sandbox.mostRecentChurnEvent_([churn, genuineBoundary]).id, 'evt-churn');
+  assert.equal(sandbox.mostRecentChurnEvent_([priorGenuineClose, churn]).id, 'evt-churn');
+
+  // Codex-reported gap: a churn event that belongs to an execution which
+  // has SINCE genuinely closed (i.e. it closed BEFORE that later genuine
+  // boundary, entirely inside the now-completed execution) must not be
+  // picked up by a later, unrelated execution with no churn of its own
+  // yet — it is stale prior-execution evidence, exactly like a genuine
+  // boundary itself would be, even though nothing here marks it as one.
+  const oldChurnInsideClosedExecution = eventPage('evt-old-churn', {
+    actor: 'Human', startedAt: '2026-08-29T04:00:00.000Z', endedAt: '2026-08-29T04:30:00.000Z',
+    note: 'End Status=In Progress | Reason=reassignment',
+  });
+  assert.equal(sandbox.mostRecentChurnEvent_([oldChurnInsideClosedExecution, priorGenuineClose]), null);
 });
 
 test('Work Type/Review Source survive an assignee cleared in one poll and reassigned only in a later one', () => {
