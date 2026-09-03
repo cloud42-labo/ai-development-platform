@@ -2343,6 +2343,26 @@ test('reviewFixSinceTimestamp_ uses the current Review period\'s own start, not 
   assert.equal(new Date(sinceNoLog).toISOString(), '2026-08-30T05:00:00.000Z');
 });
 
+test('reviewFixSinceTimestamp_ uses the START of the current Review period, not the last time it was merely re-observed', () => {
+  // Codex-reported gap in the fix above: logSnapshot_ logs every genuinely
+  // distinct edit even when Status itself hasn't changed (an unrelated
+  // field — e.g. Result — edited while still in Review still produces a
+  // new, distinct snapshot and its own Sync Log row). Taking the LAST
+  // same-status row as "since" can land AFTER a GitHub review that was
+  // submitted earlier in that same, still-ongoing Review period, wrongly
+  // excluding it and misattributing the fix to 'Other' or a later reviewer.
+  const taskId = 'task-sync-log-5';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('s1', 'notion_poll', taskId, 'Review', new Date('2026-08-30T05:00:00.000Z'), 'closed:evt-1');
+  // An unrelated edit while STILL in Review — Status unchanged, but a
+  // genuinely distinct, later snapshot still gets logged.
+  sandbox.logSnapshot_('s2', 'notion_poll', taskId, 'Review', new Date('2026-08-30T05:30:00.000Z'), 'no_change:Review');
+
+  assert.equal(sandbox.mostRecentLoggedStatus_(taskId), 'Review');
+  const since = sandbox.reviewFixSinceTimestamp_([], taskId);
+  assert.equal(new Date(since).toISOString(), '2026-08-30T05:00:00.000Z', 'expected the period\'s own start (05:00), not the later re-observation (05:30)');
+});
+
 test('classifyWorkType_ falls back to the Time-Event heuristic when Sync Log has nothing for this Task yet', () => {
   const { sandbox } = harness();
   const closedFromReview = eventPage('evt-2', {

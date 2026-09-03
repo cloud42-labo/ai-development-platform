@@ -1378,8 +1378,13 @@ function mostRecentLoggedEntry_(taskId) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return null;
   // Columns: Snapshot ID, Source, Task ID, Status, Reconciled At, Outcome.
+  // Sheet rows are read in the same order they were appended — Google
+  // Sheets appendRow always adds after the last row, and logSnapshot_ is
+  // only ever called from a single, lock-serialized poll at a time — so
+  // this list is already chronological; no separate sort or tie-breaking
+  // pass is needed to get "most recent" or "earliest" right.
   const rows = sheet.getRange(2, 3, lastRow - 1, 3).getValues();
-  let latest = null;
+  const entries = [];
   rows.forEach(function (row) {
     if (String(row[0] || '') !== taskId) return;
     const status = String(row[1] || '');
@@ -1394,18 +1399,27 @@ function mostRecentLoggedEntry_(taskId) {
     if (status === DEFAULTS.START_STATUS) return;
     const at = row[2] instanceof Date ? row[2] : parseTimestamp_(row[2]);
     if (isNaN(at.getTime())) return;
-    // `>=`, not `>`: rows are scanned in the same order they were appended
-    // (chronological), and Notion's last_edited_time — the source of every
-    // Reconciled At here — is minute-granular, so two genuinely different,
-    // consecutive observations for this Task can easily tie. On a tie, the
-    // later-appended row (processed later in this same forEach, since
-    // array order already matches append order) is the more recent
-    // observation and must win, not whichever happened to be seen first.
-    if (!latest || at.getTime() >= latest.at.getTime()) {
-      latest = { status: status, at: at };
-    }
+    entries.push({ status: status, at: at });
   });
-  return latest;
+  if (!entries.length) return null;
+  // The most recent (last-appended) entry decides WHICH status this is.
+  const lastStatus = entries[entries.length - 1].status;
+  // But the entry's own `at` is only the LATEST time the Task was
+  // re-observed still in that status, not when it actually transitioned
+  // into it — logSnapshot_ logs every genuinely distinct edit even when
+  // Status itself hasn't changed (e.g. an unrelated field edited while
+  // still in Review), which can land well after review activity relevant
+  // to this exact period already happened. Walk backward from the end
+  // while the status keeps matching to find where this consecutive run
+  // actually began, and report THAT timestamp instead — the moment the
+  // Task genuinely entered its current status, which is what "the status
+  // immediately preceding this reopen" and "since this Review period
+  // began" both really mean.
+  let periodStartAt = entries[entries.length - 1].at;
+  for (let i = entries.length - 1; i >= 0 && entries[i].status === lastStatus; i--) {
+    periodStartAt = entries[i].at;
+  }
+  return { status: lastStatus, at: periodStartAt };
 }
 
 function mostRecentLoggedStatus_(taskId) {
