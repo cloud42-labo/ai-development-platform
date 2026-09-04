@@ -549,8 +549,19 @@ function backfillResultFingerprints_() {
 // timing and completion evidence are read from the page Notion returned; the
 // reconciler only ever moves Task Time Events toward the state Notion already
 // holds, so a repeated pass over the same page is a no-op.
-function reconcileTaskPage_(task) {
+function reconcileTaskPage_(task, options) {
   if (!isConfiguredTask_(task)) return 'ignored:not_configured_task';
+
+  // bypassDedup: only backfillStoryExclusion_ passes this — see its own
+  // call site and the dedup check below for why. Deliberately NOT the same
+  // shape as the reverted resolveAmbiguousProvenance option (round 17/18):
+  // this never changes what reconcileStoryTask_ decides for any event,
+  // only whether reconcileTaskPage_ actually calls it instead of
+  // short-circuiting on a stale snapshot hash — reconcileStoryTask_ itself
+  // stays fully idempotent regardless, so bypassing dedup only ever costs
+  // an extra, harmless re-check, never a different outcome for unchanged
+  // data.
+  const bypassDedup = Boolean(options && options.bypassDedup);
 
   const pageId = task.id;
   const currentStatus = propertyText_(task.properties.Status);
@@ -559,7 +570,22 @@ function reconcileTaskPage_(task) {
   const title = propertyText_(task.properties.Title) || pageId;
   const when = authoritativeEditTime_(task);
   const changedBy = editorLabel_(task.last_edited_by);
-  const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent);
+  const taskType = propertyText_(task.properties.Type);
+  const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent, taskType);
+
+  // Type = Story is a rollup/container over its own child Subtasks/Tasks, not
+  // an execution unit — real effort is timed on the children, never on the
+  // Story page itself. Before this check, a Story sitting In Progress (its
+  // ordinary state for as long as child work is in flight, routinely days)
+  // opened and accumulated its own Active Time Event exactly like an
+  // executable Task, double-counting hours already timed on its children and
+  // inflating daily-report/KPI Active totals (BUG-ADP-TTE-01). A Story's own
+  // Done transition also needs no Time Event evidence — only its children's —
+  // so it must never reach the Done gate below either. See
+  // reconcileStoryTask_ for the reduced handling this gets instead: never
+  // open a new event regardless of Status, but still archive away (and log)
+  // any event a Story already accumulated under the pre-fix behavior.
+  const isStory = taskType === 'Story';
 
   // Done is a completion gate that must be re-verified on every poll that
   // observes it — never short-circuited by the snapshot hash. Notion reports
@@ -570,21 +596,704 @@ function reconcileTaskPage_(task) {
   // persist indefinitely, since no further edit would ever change the hash.
   // Every other status is fine to dedup: skipping a re-read there just means
   // no new mutation was needed, not that an invalid state goes unchecked.
-  const mustReverify = currentStatus === DEFAULTS.DONE_STATUS;
-  if (!mustReverify && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
+  // A Story is exempt regardless of Status — see isStory above, and
+  // reconcileStoryTask_ never enforces the Done gate at all.
+  const mustReverify = currentStatus === DEFAULTS.DONE_STATUS && !isStory;
+  // hasProcessedSnapshot_ checks this page's single MOST RECENT Sync Log
+  // observation, not "was this exact snapshot ever logged, at any point in
+  // this page's history" (an earlier version of this check) — Codex-reported
+  // gap (round 27): with Type now part of the hash (see
+  // authoritativeSnapshotId_), a page observed as Task/In Progress,
+  // reconciled once as Story (closing its open event), and then changed
+  // back to that identical Task/In Progress state within the same
+  // last_edited_time minute produces a snapshot byte-identical to the
+  // FIRST Task observation already on file. Matching against "ever seen
+  // anywhere in history" found that old row and skipped this final
+  // transition as `duplicate:` — even though the Story pass in between had
+  // genuinely closed the event, leaving the page stuck `In Progress` with
+  // no open Time Event until some unrelated later edit changed the hash.
+  // Matching only the page's own most recent row is both the more correct
+  // definition of "duplicate" (nothing changed since we last looked at
+  // THIS page) and strictly more permissive than before — it can only
+  // decide to re-reconcile a page the old check would have skipped, never
+  // the reverse, so it carries no risk of skipping a genuinely new state.
+  if (!mustReverify && !bypassDedup && hasProcessedSnapshot_(snapshotId, pageId)) return 'duplicate:' + pageId;
 
-  const outcome = reconcileAuthoritativeTimeEvents_(
-    task,
-    currentStatus,
-    desiredActor,
-    changedBy,
-    snapshotId,
-    when
-  );
+  const outcome = isStory
+    ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId, when)
+    : reconcileAuthoritativeTimeEvents_(
+        task,
+        currentStatus,
+        desiredActor,
+        changedBy,
+        snapshotId,
+        when
+      );
 
   syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
-  logSnapshot_(snapshotId, 'notion_poll', pageId, currentStatus, when, outcome);
+  logSnapshot_(snapshotId, 'notion_poll', pageId, currentStatus, when, outcome, taskType);
   return outcome;
+}
+
+// Reduced reconciliation for Type = Story pages (see reconcileTaskPage_):
+// never opens a new Time Event no matter what Status reads, and never runs
+// the Done gate — a Story is a rollup, not an execution unit, so its own
+// completion needs no Time Event evidence. Its only remaining job is
+// cleanup: remove every Time Event a Story accumulated before this
+// exclusion existed, so pre-fix intervals do not linger forever
+// (BUG-ADP-TTE-01) — ALL of them, not only ones still open. A closed
+// legacy event is just as invalid as an open one: a Story that already
+// left `In Progress` under the pre-fix reconciler (the ordinary case for
+// most Stories — see `backfillStoryExclusion_` below for why this matters
+// on an existing deployment) had its bogus event closed through the
+// generic path with a real `Ended At`, computing a fictitious multi-day
+// Duration (h) exactly like the still-open case archiveStoryTimeEvent_
+// exists to prevent — filtering to only `openEvents` would leave every
+// already-closed legacy interval sitting in the authoritative data
+// forever, uncorrected.
+//
+// Archives every one of them rather than closing/leaving them — see
+// archiveStoryTimeEvent_ for why closing was rejected: it would give an
+// event a real `Ended At` and let Duration (h) compute over however long
+// it was open, still inflating every historical Active-hour aggregation
+// this reconciler does not directly control (the Sheet's own Duration (h)
+// formula, and any downstream KPI aggregation reading Task Time Events).
+// Nothing about any of these events was ever real work to time, so
+// removing them — not recording or preserving a fictitious duration for
+// them — matches what actually happened. Archiving (rather than a hard
+// delete) also means Notion's own database/data-source queries exclude
+// them going forward by default, so none of them can ever resurface as
+// `openEvents` or in a future aggregation without this function needing to
+// track that itself, and every row remains recoverable from Notion's
+// trash if ever needed. archiveStoryTimeEvent_ also purges the event's row
+// from the Google Sheet projection outright — Codex-reported gap in an
+// earlier version of this fix: archiving removes the event from Notion's
+// own queries, so syncTaskProjection_'s ordinary re-sync never revisits an
+// already-projected row to update or delete it, and README documents the
+// Summary tab's actor totals and open-event counts as derived from this
+// same projection — a stale row (Duration (h) already computed, for a
+// closed legacy event) would keep feeding that aggregation the identical
+// double-counting this fix exists to stop, just moved from Notion to the
+// Sheet instead of eliminated.
+//
+// BUT this "archive everything" behavior must never touch an event that
+// represents genuine Task-era work — Codex-reported gap: Type transitions
+// are supported symmetrically (see storyConversionHappenedWhileInProgress_ for the
+// mirror-image Story-to-Task case), so a page can just as well go the
+// other way, FROM a real executable Task WITH legitimate Time Events TO
+// Type = Story. An event genuinely created (or touched) by the ordinary
+// reconcileAuthoritativeTimeEvents_ path while this exact page really was
+// a Task — real, completed or in-flight work — must never be archived
+// outright the moment someone reclassifies the page.
+// eventWasTouchedDuringTaskExecution_ decides this per EVENT, not per
+// page — Codex-reported gap on an earlier, page-level version of this
+// same fix: a page can be observed as an idle Task (Type = Task, e.g.
+// Status = Ready) WITHOUT that observation ever touching a specific
+// PRE-EXISTING event's own Note at all (nothing open to close, nothing
+// new to open) — proving the PAGE was once seen as Task proves nothing
+// about whether THIS event specifically was created or touched during
+// that window, vs. being a pre-upgrade legacy Story event that merely
+// happens to still be attached to a page that later, briefly, looked
+// like a Task.
+//
+// Codex-reported gap (round 18, reviewing this exact round-17 attempt): an
+// earlier version of this function accepted a resolveAmbiguousProvenance
+// flag that backfillStoryExclusion_ passed to actually ARCHIVE an
+// ambiguous-marked event instead of skipping it, reasoning that the
+// backfill only ever visits pages that ARE Type = Story right now. That
+// reasoning repeats the exact mistake backfillTaskOriginProvenance_'s own
+// comment already root-caused twice over (rounds 15/16): a page's CURRENT
+// Type never proves anything about its pre-revision event history, in
+// EITHER direction — a page reading Story right now may have been
+// Task → Story → ... any number of times before this revision was ever
+// deployed, so an event on it can just as easily be genuine pre-upgrade
+// Task-era work as bogus Story stray data, and archiving "because the page
+// is Story now" is indistinguishable from the exact guess-in-the-dangerous-
+// direction failure mode AMBIGUOUS_PROVENANCE_MARKER exists to prevent.
+// There is no caller — not even a backfill scoped to Story pages — for
+// which "currently Story" adds any information about a marker that was
+// deliberately stamped ambiguous specifically because current Type
+// couldn't answer this question. Reverted to the single behavior: every
+// caller, no exceptions, leaves an ambiguous-marked event exactly as
+// found. This is a deliberate, permanent accepted limitation, not a bug to
+// eventually close automatically — see backfillStoryExclusion_'s own
+// comment and the README's "Known limitations" for why full automatic
+// resolution of pre-upgrade ambiguous data is intentionally out of scope.
+function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when) {
+  const events = queryNotionTimeEventsForTask_(taskId);
+  if (!events.length) return 'story_excluded';
+
+  const actions = [];
+  events.forEach(function (eventPage) {
+    if (eventProvenanceIsAmbiguous_(eventPage)) {
+      // Neither preserve nor archive — see backfillTaskOriginProvenance_'s
+      // comment for why: a page already Story before this revision's
+      // deploy has events whose true origin (genuine pre-upgrade Task-era
+      // work vs. always-bogus Story stray data) cannot be recovered from
+      // any data this script has access to. Guessing either way risks a
+      // real failure mode (erasing real work, or reintroducing the
+      // double-counting bug), so this is left exactly as found and called
+      // out by its own Outcome for an operator to review by hand.
+      //
+      // "Left exactly as found" still means CLOSING it if it is still
+      // open — Codex-reported gap (round 23): while its page keeps
+      // reading Type = Story, nothing else in this file ever revisits an
+      // ambiguous event again, so an open one would otherwise keep
+      // accruing time indefinitely every time some downstream aggregation
+      // computes its running duration (e.g. the Sheet's own Duration (h)
+      // formula) — directly reintroducing the double-counting this whole
+      // exclusion exists to stop, just for the one population (ambiguous)
+      // this file was never taught to bound. Closing it fixes its
+      // duration in place without resolving anything about its true
+      // origin: its own Task Origin=ambiguous-pre-upgrade marker is left
+      // completely untouched (closeNotionTimeEvent_ never touches it),
+      // and it is reported under a distinct outcome
+      // (closed_ambiguous_pre_upgrade_provenance:, a real write, unlike
+      // the plain skip below) so an operator reviewing this Story's
+      // history can still find and judge it by hand later — the whole
+      // point is bounding growth, not asserting the guess this sentinel
+      // exists to avoid making.
+      if (!propertyDate_(eventPage.properties['Ended At'])) {
+        // Clamped to never precede this event's own Started At — Codex-
+        // reported gap (round 24): `when` is the STORY PAGE's own observed
+        // edit time (authoritativeEditTime_), not this event's. A Time
+        // Event added directly in Notion, attached to the Story via its
+        // own Task relation, does not touch the Story page itself, so
+        // `when` can be older than an event added after the page's last
+        // real edit — closing at `when` in that case would set Ended At
+        // before Started At, a negative duration in Notion and the Sheet
+        // projection. Bounding growth must never manufacture an invalid
+        // interval to do it.
+        const boundaryNoEarlierThanStart = when.getTime() >= eventStartedAt_(eventPage).getTime()
+          ? when
+          : eventStartedAt_(eventPage);
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, boundaryNoEarlierThanStart, 'ambiguous_provenance_bounded');
+        actions.push('closed_ambiguous_pre_upgrade_provenance:' + eventPage.id);
+        return;
+      }
+      actions.push('skipped_ambiguous_pre_upgrade_provenance:' + eventPage.id);
+      return;
+    }
+    if (eventWasTouchedDuringTaskExecution_(eventPage)) {
+      // Preserve, never erase: an open Task-era interval is closed at the
+      // conversion boundary exactly like any other Task leaving `In
+      // Progress` (real work, real duration, correctly stopped from
+      // accruing further now that this page routes through the Story path
+      // going forward) — a completed one needs no action at all, since it
+      // is already a legitimate closed interval that predates the
+      // conversion and was never part of the bug this exclusion exists to
+      // fix in the first place.
+      if (!propertyDate_(eventPage.properties['Ended At'])) {
+        // Clamped to never precede this event's own Started At — Codex-
+        // reported gap (round 25), the same class of gap as the
+        // ambiguous-close clamp above: `when` is derived from the Task
+        // page's own minute-granular `last_edited_time`, and an event that
+        // opened with a Started At carrying seconds can, within that same
+        // observed minute, read as later than `when` — closing at `when`
+        // in that case would set Ended At before Started At, a negative
+        // duration.
+        const boundaryNoEarlierThanStart = when.getTime() >= eventStartedAt_(eventPage).getTime()
+          ? when
+          : eventStartedAt_(eventPage);
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, boundaryNoEarlierThanStart, 'left_in_progress');
+        actions.push('closed_task_era_at_story_conversion:' + eventPage.id);
+      }
+      return;
+    }
+    // Reached only when an event has no Task Origin= marker at all (not
+    // ambiguous, not confirmed Task-era) -- Codex-reported gap (round 19):
+    // on an EXISTING live deployment, the already-installed pollTaskChanges
+    // trigger keeps running the moment this revision's code is deployed,
+    // independent of whether backfillTaskOriginProvenance_ has been run yet
+    // or has finished draining (it can take multiple wall-clock-bounded
+    // calls on a large workspace). A Story reached by an ordinary poll
+    // during that window has a pre-existing event that genuinely has no
+    // marker YET, not because its origin is confirmed non-Task -- and
+    // that is indistinguishable, from this event's data alone, from the
+    // exact bogus-Story-stray-data case this branch exists to archive.
+    // Archiving it here, before the backfill ever gets a chance to flag it
+    // ambiguous, permanently erases the same genuine Task-era history the
+    // whole ambiguous-marker mechanism exists to protect -- just via a
+    // race instead of a caller reasoning about current Type. Gate this
+    // path behind taskOriginBackfillComplete_(): until the operator has
+    // run backfillTaskOriginProvenance_() to a full, undrained-free
+    // completion at least once, a marker-less event is treated exactly
+    // like an ambiguous one -- skipped, not archived. A fresh deployment
+    // never reaches this branch at all regardless of the flag, since
+    // createNotionTimeEvent_ always stamps every event it ever creates
+    // with a marker (a real Type or NO_TYPE_MARKER) -- only pre-existing,
+    // pre-revision data can lack one.
+    if (!taskOriginBackfillComplete_()) {
+      actions.push('skipped_pending_provenance_backfill:' + eventPage.id);
+      return;
+    }
+    archiveStoryTimeEvent_(eventPage, changedBy, snapshotId);
+    actions.push('archived_story_event:' + eventPage.id);
+  });
+  return actions.length ? actions.join(',') : 'story_excluded';
+}
+
+// Archives (see reconcileStoryTask_ for why) one of a Story's stray Time
+// Events, open or already closed, stamping the same Reason=story_excluded
+// marker used elsewhere in this file in the same request, so the record
+// still explains itself if ever restored from Notion's trash. Also purges
+// the event's row from the Sheet projection outright (see
+// reconcileStoryTask_'s comment for why a stale row there matters, not
+// just a cosmetic leftover).
+//
+// Purges the Sheet row BEFORE archiving in Notion, not after — Codex-
+// reported gap in an earlier version of this fix: this whole operation is
+// two separate remote writes, not one transaction, so Apps Script can be
+// terminated (or the Sheet write can simply fail) between them. Archiving
+// first would leave a retry with nothing to recover from: the event is
+// already excluded from queryNotionTimeEventsForTask_'s results the moment
+// it is archived (see reconcileStoryTask_'s comment), so a subsequent poll
+// would never call this function for it again, and the stale Sheet row
+// would linger forever, permanently inflating the Summary tab totals this
+// fix exists to protect. Purging first makes the interruption safe instead:
+// purgeSheetProjectionRow_ is already a no-op when the row is absent, so a
+// retry that reaches this function again for the same still-unarchived
+// event (still visible in queryNotionTimeEventsForTask_) simply re-attempts
+// the purge (harmless) and then the archive — converging either way.
+function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
+  purgeSheetProjectionRow_(eventPage.id);
+  const existingNote = propertyText_(eventPage.properties.Note);
+  const marker = buildNote_({ reason: 'story_excluded', snapshotId: snapshotId, changedBy: changedBy });
+  notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
+    archived: true,
+    properties: {
+      Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
+    },
+  });
+}
+
+// Operator escape hatch for an EXISTING live deployment being upgraded to
+// add the Type = Story exclusion (see reconcileStoryTask_): queries every
+// Type = Story page directly, regardless of Status — independent of
+// last_edited_time or the cursor — and reconciles each through the
+// ordinary reconcileTaskPage_ entry point, which archives every Time Event
+// a Story has via reconcileStoryTask_, open or already closed — except an
+// event already flagged Task Origin=ambiguous-pre-upgrade by
+// backfillTaskOriginProvenance_, which this backfill leaves untouched
+// exactly like every other caller (see reconcileStoryTask_'s own comment
+// and the README's "Known limitations" for why that is a permanent,
+// deliberate exception, not a gap), AND except a marker-less event at all
+// if backfillTaskOriginProvenance_ has never yet fully drained (see
+// taskOriginBackfillComplete_) — this backfill cannot archive anything on
+// an existing deployment until that has run to completion at least once
+// (Codex-reported gap, round 19). Run backfillTaskOriginProvenance_() to
+// a full drain first.
+//
+// Deliberately not scoped to Status = In Progress, for two independent
+// reasons a narrower query would miss:
+// 1. On such a deployment BOOTSTRAP_ACTIVE_DONE is already set from
+//    before, so the ordinary pollTaskChanges bootstrap — which only ever
+//    runs once, before that flag is set — never revisits a Story that has
+//    already been sitting In Progress since before this revision was
+//    deployed. Its pre-fix open Time Event would otherwise stay Active and
+//    keep inflating Active-hour totals indefinitely, until some unrelated
+//    future edit happens to touch that exact Story.
+// 2. Most Stories on a live deployment have already LEFT In Progress under
+//    the pre-fix reconciler by the time this runs — Codex-reported gap in
+//    an earlier version of this backfill, which queried only
+//    Status = In Progress: a Story that already left In Progress had its
+//    bogus event closed through the ordinary generic path, with a real
+//    Ended At and a fictitious multi-day Duration (h) computed over it —
+//    exactly the double-counting this exclusion exists to stop, just
+//    already recorded rather than still accruing, and a Status = In
+//    Progress filter would never even see that Story again to correct it.
+//    Every Type = Story page, regardless of current Status, needs a single
+//    pass through reconcileStoryTask_ to archive whatever it has.
+// A fresh deploy has no pre-existing Story Time Events at all and needs no
+// backfill: the exclusion applies to every poll from day one. Run once
+// from the editor immediately after deploying this revision.
+//
+// Resumable the same way backfillResultFingerprints_ is, and for the same
+// reason: archiving a Story's Time Event does not remove the Story itself
+// from this query's own Type=Story result set (nothing about its Type
+// changed), so a truncated call's unqualified
+// re-run would keep re-fetching the identical oldest prefix forever —
+// reconciling it again is a free re-scan, but Story pages *beyond* that
+// prefix would never be reached despite the "call again to continue"
+// instruction below. STORY_EXCLUSION_RESUME_CURSOR (queried with
+// on_or_after, plus a local STORY_EXCLUSION_RESUME_TIE_OFFSET skip so a
+// tied last_edited_time at the truncation boundary resumes correctly
+// rather than silently dropping its remainder) tracks how far a prior call
+// actually got. Same accepted, extreme-scale limitation as
+// LAST_SYNC_CURSOR_TIE_OFFSET / BACKFILL_RESUME_TIE_OFFSET elsewhere in
+// this file: a single tied last_edited_time group wide enough to itself
+// exceed QUERY_PAGE_SAFETY_LIMIT (thousands of Stories sharing one exact
+// minute) cannot be fully resolved this way, since Notion's public API
+// offers no secondary sort key to page within an exact-timestamp tie — see
+// README "Known limitations".
+//
+// Also bounds its own pagination phase the same way backfillResultFingerprints_
+// does, and for the same reason: an unbounded fetch (up to
+// QUERY_PAGE_SAFETY_LIMIT round trips) could otherwise spend the entire
+// MAX_RUN_DURATION_MS budget just fetching pages before the processing loop
+// below ever runs its own deadline check — leaving nothing processed, and
+// therefore no checkpoint to persist, so every retry would repeat the
+// identical fetch-only pass forever instead of ever making progress.
+function backfillStoryExclusion_() {
+  return withPollLock_(function () {
+    const runStartedAt = new Date();
+    const props = PropertiesService.getScriptProperties();
+    const resumeCursor = props.getProperty('STORY_EXCLUSION_RESUME_CURSOR');
+    const tieOffset = resumeCursor ? Number(props.getProperty('STORY_EXCLUSION_RESUME_TIE_OFFSET') || '0') : 0;
+    const filter = resumeCursor
+      ? { and: [
+          { property: 'Type', select: { equals: 'Story' } },
+          { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
+        ] }
+      : { property: 'Type', select: { equals: 'Story' } };
+    function tieOffsetStartIndex_(results) {
+      let index = 0;
+      if (resumeCursor && tieOffset > 0) {
+        let skipped = 0;
+        while (
+          index < results.length &&
+          skipped < tieOffset &&
+          String(results[index].last_edited_time || '') === resumeCursor
+        ) {
+          skipped++;
+          index++;
+        }
+      }
+      return index;
+    }
+    // Reserve half the run budget for pagination, leaving the rest
+    // (MIN_PROCESSING_RESERVE_MS short of the full budget) for actually
+    // processing and checkpointing whatever got retrieved. A resumed call
+    // whose persisted tie offset already exceeds what the half-budget alone
+    // can fetch is allowed to keep fetching past that primary deadline —
+    // hasProgress below reports whether the current fetch already has
+    // something past the tie-offset skip to work with — same escalation
+    // pattern as backfillResultFingerprints_, for the identical reason: a
+    // second, independent pagination pass starting over would only re-fetch
+    // from page 1 again and waste the time this one already spent.
+    const result = paginateNotionQuery_(
+      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+      {
+        page_size: 100,
+        filter: filter,
+        sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+      },
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS - MIN_PROCESSING_RESERVE_MS,
+      function (results) { return tieOffsetStartIndex_(results) < results.length; }
+    );
+    const startIndex = tieOffsetStartIndex_(result.results);
+    const toProcess = result.results.slice(startIndex);
+
+    const outcomes = [];
+    let iterated = 0;
+    while (
+      iterated < toProcess.length &&
+      (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
+    ) {
+      // bypassDedup: true — Codex-reported gap (round 23): a Time Event
+      // added directly to an already-reconciled Story (e.g. by hand,
+      // after TASK_ORIGIN_BACKFILL_COMPLETE — see the E2E step above)
+      // changes nothing about the Story PAGE's own snapshot (Status,
+      // Assigned Agent, last_edited_time, Type), so without this,
+      // reconcileTaskPage_'s ordinary dedup would return `duplicate:`
+      // before ever calling reconcileStoryTask_ again, and this backfill's
+      // advertised archive path would never actually reach the new event
+      // on any repeated run — only an unrelated edit to the Story page
+      // itself would ever surface it. This explicit, one-time (or
+      // re-run-to-convergence) operator cleanup pass must not rely on the
+      // Story page having also changed; reconcileStoryTask_ itself is
+      // fully idempotent, so bypassing dedup here only ever costs an
+      // extra, harmless re-check for a Story with nothing new to do.
+      outcomes.push(reconcileTaskPage_(toProcess[iterated], { bypassDedup: true }));
+      iterated++;
+    }
+    const timedOut = iterated < toProcess.length;
+    const processed = toProcess.slice(0, iterated);
+
+    if ((result.truncated || timedOut) && processed.length) {
+      const lastSeen = String(processed[processed.length - 1].last_edited_time || '');
+      if (lastSeen) {
+        props.setProperty('STORY_EXCLUSION_RESUME_CURSOR', lastSeen);
+        // Same carry-over rule as backfillResultFingerprints_: if this
+        // call's own tail is still the exact same tied timestamp the
+        // resume cursor already pointed at, the members that resume's own
+        // tieOffset already skipped (processed by an earlier call, not
+        // present in `processed` at all) belong to the same tie and must
+        // be counted cumulatively — otherwise every further call spanning
+        // the same cohort re-skips to only what THAT call processed and
+        // re-walks the same middle slice forever.
+        let newTieOffset = 0;
+        for (let i = 0; i < processed.length; i++) {
+          newTieOffset = String(processed[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
+        }
+        const cumulativeTieOffset = (lastSeen === resumeCursor ? tieOffset : 0) + newTieOffset;
+        props.setProperty('STORY_EXCLUSION_RESUME_TIE_OFFSET', String(cumulativeTieOffset));
+      }
+      Logger.log(
+        'backfillStoryExclusion_: stopped at the ' +
+        (timedOut ? 'wall-clock bound' : 'pagination safety limit') +
+        ' after reconciling ' + iterated + ' of ' + result.results.length +
+        ' Story page(s) still In Progress this call — call again to resume' +
+        (processed.length ? ' from ' + processed[processed.length - 1].last_edited_time : '') + '.'
+      );
+    } else if (result.truncated || timedOut) {
+      // Stopped with nothing new processed this call (the whole returned
+      // batch was already covered by the tie-offset skip): leave the
+      // resume state exactly as it was rather than losing the resume
+      // point — same rule pollTaskChanges/backfillResultFingerprints_
+      // apply for the identical scenario.
+    } else {
+      // Fully drained: clear any stale resume point so a future call
+      // starts a fresh full pass.
+      props.setProperty('STORY_EXCLUSION_RESUME_CURSOR', '');
+      props.setProperty('STORY_EXCLUSION_RESUME_TIE_OFFSET', '');
+    }
+
+    return {
+      scanned: result.results.length,
+      processed: iterated,
+      truncated: result.truncated,
+      timedOut: timedOut,
+      outcomes: outcomes,
+    };
+  });
+}
+
+// Operator escape hatch for an EXISTING LIVE DEPLOYMENT being upgraded to
+// add the `Task Origin=` provenance marker (see
+// eventWasTouchedDuringTaskExecution_): flags every pre-existing Time
+// Event that doesn't have one yet — across EVERY page, any Type — with the
+// `AMBIGUOUS_PROVENANCE_MARKER` sentinel (see eventProvenanceIsAmbiguous_),
+// so reconcileStoryTask_ never guesses at a pre-existing event's history
+// and instead leaves it exactly as found for an operator to review.
+//
+// Codex-reported gap: absence of `Task Origin=` must not default to "treat
+// as unproven, possibly-Story-origin data" for an event that simply
+// predates this revision — eventWasTouchedDuringTaskExecution_'s own
+// conservative default (archive when unprovable) is correct for genuinely
+// bogus legacy Story stray data, but a genuinely pre-upgrade Task-era
+// event has the IDENTICAL signature (no marker at all, since the field
+// itself is new) with the OPPOSITE correct outcome (preserve). The two
+// cannot be told apart from the event's own data alone.
+//
+// Deliberately does NOT try to infer a confirmed Task/Story origin from a
+// page's CURRENT Type at backfill time, in EITHER direction — Codex-
+// reported gap across two rounds of this exact fix. An earlier version
+// trusted the current Type when it read non-Story, reasoning that was
+// "the common case, and the only case where the current Type is itself
+// usable evidence" — but a page can have flipped Type any number of times
+// before this revision was ever deployed, with no historical record of
+// when: a page reclassified Story → Task before this deploy looks exactly
+// like an ordinary Task page, yet may still carry a genuinely bogus
+// pre-fix Story stray event created while it really was a Story: this
+// backfill would have wrongly certified it as Task-origin, letting
+// reconcileStoryTask_ preserve it forever the instant the page (or the
+// event itself, via some other path) is ever reclassified to Story again.
+// A prior round already covered the mirror-image case (Task → Story
+// before deploy). Both directions share one root cause — the page's
+// CURRENT Type never proves anything about pre-revision history — so
+// EVERY pre-existing event without a marker gets flagged ambiguous,
+// unconditionally, regardless of what Type its page currently reads.
+// Only events created after this deploy (via createNotionTimeEvent_,
+// which stamps the real, current Type directly and immutably) ever get a
+// confirmed `Task Origin=` value.
+//
+// MUST run once, immediately after deploying, BEFORE backfillStoryExclusion_
+// — so every pre-existing event is flagged (and thus left alone) before
+// backfillStoryExclusion_ could otherwise archive it outright. Run this
+// even on a genuinely fresh deployment, not only an existing one being
+// upgraded — Codex-reported gap (round 25): a fresh deployment has no
+// pre-existing Time Events created BY THIS SCRIPT (every one gets its
+// confirmed `Task Origin=` at creation from day one), but backfillStoryExclusion_
+// also supports a Time Event added directly in Notion, not through this
+// script, at any later point — and that path's own archiving is gated on
+// TASK_ORIGIN_BACKFILL_COMPLETE (see taskOriginBackfillComplete_), which
+// stays false forever if this backfill is skipped as "not needed" on a
+// fresh deploy. A zero-result full drain still sets that flag (see its own
+// "fully drained" branch below), so running this once, even against an
+// empty history, is what unlocks that archive path for any such
+// future stray data — cheap, since there is nothing to scan or flag yet.
+//
+// Queries every page regardless of Type (including pages with no Type set
+// at all): unlike the earlier, Type-dependent design, this backfill's
+// outcome for a given event never depends on its page's current Type, so
+// there is no page this could skip without leaving a gap.
+//
+// Resumable and pagination-bounded the same way backfillStoryExclusion_
+// is, and for the identical reasons — see its own comment.
+// Tracks its resumed tie cohort by PAGE ID (TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS,
+// comma-joined), not by a raw count of how many shared the resume cursor's
+// timestamp last time (the position-based `tieOffset` pattern every other
+// resumable pass in this file still uses) — Codex-reported gap (round 28):
+// a count cannot tell "a page that was already processed left the tied
+// cohort" apart from "a page that was never processed left it too", so if
+// an already-processed page is edited between two calls (its own
+// last_edited_time moving later, out of the old tie) before this backfill
+// resumes, the resumed on_or_after query returns a now-SMALLER tied
+// cohort, and skipping the old (larger) count from it silently drops
+// whichever page never actually got visited — permanently, once this pass
+// fully drains and sets TASK_ORIGIN_BACKFILL_COMPLETE, since nothing else
+// ever re-visits it. For every other resumable pass in this file
+// (pollTaskChanges, backfillResultFingerprints_, backfillStoryExclusion_),
+// a page silently skipped this way just means one poll's worth of delay —
+// idempotent, and self-correcting the next time anything touches that
+// page. Here it is not: a marker-less event silently missed by this
+// specific backfill stays marker-less past TASK_ORIGIN_BACKFILL_COMPLETE,
+// and reconcileStoryTask_'s archive path can then permanently delete it as
+// though it were pre-fix Story stray data — even when it is genuine
+// pre-upgrade Task-era history. That asymmetric, irreversible consequence
+// is why only this one function gets the more expensive ID-based fix
+// rather than the same accepted, documentation-only treatment as the
+// others' identical-in-shape (but recoverable) tie limitation.
+//
+// Matching by ID rather than position also has no failure mode the old
+// count-based check didn't already share at genuine extreme scale: Script
+// Properties caps a single property's value size, so a tie cohort with
+// enough page IDs to exceed that (on the order of hundreds of UUIDs) hits
+// the same kind of hard, accepted limit `LAST_SYNC_CURSOR_TIE_OFFSET` and
+// friends already document for "thousands of pages sharing one exact
+// minute" — not a new gap this introduces, just the same one under a
+// slightly different shape.
+function backfillTaskOriginProvenance_() {
+  return withPollLock_(function () {
+    const runStartedAt = new Date();
+    const props = PropertiesService.getScriptProperties();
+    const resumeCursor = props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR');
+    const resumeTieIds = resumeCursor
+      ? String(props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS') || '').split(',').filter(Boolean)
+      : [];
+    // No Type restriction at all — see the function's own comment for why
+    // every page needs a visit regardless of its current Type.
+    const filter = resumeCursor
+      ? { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } }
+      : undefined;
+    // A result is already handled only if it BOTH shares the resume
+    // cursor's exact timestamp AND is one of the specific pages this
+    // resume point recorded as processed — never a raw position, so a page
+    // whose own edit moved it out of (or into) the tied cohort since the
+    // last call can never cause a different, still-unprocessed page to be
+    // skipped in its place.
+    function notYetProcessed_(results) {
+      return results.filter(function (r) {
+        return !(String(r.last_edited_time || '') === resumeCursor && resumeTieIds.indexOf(r.id) !== -1);
+      });
+    }
+    const result = paginateNotionQuery_(
+      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+      {
+        page_size: 100,
+        filter: filter,
+        sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+      },
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS - MIN_PROCESSING_RESERVE_MS,
+      function (results) { return notYetProcessed_(results).length > 0; }
+    );
+    const toProcess = notYetProcessed_(result.results);
+
+    const outcomes = [];
+    let iterated = 0;
+    while (
+      iterated < toProcess.length &&
+      (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
+    ) {
+      outcomes.push(backfillTaskOriginForTask_(toProcess[iterated]));
+      iterated++;
+    }
+    const timedOut = iterated < toProcess.length;
+    const processed = toProcess.slice(0, iterated);
+
+    if ((result.truncated || timedOut) && processed.length) {
+      const lastSeen = String(processed[processed.length - 1].last_edited_time || '');
+      if (lastSeen) {
+        props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR', lastSeen);
+        const newTieIds = processed
+          .filter(function (r) { return String(r.last_edited_time || '') === lastSeen; })
+          .map(function (r) { return r.id; });
+        const cumulativeTieIds = (lastSeen === resumeCursor ? resumeTieIds : []).concat(newTieIds);
+        props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS', cumulativeTieIds.join(','));
+      }
+      Logger.log(
+        'backfillTaskOriginProvenance_: stopped at the ' +
+        (timedOut ? 'wall-clock bound' : 'pagination safety limit') +
+        ' after processing ' + iterated + ' of ' + result.results.length +
+        ' Task page(s) this call — call again to resume' +
+        (processed.length ? ' from ' + processed[processed.length - 1].last_edited_time : '') + '.'
+      );
+    } else if (result.truncated || timedOut) {
+      // Stopped with nothing new processed this call (the whole returned
+      // batch was already covered by the tie skip): leave the resume state
+      // exactly as it was rather than losing the resume point — same rule
+      // the other backfills apply for the identical scenario.
+    } else {
+      // Fully drained: clear any stale resume point so a future call
+      // starts a fresh full pass.
+      props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR', '');
+      props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS', '');
+      // Persist that a full, undrained-free pass has happened at least
+      // once -- see taskOriginBackfillComplete_ and reconcileStoryTask_'s
+      // own comment (Codex-reported gap, round 19) for why
+      // reconcileStoryTask_ needs this to gate archiving a marker-less
+      // event on an existing live deployment against the already-running
+      // pollTaskChanges trigger racing ahead of this backfill. Never
+      // cleared once set: a later resumed run (e.g. new pages created
+      // between two full passes) simply re-drains and re-sets it the same
+      // way, and there is no scenario where "was ever fully drained"
+      // should revert to false.
+      props.setProperty('TASK_ORIGIN_BACKFILL_COMPLETE', 'true');
+    }
+
+    return {
+      scanned: result.results.length,
+      processed: iterated,
+      truncated: result.truncated,
+      timedOut: timedOut,
+      outcomes: outcomes,
+    };
+  });
+}
+
+// Backfills a `Task Origin=` marker onto every Time Event of one page that
+// doesn't already have one — see backfillTaskOriginProvenance_ for why, and
+// for why a page currently Story gets the distinct `ambiguous-pre-upgrade:`
+// marker instead of an ordinary one. Events created after this revision
+// already carry the marker from createNotionTimeEvent_ and are left
+// completely untouched (no-op, not re-stamped) — this only ever fills a
+// gap, never overwrites.
+//
+// Writes the Sync Log row BEFORE patching the event's own Note, not after
+// — Codex-reported gap in an earlier version of this fix: these are two
+// separate remote writes, not one transaction, and if the Notion patch
+// succeeded but this call was interrupted before the Sync Log write (or
+// the write itself failed), the event would permanently carry a
+// `Task Origin=` marker with no matching Sync Log row to resolve it —
+// existingOrigin would see it as already-handled and skip it forever,
+// while eventWasTouchedDuringTaskExecution_ would find no match and treat
+// it as unprovable, archiving real Task-era history the moment it's
+// needed. logSnapshot_'s appendRow is idempotent enough for this ordering
+// to matter: writing the Sync Log row again on a retry (because the
+// earlier attempt's Notion patch never happened or wasn't observed) is
+// harmless — eventWasTouchedDuringTaskExecution_'s lookup only needs ONE
+// matching row to exist, duplicates included — so retrying from either
+// side of an interruption converges correctly.
+function backfillTaskOriginForTask_(task) {
+  const taskId = task.id;
+  const events = queryNotionTimeEventsForTask_(taskId);
+  const actions = [];
+  events.forEach(function (eventPage) {
+    const existingOrigin = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginType;
+    if (existingOrigin) return;
+    const existingNote = propertyText_(eventPage.properties.Note);
+    const marker = buildNote_({ taskOriginType: AMBIGUOUS_PROVENANCE_MARKER });
+    notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
+      properties: {
+        Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
+      },
+    });
+    actions.push('flagged_ambiguous_provenance:' + eventPage.id);
+  });
+  return actions.length ? actions.join(',') : 'no_backfill_needed:' + taskId;
 }
 
 // Tasks whose last_edited_time is at or after `since`, oldest first, so a
@@ -688,14 +1397,47 @@ function isFreeOutcome_(outcome) {
   // duplicates. A rejected Done ('done_gate_rejected:...') still counts: it
   // made a real write (the rollback) and is exactly the case the always-
   // reverify rule exists to keep catching.
-  return outcome === 'ignored:not_configured_task' ||
+  // 'story_excluded' makes no Notion write either (a Type = Story page with
+  // nothing open to archive away — see reconcileStoryTask_) — free to
+  // re-scan on every poll just like a duplicate or ignored outcome. A Story
+  // that DID have a stray open event archived reports
+  // 'archived_story_event:...' instead, which is a real write and does
+  // count, the same as any other write.
+  if (outcome === 'ignored:not_configured_task' ||
     outcome === 'done_gate_passed' ||
-    /^duplicate:/.test(String(outcome));
+    outcome === 'story_excluded' ||
+    /^duplicate:/.test(String(outcome))) {
+    return true;
+  }
+  // reconcileStoryTask_ can report several per-event actions for one Story,
+  // comma-joined (one Story can have more than one Time Event). Two of
+  // those actions make no Notion write at all —
+  // 'skipped_ambiguous_pre_upgrade_provenance:' (see eventProvenanceIsAmbiguous_)
+  // and 'skipped_pending_provenance_backfill:' (see taskOriginBackfillComplete_)
+  // — but neither matched anything above, so a changed Story reporting only
+  // these still charged the reconciliation budget same as a real write.
+  // Codex-reported gap (round 21): after the mandatory provenance backfill,
+  // this is now the COMMON case for a changed Story with pre-existing
+  // events (see the "Known limitations" note on backfillStoryExclusion_'s
+  // archive path being largely unreachable), so 25 such Stories inside one
+  // poll's overlap window could exhaust MAX_TASKS_PER_RUN on pure re-skips,
+  // deferring genuinely write-needing Tasks sorted behind them by multiple
+  // trigger intervals. Free only when EVERY action in the joined outcome is
+  // one of these two — a Story whose events are a MIX (e.g. one skipped,
+  // one genuinely archived or closed) still made a real write and must
+  // still count, exactly like 'archived_story_event:...' and
+  // 'closed_task_era_at_story_conversion:...' always have.
+  const FREE_STORY_SKIP_PREFIXES = ['skipped_ambiguous_pre_upgrade_provenance:', 'skipped_pending_provenance_backfill:'];
+  const segments = String(outcome).split(',');
+  return segments.length > 0 && segments.every(function (segment) {
+    return FREE_STORY_SKIP_PREFIXES.some(function (prefix) { return segment.indexOf(prefix) === 0; });
+  });
 }
 
 function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
   const taskId = task.id;
   const taskTitle = propertyText_(task.properties.Title) || taskId;
+  const taskType = propertyText_(task.properties.Type);
   const allEvents = queryNotionTimeEventsForTask_(taskId);
   const openEvents = allEvents.filter(function (eventPage) {
     return !propertyDate_(eventPage.properties['Ended At']);
@@ -718,7 +1460,33 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       else otherActor.push(eventPage);
     });
 
+    // An ambiguous-provenance event (see eventProvenanceIsAmbiguous_) landing
+    // in otherActor — a different actor than the newly desired one, not
+    // merely a reassignment of the same execution — is closed with the same
+    // `ambiguous_provenance_restart` reason and Started-At clamp as the
+    // sameActor[0] case below, not the ordinary `reassignment` reason —
+    // Codex-reported gap (round 29): the ambiguity check further down only
+    // ever examined sameActor[0], so this otherActor case fell straight into
+    // the ordinary close below and — worse — its own Execution= marker (see
+    // outgoingExecutionId below) would otherwise be inherited by the
+    // brand-new event opened for the new actor. An event flagged ambiguous
+    // can genuinely carry a real Execution= value from a script era that
+    // stamped Execution= before Task Origin= tracking existed (appendNote_
+    // preserves it untouched when the later backfill adds the ambiguous
+    // marker) — inheriting that unverifiable, possibly-Story-era identity
+    // onto otherwise-current, genuinely valid work would make
+    // enforceDoneGate_'s Execution= pass permanently exclude it from Done
+    // evidence the moment Started At is (correctly) refreshed for the new
+    // actor's own execution, since the two would no longer match.
     otherActor.forEach(function (eventPage) {
+      if (eventProvenanceIsAmbiguous_(eventPage)) {
+        const restartBoundary = when.getTime() >= eventStartedAt_(eventPage).getTime()
+          ? when
+          : eventStartedAt_(eventPage);
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart');
+        actions.push('closed_ambiguous_provenance_restart:' + eventPage.id);
+        return;
+      }
       closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'reassignment');
       actions.push('closed_reassigned:' + eventPage.id);
     });
@@ -731,11 +1499,55 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       return eventStartedAt_(b).getTime() - eventStartedAt_(a).getTime();
     });
 
-    if (sameActor.length) {
-      for (let i = 1; i < sameActor.length; i++) {
-        closeNotionTimeEvent_(sameActor[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation');
-        actions.push('closed_duplicate:' + sameActor[i].id);
-      }
+    for (let i = 1; i < sameActor.length; i++) {
+      closeNotionTimeEvent_(sameActor[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation');
+      actions.push('closed_duplicate:' + sameActor[i].id);
+    }
+
+    // Codex-reported gap (round 20): the most-recently-started sameActor
+    // event (index 0) is not automatically safe to keep continuing just
+    // because it is still open for the right actor. A page that was
+    // Type = Story, had its stray open event backfilled to
+    // Task Origin=ambiguous-pre-upgrade (see backfillTaskOriginProvenance_
+    // — genuinely unprovable, left exactly as found by reconcileStoryTask_
+    // the whole time it stayed Story), and is THEN reclassified to an
+    // executable Type while remaining In Progress with the same assignee
+    // never routes through reconcileStoryTask_ again — that only runs
+    // while Type still reads Story. This generic path would otherwise
+    // treat that same still-open, unverifiable event as "already_open",
+    // silently continuing to accrue time on it indefinitely: its eventual
+    // Ended At would span from whatever it originally started (possibly
+    // long before this deploy, possibly genuinely Story-era) all the way
+    // through the Task's own new execution, reintroducing exactly the
+    // double-counting this whole file exists to stop — just for the one
+    // population (ambiguous, not confirmed either way) this generic path
+    // was never taught to recognize as special. Restart instead of
+    // continuing: close the ambiguous event at this observed boundary
+    // (distinct Reason=ambiguous_provenance_restart, its own
+    // Task Origin=ambiguous-pre-upgrade left completely untouched — still
+    // available for an operator to review by hand, per
+    // eventProvenanceIsAmbiguous_'s own comment) and fall through to the
+    // same path used when there was no sameActor event at all, opening a
+    // fresh, confirmed Task-origin event for the genuinely-observed new
+    // work from here forward.
+    const ambiguousOpenEvent = sameActor.length && eventProvenanceIsAmbiguous_(sameActor[0]) ? sameActor[0] : null;
+    if (ambiguousOpenEvent) {
+      // Clamped to never precede this event's own Started At — Codex-
+      // reported gap (round 25), the same class of gap as
+      // reconcileStoryTask_'s own ambiguous-close and confirmed-Task-era-
+      // close clamps: `when` is derived from the Task page's own
+      // minute-granular last_edited_time, and this event's Started At can
+      // carry seconds, so within the same observed minute Started At can
+      // read later than `when` — closing at `when` in that case would set
+      // Ended At before Started At, a negative duration.
+      const restartBoundary = when.getTime() >= eventStartedAt_(ambiguousOpenEvent).getTime()
+        ? when
+        : eventStartedAt_(ambiguousOpenEvent);
+      closeNotionTimeEvent_(ambiguousOpenEvent, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart');
+      actions.push('closed_ambiguous_provenance_restart:' + ambiguousOpenEvent.id);
+    }
+
+    if (sameActor.length && !ambiguousOpenEvent) {
       actions.push('already_open:' + sameActor[0].id);
     } else {
       // Prefer the Task's own current Started At over `when` (the observed
@@ -759,13 +1571,93 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // at the reassignment boundary — overlapping the outgoing actor's own
       // interval and double-counting effort. `when` (this observed edit,
       // i.e. the reassignment itself) must count as part of history
-      // whenever we just closed something this call.
+      // whenever we just closed something this call. The same staleness
+      // applies to ambiguousOpenEvent above, for the identical reason: it
+      // was also just closed via a PATCH this same call, so allEvents' own
+      // in-memory copy still shows it open (no Ended At), and
+      // latestEventTimestamp_ can only see its old, possibly pre-deploy
+      // Started At — which can easily equal the Task's own unchanged
+      // Started At (both set from the same original moment), making a
+      // stale Started At look "trusted" and reopening the new event at
+      // that same ancient timestamp instead of this restart's own boundary,
+      // silently re-creating the exact interval ambiguousOpenEvent was just
+      // closed specifically to stop extending.
       const latestHistoricalTimestamp = latestEventTimestamp_(allEvents);
-      const effectiveLatestHistoricalTimestamp = otherActor.length
+      const justClosedSomethingThisCall = otherActor.length > 0 || Boolean(ambiguousOpenEvent);
+      const effectiveLatestHistoricalTimestamp = justClosedSomethingThisCall
         ? (latestHistoricalTimestamp && latestHistoricalTimestamp.getTime() > when.getTime() ? latestHistoricalTimestamp : when)
         : latestHistoricalTimestamp;
       const taskStartedAt = propertyDate_(task.properties['Started At']);
-      const trustedTaskStart = taskStartedAt && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime())
+      // A page most recently seen as Type=Story WHILE ALREADY In Progress
+      // (see storyConversionHappenedWhileInProgress_) must never have its
+      // Started At trusted here, however fresh it looks against allEvents
+      // — when allEvents is empty for it, that emptiness is precisely
+      // because its real history was archived away, not because Started
+      // At is reliable, and a page that never left In Progress across the
+      // Type change still carries the STORY's own original Started At
+      // unchanged, not a freshly recorded one. Fall through to `when`
+      // (this observed edit, i.e. the Story-to-Task reclassification
+      // itself) as the execution's start instead, exactly as Codex's
+      // finding suggested: the type-change edit is what actually begins
+      // this Task's own executable life, not whatever Started At happened
+      // to read from its time as a Story.
+      //
+      // Gated on "Started At would otherwise look fresh enough to trust",
+      // not called unconditionally, and not gated on allEvents.length === 0
+      // either (an earlier version of this gate — see below for why that
+      // was wrong too). Codex-reported gap in an earlier version of this
+      // fix, on two counts. Performance: every ordinary Task open (the vast
+      // majority of which were never a Story) would otherwise re-scan this
+      // script's entire, unboundedly-growing Sync Log on every single poll,
+      // just to learn "no" every time. Correctness: a page's Story history
+      // never expires on its own, even long after its own first
+      // post-conversion execution completed and closed a real Task-era
+      // event — an unconditional call would keep discarding a perfectly
+      // legitimate fresh Started At on every later reopen of that same
+      // now-ordinary Task, silently losing whatever work happened between
+      // the reopen and the next observed edit. The Sync Log check can only
+      // ever CHANGE the outcome when the ordinary freshness check below
+      // would otherwise trust `taskStartedAt` — if it wouldn't (already
+      // stale relative to `effectiveLatestHistoricalTimestamp`), `startAt`
+      // already correctly falls back to `when` regardless of what the Sync
+      // Log says, so there is nothing to gain from asking. Gating on that
+      // instead of allEvents.length === 0 exempts the same vast-majority
+      // case (an ordinary Task whose Started At is already known-stale
+      // relative to its own history) while fixing a real gap the old gate
+      // had — Codex-reported gap (round 21): allEvents.length === 0 only
+      // ever held for a page's first-ever event, or one whose entire
+      // history had just been archived away. A page with ANY older,
+      // unrelated closed Task-era event (from a genuinely earlier
+      // execution, long before ever becoming a Story) keeps allEvents
+      // non-empty forever — so if that same page later cycles through
+      // Story (In Progress) and back to an executable Type without ever
+      // leaving In Progress, the old gate skipped the Sync Log check
+      // entirely, even though the Story spell's own (freshly recorded)
+      // Started At could easily read newer than that old unrelated
+      // history, wrongly looking "trusted" and opening the new event at
+      // the Story's own start instead of this conversion's boundary —
+      // double-counting the intervening Story period. Checking freshness
+      // first, then only asking the Sync Log when the answer could still
+      // matter, catches this case too: taskStartedAtLooksFresh is computed
+      // from `effectiveLatestHistoricalTimestamp`, so a Started At that
+      // looks fresh only because of a since-archived-or-irrelevant old
+      // execution still triggers the same Story-history check that used to
+      // require an empty allEvents to run at all.
+      //
+      // Further narrowed to "most recent Story observation was itself In
+      // Progress" rather than "was ever Story, regardless of what it was
+      // doing then" — Codex-reported gap: a page reclassified while idle
+      // (Ready/Backlog) and only later beginning its actual first
+      // execution has a Started At that was freshly (re)recorded for THAT
+      // execution, same governance as any ordinary Task's first open, and
+      // has nothing to do with old Story history. Only a page still In
+      // Progress at its last-known Story observation carries real risk:
+      // nothing about staying continuously In Progress across a Type
+      // change would ever prompt Started At to be refreshed.
+      const taskStartedAtLooksFresh = Boolean(taskStartedAt)
+        && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime());
+      const cameFromArchivedStoryHistory = taskStartedAtLooksFresh && storyConversionHappenedWhileInProgress_(taskId);
+      const trustedTaskStart = taskStartedAtLooksFresh && !cameFromArchivedStoryHistory
         ? taskStartedAt
         : null;
       const startAt = trustedTaskStart || when;
@@ -786,8 +1678,20 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // `when` instead of a stale Started At, so a governance violation
       // still gets a fresh, distinguishing identity rather than reusing the
       // old one.
+      //
+      // Never inherited from an ambiguous-provenance outgoing event — see
+      // the otherActor closing loop's own comment (Codex-reported gap,
+      // round 29) for why an unverifiable, possibly-Story-era Execution=
+      // must not be handed to otherwise-current, genuinely valid work.
+      // Falling through to '' here (as if this outgoing event carried no
+      // Execution= at all) is the same, already-established safe default
+      // this file uses for a legacy outgoing event that predates the field
+      // — see the comment block above for why leaving the replacement
+      // unmarked and deferring to the legacy Reason/Boundary/tie heuristic
+      // is deliberate, not an oversight.
       const outgoingExecutionId = otherActor.length
         ? (otherActor.map(function (eventPage) {
+            if (eventProvenanceIsAmbiguous_(eventPage)) return '';
             return parseNoteMeta_(propertyText_(eventPage.properties.Note)).execution;
           }).find(Boolean) || '')
         : '';
@@ -879,7 +1783,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const reviewSource = workType === 'Review Fix'
         ? (outgoingReviewSource || resolveReviewSource_(task, reviewFixSinceTimestamp_(allEvents, taskId), startAt))
         : '';
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, workType, reviewSource);
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, workType, reviewSource);
       actions.push('opened:' + created.id);
     }
   } else if (openEvents.length) {
@@ -1645,11 +2549,35 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, workType, reviewSource) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, taskType, workType, reviewSource) {
   const note = buildNote_({
     source: 'notion_reconcile',
     execution: executionId,
     snapshotId: snapshotId,
+    // Stamped here and ONLY here — see parseNoteMeta_'s taskOriginType for
+    // why this must be this event's one permanent, unwritable-over record
+    // of what Type the page genuinely was at the moment this event was
+    // created, e.g. Task-era provenance for
+    // eventWasTouchedDuringTaskExecution_. Holds the Type value itself
+    // directly (not a Sync Log cross-reference) — Codex-reported gap in an
+    // earlier version of this fix: a snapshotId-based reference required a
+    // SEPARATE, later logSnapshot_ write to resolve, and if this Notion
+    // create succeeded but that later write never happened (Apps Script
+    // interrupted, or the Task's own state changed before a retry could
+    // reproduce the identical snapshotId), the reference would point at a
+    // Sync Log row that could never be written, permanently orphaning the
+    // marker. Embedding the Type directly makes this event's own Note the
+    // single, self-contained source of truth — no second write, nothing
+    // to desynchronize.
+    //
+    // Falls back to NO_TYPE_MARKER when taskType is blank/unset (`''`) —
+    // Codex-reported gap (round 17): buildNote_ treats `fields.taskOriginType`
+    // as a plain truthy check, so passing `''` through directly made it
+    // omit `Task Origin=` from the Note entirely, indistinguishable from a
+    // pre-existing event that never got a marker at all (see NO_TYPE_MARKER
+    // for why that must not collapse into AMBIGUOUS_PROVENANCE_MARKER
+    // either).
+    taskOriginType: taskType || NO_TYPE_MARKER,
     changedBy: changedBy,
     workType: workType,
     reviewSource: reviewSource,
@@ -1765,6 +2693,17 @@ function findSheetEventRowByEventId_(sheet, eventId) {
   return finder ? finder.getRow() : 0;
 }
 
+// Removes a Time Event's row from the Sheet projection outright, for an
+// event archiveStoryTimeEvent_ just archived rather than closed — see its
+// comment and reconcileStoryTask_'s for why a stale row here is not merely
+// cosmetic (it keeps feeding the Summary tab's own aggregation). A no-op
+// if the event was never projected in the first place.
+function purgeSheetProjectionRow_(eventId) {
+  const sheet = sheet_(DEFAULTS.TIME_EVENTS_SHEET);
+  const row = findSheetEventRowByEventId_(sheet, eventId);
+  if (row) sheet.deleteRow(row);
+}
+
 function retrieveNotionPage_(pageId) {
   return notionRequest_('get', '/v1/pages/' + encodeURIComponent(pageId));
 }
@@ -1805,6 +2744,31 @@ function notionRequest_(method, path, body) {
 // a partial result for the complete set and advances its cursor past
 // unretrieved data.
 const QUERY_PAGE_SAFETY_LIMIT = 50;
+
+// Sentinel `Task Origin=` value for a pre-existing event whose true
+// history (genuine Task-era work vs. bogus pre-fix Story stray data)
+// cannot be determined from any data this script has access to — see
+// eventProvenanceIsAmbiguous_ and backfillTaskOriginForTask_.
+const AMBIGUOUS_PROVENANCE_MARKER = 'ambiguous-pre-upgrade';
+
+// Sentinel `Task Origin=` value for an event created live (via
+// createNotionTimeEvent_), at a moment this script directly observed, on a
+// Task page whose Type was blank/unset at that exact moment — Codex-
+// reported gap (round 17): buildNote_'s `if (fields.taskOriginType)` check
+// is a truthy test, so passing the Task's raw (possibly `''`) Type through
+// unchanged silently omitted `Task Origin=` from the Note entirely whenever
+// Type was blank. That is NOT the same situation AMBIGUOUS_PROVENANCE_MARKER
+// exists for: this script witnessed the creation directly and knows for
+// certain the page was not Type = Story at that moment (isStory is only
+// ever false when this function's caller, reconcileAuthoritativeTimeEvents_,
+// runs), so treating a blank Type the same as a wholly unprovable pre-
+// upgrade legacy event would be needlessly pessimistic — it would make
+// eventProvenanceIsAmbiguous_ true and leave the event stuck "left exactly
+// as found" (reconcileStoryTask_) forever despite this script having
+// directly witnessed a confirmed non-Story creation. This sentinel keeps
+// that distinction: "confirmed non-Story, Type just wasn't set" rather
+// than "unprovable either way".
+const NO_TYPE_MARKER = 'unset-type';
 
 function paginateNotionQuery_(path, baseBody, deadlineMs, extendedDeadlineMs, hasProgress) {
   let cursor = null;
@@ -1882,12 +2846,21 @@ function authoritativeEditTime_(task) {
   return parseTimestamp_(task && task.last_edited_time);
 }
 
-function authoritativeSnapshotId_(task, status, assignedAgent) {
+function authoritativeSnapshotId_(task, status, assignedAgent, type) {
   const seed = [
     normalizeId_(task && task.id),
     String(task && task.last_edited_time || ''),
     String(status || ''),
     String(assignedAgent || ''),
+    // Type now controls reconciliation behavior (Type = Story is excluded
+    // from event generation entirely — see reconcileTaskPage_). Without it
+    // here, a page edited to Type = Story in the same last_edited_time
+    // minute as its last-processed snapshot (Status/assignee unchanged)
+    // would hash identically to that prior snapshot and be skipped as
+    // `duplicate:` before reconcileStoryTask_ ever ran — leaving a stray
+    // open event uncleaned until some unrelated later edit changed the
+    // hash.
+    String(type || ''),
   ].join('|');
   const digest = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
@@ -1950,6 +2923,15 @@ function buildNote_(fields) {
   if (fields.boundary) parts.push('Boundary=' + fields.boundary);
   if (fields.execution) parts.push('Execution=' + fields.execution);
   if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
+  // Stamped ONLY at creation (see createNotionTimeEvent_), never again by
+  // any later write to this event (a close, a reassignment, a Story-
+  // conversion close, ...) — see parseNoteMeta_'s taskOriginType for why
+  // this must stay immutable and separate from the ordinary, mutable
+  // `Snapshot=` above. Holds the Type value itself (or the
+  // 'ambiguous-pre-upgrade' sentinel — see backfillTaskOriginForTask_),
+  // not a Sync Log cross-reference: self-contained, nothing else to keep
+  // in sync.
+  if (fields.taskOriginType) parts.push('Task Origin=' + fields.taskOriginType);
   if (fields.changedBy) parts.push('Changed By=' + fields.changedBy);
   if (fields.resultFingerprint) parts.push('Result Fingerprint=' + fields.resultFingerprint);
   if (fields.workType) parts.push('Work Type=' + fields.workType);
@@ -1982,7 +2964,33 @@ function parseNoteMeta_(note) {
     // legacy Reason/Boundary/tie heuristic whenever it's present (absent
     // only on data from before this field existed).
     execution: noteField_(note, 'Execution'),
+    // The MOST RECENT snapshot to touch this event at all — creation, a
+    // close, a reassignment, anything. Used where "what last happened to
+    // this event" is the actual question (e.g. the Sheet projection's own
+    // audit column). NOT usable to answer "was this event genuinely
+    // created during a Task execution": see taskOriginType below, whose
+    // whole purpose is staying immutable where this field can't.
     snapshotId: noteField_(note, 'Snapshot'),
+    // Codex-reported gap on the per-event Task-era provenance fix: reusing
+    // the ordinary, mutable `Snapshot=` field for that check was self-
+    // defeating — reconcileStoryTask_ itself closes a genuine Task-era
+    // event through closeNotionTimeEvent_ at the Story-conversion moment,
+    // which stamps a NEW `Snapshot=` (this exact Story-typed poll's own
+    // snapshot) that overwrites what noteField_'s last-occurrence lookup
+    // would return, poisoning the very evidence that just correctly
+    // classified this event as Task-era in the first place. `Task Origin=`
+    // is written ONLY once, at createNotionTimeEvent_, and never touched
+    // by any later write to this event — immutable proof of what Type the
+    // page genuinely was at the moment this specific event was born,
+    // unaffected by anything that happens to the event afterward. Holds
+    // the Type value directly, not a Sync Log cross-reference — Codex-
+    // reported gap in an earlier (snapshotId-based) version: a separate,
+    // later logSnapshot_ write could fail or never run (Apps Script
+    // interrupted between the two), permanently orphaning the reference
+    // with no way to ever resolve it, and archiving real Task-era history
+    // the moment a Story conversion needed to check it. Embedding the
+    // value directly makes the event's own Note self-contained.
+    taskOriginType: noteField_(note, 'Task Origin'),
     changedBy: noteField_(note, 'Changed By'),
     // The *last* recorded value only — fine for every other field (only the
     // newest close/reassignment metadata ever matters), but NOT enough on
@@ -2033,17 +3041,247 @@ function editorLabel_(user) {
   return (user.object || user.type || 'user') + ':' + user.id;
 }
 
-function hasProcessedSnapshot_(snapshotId) {
-  if (!snapshotId) return false;
+// True only if `snapshotId` matches this Task ID's single MOST RECENT Sync
+// Log row — not merely "was this exact snapshot ever logged, at any point
+// in this page's history" (an earlier version of this check; see the one
+// call site's own comment for the round-27 gap that distinction closes).
+// logSnapshot_ only ever appends, never inserts out of order, so a page's
+// last matching row for its own Task ID is, by construction, its most
+// recent observation.
+function hasProcessedSnapshot_(snapshotId, taskId) {
+  if (!snapshotId || !taskId) return false;
   const sheet = ensureSyncLogSheet_();
-  if (sheet.getLastRow() < 2) return false;
-  return Boolean(sheet.getRange(2, 1, sheet.getLastRow() - 1, 1)
-    .createTextFinder(snapshotId).matchEntireCell(true).findNext());
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  const matches = sheet.getRange(2, 3, lastRow - 1, 1)
+    .createTextFinder(String(taskId))
+    .matchEntireCell(true)
+    .findAll();
+  if (!matches.length) return false;
+  const mostRecentMatchRow = matches[matches.length - 1].getRow();
+  const mostRecentSnapshotId = sheet.getRange(mostRecentMatchRow, 1, 1, 1).getValues()[0][0];
+  return String(mostRecentSnapshotId) === String(snapshotId);
 }
 
-function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
+// `source` is what triggered this reconciliation (e.g. 'notion_poll'), not
+// the Notion page's own Type property — kept as a separate, later
+// `taskType` argument (optional; the Sync Log's 7th column) to avoid that
+// exact confusion. eventWasTouchedDuringTaskExecution_ depends on this
+// column only ever being populated with a genuine, current Type observation.
+function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType) {
   const sheet = ensureSyncLogSheet_();
-  sheet.appendRow([id || '', type || '', taskId || '', status || '', receivedAt || new Date(), outcome || '']);
+  sheet.appendRow([id || '', source || '', taskId || '', status || '', receivedAt || new Date(), outcome || '', taskType || '']);
+}
+
+// True if this Task page's MOST RECENT Sync Log observation as Type=Story
+// (see reconcileStoryTask_) also recorded Status = In Progress at that same
+// poll — i.e. the page was still actively running as a Story right up to
+// (or past) the last time this script saw it that way, so any Started At
+// still on file almost certainly reflects the Story's own execution start,
+// never refreshed since. Called from reconcileAuthoritativeTimeEvents_'s
+// "first-ever event" branch (see its own comment for why allEvents is
+// empty either way) to decide whether to distrust the Task's Started At —
+// Codex-reported gap on BUG-ADP-TTE-01's own fix: a Story carries no Time
+// Event history of its own once reclassified as an executable Task
+// (reconcileStoryTask_ archives every event a Story ever accumulates, and
+// an archived page never resurfaces in a query), so that branch would
+// otherwise unconditionally trust the Task's own Started At the moment its
+// first event opens.
+//
+// Narrower than simply "was this page ever Type=Story" — Codex-reported
+// gap on an earlier version of this same fix: a page reclassified while
+// idle (`Ready`/`Backlog`) and only later beginning its actual first
+// execution has a Started At that was freshly (re)recorded for that
+// execution, per the same governance every ordinary Task's first open
+// already relies on — it has nothing to do with old Story history, and
+// distrusting it anyway would silently lose whatever work happened before
+// the next observed edit. Only a page still In Progress at its *last*
+// Story observation carries the real risk this function exists to catch:
+// nothing about remaining continuously In Progress across a Type change
+// would ever prompt Started At to be refreshed.
+//
+// Looks at this Task's single MOST RECENT Sync Log row overall — Story-
+// marked or not — rather than the most recent Story-marked row specifically
+// — Codex-reported gap on an earlier version of this same fix: taking the
+// last Story-marked row's own Status ignores any LATER, non-Story row in
+// between, e.g. a Story last seen In Progress that gets reclassified to
+// Task and left idle (`Status = Ready`) in the same edit, reconciled once
+// while idle, and only later actually begins In Progress — the old logic
+// would still find that stale In-Progress Story row as the "last" Story
+// observation and wrongly distrust the later poll's genuinely fresh
+// Started At, since no NEWER Story-marked row ever gets written to clear
+// it. Taking the single most recent row overall self-corrects: once any
+// later poll observes the page through the ordinary Task path (any Status,
+// even idle), that row becomes the most recent one and the carryover is
+// gone — only a page whose most recent observation, period, is itself a
+// Story-marked one with Status = In Progress still carries the risk. The
+// Sync Log rows are scanned in their natural append-only chronological
+// order, so the last matching row encountered is, by construction, the
+// most recent one.
+//
+// Callers must still gate this behind the ordinary freshness check already
+// trusting `Started At` (see the one call site's `taskStartedAtLooksFresh`,
+// and its own comment for why gating on that — not on allEvents.length ===
+// 0, an earlier version of the gate — is both correct and still narrow):
+// this runs on every ordinary Task's very first Time Event, Story history
+// or not, so it must stay cheap even for the common case of a page that has
+// never once appeared in the Sync Log.
+// Every per-event action reconcileStoryTask_ can ever push into its
+// comma-joined outcome — used below to recognize a Sync Log row as having
+// been logged while this page's Type read Story. Codex-reported gap
+// (round 22): the original check only recognized 'story_excluded' and
+// 'archived_story_event:', both from earlier rounds — by the time
+// backfillTaskOriginProvenance_/the round-19/20 gates existed, a changed
+// Story with pre-existing events commonly logs
+// 'skipped_ambiguous_pre_upgrade_provenance:'/'skipped_pending_provenance_backfill:'
+// instead, neither of which was recognized. A Story whose most recent Sync
+// Log row happened to be one of those two was then invisible to this
+// function: if later converted to an executable Type while remaining In
+// Progress with only older, unrelated Task-era history on file (see the
+// round-21 fix just above, which widened WHEN this function gets called —
+// exactly the scenario that makes this gap reachable), the Story-era
+// Started At could look "fresh" and get wrongly trusted, opening the new
+// Task event at the Story's own start instead of the conversion boundary.
+const STORY_RECONCILIATION_ACTION_PREFIXES = [
+  'skipped_ambiguous_pre_upgrade_provenance:',
+  'closed_task_era_at_story_conversion:',
+  'skipped_pending_provenance_backfill:',
+  'archived_story_event:',
+  // Round 23: reconcileStoryTask_'s ambiguous branch closing a still-open
+  // event in place (see its own comment) is itself just as much a Story
+  // observation as any of the above.
+  'closed_ambiguous_pre_upgrade_provenance:',
+];
+
+// Codex-reported gap (round 26), on the round-24 tail-chunk fix itself: the
+// bounded chunk reads only ever paid off for a page WITH a Story-marked row
+// on file. The single most common caller of this function is the opposite
+// case — an ordinary Task reaching its very first Time Event, which by
+// definition has no Sync Log row for its own ID at all — and for that case
+// every chunk still had to be read, oldest chunk included, before the loop
+// could conclude "no match" and return false. Every first-ever Task open in
+// the entire deployment paid the full tail-chunk walk, growing without
+// bound as the append-only log grows, with no early-exit signal available.
+//
+// Searched via Range#createTextFinder instead — the same mechanism this
+// file already uses for hasProcessedSnapshot_ and
+// findSheetEventRowByEventId_'s single-match lookups. TextFinder runs the
+// search on Sheets' own servers rather than transferring row data into this
+// script's memory, so a single findAll() call (one round trip regardless of
+// how large the Sync Log has grown) both answers "does this Task ID appear
+// anywhere in the log at all" for the common never-seen case and locates
+// every match when it does, without ever materializing unrelated rows.
+function storyConversionHappenedWhileInProgress_(taskId) {
+  if (!taskId) return false;
+  const sheet = ensureSyncLogSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  const matches = sheet.getRange(2, 3, lastRow - 1, 1)
+    .createTextFinder(String(taskId))
+    .matchEntireCell(true)
+    .findAll();
+  if (!matches.length) return false;
+  // logSnapshot_ only ever appends, never inserts out of order, so matches
+  // come back in ascending row order — the LAST one is the most recent.
+  const mostRecentMatchRow = matches[matches.length - 1].getRow();
+  const mostRecentRow = sheet.getRange(mostRecentMatchRow, 1, 1, 7).getValues()[0];
+  const outcome = String(mostRecentRow[5] || '');
+  // Every action reconcileStoryTask_ can ever produce is itself proof this
+  // row was logged while Type read Story — checked as a substring anywhere
+  // in the (possibly multi-event, comma-joined) outcome, not only as its
+  // first segment, so a Story with more than one event whose FIRST action
+  // happens not to be the recognized one is still correctly identified.
+  const wasStoryObservation = outcome === 'story_excluded' || STORY_RECONCILIATION_ACTION_PREFIXES.some(function (prefix) {
+    return outcome.indexOf(prefix) !== -1;
+  });
+  return wasStoryObservation && mostRecentRow[3] === DEFAULTS.START_STATUS;
+}
+
+// True if THIS SPECIFIC event's own immutable `Task Origin=` marker (see
+// parseNoteMeta_'s taskOriginType — stamped ONCE, at creation, and never
+// touched again by any later write to this event) records an explicit,
+// non-Story Type. Used by reconcileStoryTask_ to tell genuine Task-era
+// Time Events (created while this exact page really was a Task, now
+// attached to a page reclassified TO Story) apart from pre-fix legacy
+// stray data.
+//
+// Deliberately reads `Task Origin=`, NOT the ordinary, mutable `Snapshot=`
+// — Codex-reported gap on an earlier version of this exact fix: using
+// `Snapshot=` (whichever poll most recently touched the event, via
+// parseNoteMeta_'s snapshotId) was self-defeating, because
+// reconcileStoryTask_ ITSELF closes a genuine Task-era event through
+// closeNotionTimeEvent_ at the Story-conversion moment — which stamps a
+// NEW `Snapshot=` (this exact Story-typed poll's own snapshot) that
+// overwrites the very evidence that just correctly classified the event
+// as Task-era, poisoning any LATER re-observation into archiving it after
+// all. `Task Origin=` cannot be overwritten this way: createNotionTimeEvent_
+// is the only place that ever writes it, and appendNote_ protects it from
+// eviction the same as Execution=/Boundary=.
+//
+// Deliberately PER EVENT, not per Task page — Codex-reported gap on an
+// earlier, page-level version of this same fix (then named
+// taskWasEverReconciledAsTask_): a page can be observed as an idle Task
+// (Type = Task, e.g. Status = Ready) WITHOUT that observation ever
+// touching a specific pre-existing event's own Note at all — nothing open
+// to close, nothing new to open, so nothing about that poll gets written
+// to the event itself. Proving the PAGE was once seen as Task proved
+// nothing about whether THIS event specifically was created or touched
+// during that window; the page-level version would preserve a pre-upgrade
+// legacy Story event forever, the instant its page was ever glimpsed as
+// Task even in passing, defeating the whole exclusion.
+//
+// The recorded value is the Type string itself, embedded directly in this
+// event's own Note at creation — NOT a Sync Log cross-reference — Codex-
+// reported gap on an earlier (snapshotId-indirection) version: if the
+// Notion event-creation write succeeded but a later, separate Sync Log
+// write failed or never ran (Apps Script interrupted between them, or the
+// Task's own state changed before a retry could reproduce the identical
+// snapshot), the reference would point at a Sync Log row that could never
+// be written — permanently orphaning the marker with no way to resolve it,
+// archiving real Task-era history the moment a Story conversion needed to
+// check it. Embedding the value directly makes the event's own Note a
+// single, self-contained write with nothing else to keep in sync.
+// `ambiguous-pre-upgrade` (see eventProvenanceIsAmbiguous_ and
+// backfillTaskOriginForTask_) is deliberately excluded here even though it
+// is a non-empty, non-`Story` string: it explicitly means "unknown," never
+// "confirmed Task-era."
+function eventWasTouchedDuringTaskExecution_(eventPage) {
+  const recordedType = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginType;
+  return Boolean(recordedType) && recordedType !== 'Story' && recordedType !== AMBIGUOUS_PROVENANCE_MARKER;
+}
+
+// True if this event's `Task Origin=` marker is the special
+// `ambiguous-pre-upgrade` sentinel backfillTaskOriginForTask_ stamps —
+// Codex-reported gap on an earlier version of this whole backfill: a
+// page's CURRENT Type at backfill time never proves anything about a
+// pre-existing event's true history, regardless of which way it currently
+// reads. A page reclassified Story → Task before this revision was ever
+// deployed looks exactly like an ordinary Task page at backfill time, yet
+// may still carry a genuinely bogus pre-fix Story stray event; the
+// reverse (Task → Story before deploy) has the identical problem in the
+// other direction (see backfillTaskOriginProvenance_'s own comment). No
+// pre-existing event's origin can be confirmed from data this script has
+// access to, so every one gets this sentinel instead of a confirmed
+// value, and reconcileStoryTask_ leaves it exactly as found (neither
+// preserved nor archived) rather than guessing.
+function eventProvenanceIsAmbiguous_(eventPage) {
+  return parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginType === AMBIGUOUS_PROVENANCE_MARKER;
+}
+
+// True once backfillTaskOriginProvenance_ has fully drained at least once
+// (see the TASK_ORIGIN_BACKFILL_COMPLETE write in its own "fully drained"
+// branch) — see reconcileStoryTask_'s own comment (Codex-reported gap,
+// round 19) for why its archive fallback gates on this: on an existing
+// live deployment, the already-installed pollTaskChanges trigger can
+// reach a currently-Story page's still-unmarked pre-existing event before
+// the backfill has finished flagging every such event ambiguous, and a
+// marker-less event is otherwise indistinguishable from genuinely bogus
+// pre-fix Story stray data. False on a fresh deployment that never needs
+// to run the backfill at all — harmless there, since createNotionTimeEvent_
+// always stamps a marker on every event it ever creates, so a fresh
+// deployment never produces a marker-less event for this to matter for.
+function taskOriginBackfillComplete_() {
+  return PropertiesService.getScriptProperties().getProperty('TASK_ORIGIN_BACKFILL_COMPLETE') === 'true';
 }
 
 function ensureProjectionHeaders_() {
@@ -2070,8 +3308,8 @@ function ensureSyncLogSheet_() {
     sheet = ss.insertSheet(DEFAULTS.SYNC_LOG_SHEET);
     sheet.hideSheet();
   }
-  sheet.getRange(1, 1, 1, 6).setValues([[
-    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome'
+  sheet.getRange(1, 1, 1, 7).setValues([[
+    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome', 'Type'
   ]]);
   return sheet;
 }
@@ -2135,39 +3373,36 @@ function appendNote_(existingNote, marker, maxLength) {
   const isFingerprintSegment = function (segment) {
     return segment.trim().indexOf('Result Fingerprint=') === 0;
   };
-  // Execution=/Boundary= identify which execution an event belongs to and
-  // whether it marks a genuine execution boundary — enforceDoneGate_'s
-  // current-execution classification (and thus taskStartedAtTrusted) reads
-  // them directly. Losing one is a materially worse failure than losing one
-  // old Result Fingerprint=: a fingerprint only narrows the already-bounded
-  // stale-Result detection window (see README "Known limitations"), while
-  // losing Execution=/Boundary= can flip an event's own current/prior
-  // classification outright. Protected even more than fingerprints:
-  // evicted only once every fingerprint segment is already gone.
-  //
-  // Work Type=/Review Source= (ADP-051) get the identical protection for a
-  // different reason: they are this event's *only* persisted copy of those
+  // Execution=/Boundary=/Task Origin=/Work Type=/Review Source= each
+  // identify a fact that must never silently flip or vanish: which
+  // execution an event belongs to, and whether it marks a genuine
+  // execution boundary (enforceDoneGate_'s current-execution
+  // classification, and thus taskStartedAtTrusted, reads Execution=/
+  // Boundary= directly); Task Origin=, the one immutable record of what
+  // Type the page genuinely was when this event was created
+  // (eventWasTouchedDuringTaskExecution_); and Work Type=/Review Source=
+  // (ADP-051), this event's *only* persisted copy of those reporting
   // fields (nothing recomputes or backfills them once written — a
   // reassignment replacement only ever inherits them from here, and the
-  // Sheet projection just mirrors whatever the Note currently holds), each
-  // stamped exactly once and never repeated, so protecting them costs at
-  // most a small, constant amount of space per event — nothing like
-  // Result Fingerprint='s unbounded, ever-growing accumulation. Evicting
-  // them here would silently blank the Sheet's Work Type/Review Source
-  // columns on a later re-projection and break reassignment inheritance,
-  // corrupting the exact reporting fields this feature exists to produce.
-  const isExecutionOrBoundarySegment = function (segment) {
+  // Sheet projection just mirrors whatever the Note currently holds).
+  // Losing any of these five is a materially worse failure than losing one
+  // old Result Fingerprint=: a fingerprint only narrows the already-bounded
+  // stale-Result detection window (see README "Known limitations"), while
+  // losing one of these can flip an event's own current/prior
+  // classification, its Task-era provenance, or silently blank a reporting
+  // column outright. Protected even more than fingerprints: evicted only
+  // once every fingerprint segment is already gone.
+  const isProtectedIdentitySegment = function (segment) {
     const trimmed = segment.trim();
-    return trimmed.indexOf('Execution=') === 0 ||
-      trimmed.indexOf('Boundary=') === 0 ||
-      trimmed.indexOf('Work Type=') === 0 ||
-      trimmed.indexOf('Review Source=') === 0;
+    return trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0
+      || trimmed.indexOf('Task Origin=') === 0 || trimmed.indexOf('Work Type=') === 0
+      || trimmed.indexOf('Review Source=') === 0;
   };
   const segments = existingNote.split(separator);
   let combined = segments.concat([clippedMarker]).join(separator);
   while (segments.length && combined.length > maxLength) {
     let dropIndex = segments.findIndex(function (segment) {
-      return !isFingerprintSegment(segment) && !isExecutionOrBoundarySegment(segment);
+      return !isFingerprintSegment(segment) && !isProtectedIdentitySegment(segment);
     });
     if (dropIndex < 0) dropIndex = segments.findIndex(isFingerprintSegment);
     if (dropIndex < 0) dropIndex = 0;

@@ -27,6 +27,14 @@ class FakeSheet {
     this.name = name;
     this.rows = [];
     this.hidden = false;
+    // Counts real Sheets-transfer calls a test can assert against, to prove
+    // a fix's *cost* characteristic (e.g. "does not scale with log size"),
+    // not only its correctness. getValues() stands in for a genuine
+    // row-data transfer; findAll()/findNext() are deliberately not counted
+    // here since they represent a server-side TextFinder search returning
+    // only match positions, the cheaper operation these counts exist to
+    // distinguish from.
+    this.getValuesCallCount = 0;
   }
 
   hideSheet() {
@@ -36,6 +44,11 @@ class FakeSheet {
 
   getLastRow() {
     return this.rows.length;
+  }
+
+  deleteRow(rowPosition) {
+    this.rows.splice(rowPosition - 1, 1);
+    return this;
   }
 
   appendRow(values) {
@@ -53,6 +66,19 @@ class FakeSheet {
   getRange(row, column, numRows = 1, numColumns = 1) {
     const sheet = this;
     return {
+      getValues() {
+        sheet.getValuesCallCount++;
+        const result = [];
+        for (let rowOffset = 0; rowOffset < numRows; rowOffset++) {
+          const source = sheet.rows[row - 1 + rowOffset] || [];
+          const line = [];
+          for (let columnOffset = 0; columnOffset < numColumns; columnOffset++) {
+            line.push(source[column - 1 + columnOffset] !== undefined ? source[column - 1 + columnOffset] : '');
+          }
+          result.push(line);
+        }
+        return result;
+      },
       setValues(values) {
         values.forEach((rowValues, rowOffset) => {
           const target = sheet._cell(row + rowOffset, column + rowValues.length - 1);
@@ -81,20 +107,23 @@ class FakeSheet {
             }
             return null;
           },
+          // Real TextFinder#findAll returns every match within the searched
+          // range, in the order encountered scanning forward from the range's
+          // own start -- i.e. ascending row order for a column range, since
+          // this codebase's sheets are only ever appended to. Code.gs relies
+          // on that ordering (the last element is the most recent match).
+          findAll() {
+            const matches = [];
+            for (let offset = 0; offset < numRows; offset++) {
+              const candidate = (sheet.rows[row - 1 + offset] || [])[column - 1];
+              if (String(candidate) === String(text)) {
+                const matchedRow = row + offset;
+                matches.push({ getRow: () => matchedRow });
+              }
+            }
+            return matches;
+          },
         };
-      },
-      getValues() {
-        const result = [];
-        for (let rowOffset = 0; rowOffset < numRows; rowOffset++) {
-          const sourceRow = sheet.rows[row - 1 + rowOffset] || [];
-          const rowValues = [];
-          for (let columnOffset = 0; columnOffset < numColumns; columnOffset++) {
-            const value = sourceRow[column - 1 + columnOffset];
-            rowValues.push(value === undefined ? '' : value);
-          }
-          result.push(rowValues);
-        }
-        return result;
       },
     };
   }
