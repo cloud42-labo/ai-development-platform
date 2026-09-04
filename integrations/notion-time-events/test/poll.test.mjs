@@ -2728,18 +2728,24 @@ test('a Task reclassified from Story does not trust its stale Story-era Started 
 
 test('a Task that already completed one execution after its Story conversion trusts a fresh Started At on a later reopen', () => {
   // Codex-reported gap on the reclassification fix itself: a page that was
-  // ever Type=Story keeps its Sync Log 'story_excluded' marker forever, so
-  // taskWasEverReconciledAsStory_ would still read true long after the
-  // page's own first post-conversion execution completed and closed a real
-  // Task-era event. Without gating that check on allEvents being genuinely
-  // empty, a LATER reopen of this same, by-now-ordinary Task would keep
-  // being wrongly suppressed — falling back to a later observed edit
-  // (`when`) instead of trusting the reopen's own fresh Started At, exactly
-  // the "reopened Task" behavior every other Task already gets (see 'a
-  // reopened Task starts its new interval from the current Started At, not
-  // a later observed edit' above). This is the same fixture shape as that
-  // test, plus the Story-history marker, proving the marker no longer
-  // matters once real Task-era history exists.
+  // ever Type=Story keeps its Sync Log 'story_excluded' marker on file
+  // forever (old rows are never deleted), so storyConversionHappenedWhileInProgress_
+  // must not keep reporting Story risk long after the page's own first
+  // post-conversion execution completed and closed a real Task-era event —
+  // by then, later, non-Story Sync Log rows exist from the ordinary polls
+  // that observed and closed that execution, and
+  // storyConversionHappenedWhileInProgress_ only ever looks at the SINGLE
+  // MOST RECENT row for this Task ID, which by now is one of those, not
+  // the old Story marker. Without that, a LATER reopen of this same,
+  // by-now-ordinary Task would keep being wrongly suppressed — falling
+  // back to a later observed edit (`when`) instead of trusting the
+  // reopen's own fresh Started At, exactly the "reopened Task" behavior
+  // every other Task already gets (see 'a reopened Task starts its new
+  // interval from the current Started At, not a later observed edit'
+  // above). This is the same fixture shape as that test, plus the old
+  // Story-history marker AND a later, ordinary Sync Log row from the
+  // historical event's own real execution, proving a stale Story marker no
+  // longer matters once a newer, non-Story observation is on file.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa02';
   const historicalTaskEraEvent = eventPage('evt-post-conversion', {
     actor: 'Claude',
@@ -2756,6 +2762,14 @@ test('a Task that already completed one execution after its Story conversion tru
   sandbox.logSnapshot_(
     'snap-story-old', 'notion_poll', taskId, 'In Progress',
     new Date('2026-08-10T00:00:00.000Z'), 'story_excluded'
+  );
+  // The ordinary poll that closed the real Task-era event above -- exactly
+  // what production would have logged at the time, and what makes this
+  // page's most recent Sync Log observation NOT a Story one by the time of
+  // the later reopen below.
+  sandbox.logSnapshot_(
+    'snap-task-era-closed', 'notion_poll', taskId, 'Review',
+    new Date('2026-08-20T01:00:00.000Z'), 'closed:evt-post-conversion'
   );
 
   sandbox.pollTaskChanges();
@@ -3450,4 +3464,90 @@ test('an ambiguous open event does not silently keep accruing time once its Stor
     creates[0].properties['Started At'].date.start, conversionEdit,
     'expected the new event to start at the conversion boundary, not the stale pre-deploy Started At'
   );
+});
+
+test('a page with older, unrelated Task-era history still distrusts a stale Story-era Started At on a later Story-to-Task conversion', () => {
+  // Codex-reported gap (P2, round 21): cameFromArchivedStoryHistory used to
+  // gate the Sync Log lookup on allEvents.length === 0 -- correct for a
+  // page's first-ever event, or one whose entire history was just archived
+  // away, but wrong here: this page already has a genuinely older, unrelated
+  // closed Task-era event from a completely separate, much earlier
+  // execution, so allEvents is never empty, and the old gate skipped the
+  // Sync Log check entirely regardless of what happened since. If this same
+  // page is LATER used as a Story (In Progress) and then converted back to
+  // an executable Type without ever leaving In Progress, the Story spell's
+  // own freshly-recorded Started At can easily read newer than that old,
+  // unrelated history -- wrongly looking "trusted" by the ordinary
+  // freshness check alone, opening the new Task event at the Story's own
+  // start instead of the actual conversion boundary and double-counting
+  // the intervening Story period.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dpp01';
+  const oldUnrelatedEvent = eventPage('evt-old-unrelated', {
+    actor: 'Claude',
+    startedAt: '2026-07-01T00:00:00.000Z',
+    endedAt: '2026-07-01T01:00:00.000Z',
+  });
+  const storyStart = '2026-08-25T00:05:00.000Z';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    // The Story spell's own Started At -- freshly recorded when the page
+    // most recently went In Progress AS A STORY, well after the old
+    // unrelated event closed, so it looks "fresh" by the ordinary check.
+    startedAt: storyStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [oldUnrelatedEvent] });
+  // The page's single most recent Sync Log observation: Story, In Progress.
+  sandbox.logSnapshot_(
+    'snap-story-recent', 'notion_poll', taskId, 'In Progress',
+    new Date(storyStart), 'story_excluded'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, conversionEdit,
+    'expected the conversion boundary to be trusted, not the Story spell\'s own stale Started At, despite older unrelated Task-era history existing'
+  );
+});
+
+test('isFreeOutcome_ exempts Story outcomes that are entirely no-write skips, but still charges any outcome that also made a real write', () => {
+  // Codex-reported gap (P2, round 21): after the mandatory provenance
+  // backfill, skipped_ambiguous_pre_upgrade_provenance: and
+  // skipped_pending_provenance_backfill: are now the common outcome for a
+  // changed Story with pre-existing events -- neither makes a Notion
+  // write, but neither was recognized as free, so 25 such Stories inside
+  // one poll's overlap window could exhaust MAX_TASKS_PER_RUN on pure
+  // re-skips and defer genuinely write-needing Tasks sorted behind them.
+  const { sandbox } = harness();
+
+  // Single no-write skip actions: free.
+  assert.equal(sandbox.isFreeOutcome_('skipped_ambiguous_pre_upgrade_provenance:evt-1'), true);
+  assert.equal(sandbox.isFreeOutcome_('skipped_pending_provenance_backfill:evt-1'), true);
+  // A Story with multiple events, ALL no-write skips (comma-joined): free.
+  assert.equal(
+    sandbox.isFreeOutcome_('skipped_ambiguous_pre_upgrade_provenance:evt-1,skipped_pending_provenance_backfill:evt-2'),
+    true
+  );
+  // A Story whose events are a MIX of a no-write skip and a real write
+  // (archived or closed): still charged, exactly like a pure write would be.
+  assert.equal(
+    sandbox.isFreeOutcome_('skipped_ambiguous_pre_upgrade_provenance:evt-1,archived_story_event:evt-2'),
+    false
+  );
+  assert.equal(
+    sandbox.isFreeOutcome_('closed_task_era_at_story_conversion:evt-1,skipped_pending_provenance_backfill:evt-2'),
+    false
+  );
+  // A pure write outcome: still charged, unaffected by this change.
+  assert.equal(sandbox.isFreeOutcome_('archived_story_event:evt-1'), false);
+  // Existing free outcomes: unaffected.
+  assert.equal(sandbox.isFreeOutcome_('story_excluded'), true);
+  assert.equal(sandbox.isFreeOutcome_('duplicate:page-1'), true);
+  assert.equal(sandbox.isFreeOutcome_('done_gate_passed'), true);
 });

@@ -1268,10 +1268,35 @@ function isFreeOutcome_(outcome) {
   // that DID have a stray open event archived reports
   // 'archived_story_event:...' instead, which is a real write and does
   // count, the same as any other write.
-  return outcome === 'ignored:not_configured_task' ||
+  if (outcome === 'ignored:not_configured_task' ||
     outcome === 'done_gate_passed' ||
     outcome === 'story_excluded' ||
-    /^duplicate:/.test(String(outcome));
+    /^duplicate:/.test(String(outcome))) {
+    return true;
+  }
+  // reconcileStoryTask_ can report several per-event actions for one Story,
+  // comma-joined (one Story can have more than one Time Event). Two of
+  // those actions make no Notion write at all —
+  // 'skipped_ambiguous_pre_upgrade_provenance:' (see eventProvenanceIsAmbiguous_)
+  // and 'skipped_pending_provenance_backfill:' (see taskOriginBackfillComplete_)
+  // — but neither matched anything above, so a changed Story reporting only
+  // these still charged the reconciliation budget same as a real write.
+  // Codex-reported gap (round 21): after the mandatory provenance backfill,
+  // this is now the COMMON case for a changed Story with pre-existing
+  // events (see the "Known limitations" note on backfillStoryExclusion_'s
+  // archive path being largely unreachable), so 25 such Stories inside one
+  // poll's overlap window could exhaust MAX_TASKS_PER_RUN on pure re-skips,
+  // deferring genuinely write-needing Tasks sorted behind them by multiple
+  // trigger intervals. Free only when EVERY action in the joined outcome is
+  // one of these two — a Story whose events are a MIX (e.g. one skipped,
+  // one genuinely archived or closed) still made a real write and must
+  // still count, exactly like 'archived_story_event:...' and
+  // 'closed_task_era_at_story_conversion:...' always have.
+  const FREE_STORY_SKIP_PREFIXES = ['skipped_ambiguous_pre_upgrade_provenance:', 'skipped_pending_provenance_backfill:'];
+  const segments = String(outcome).split(',');
+  return segments.length > 0 && segments.every(function (segment) {
+    return FREE_STORY_SKIP_PREFIXES.some(function (prefix) { return segment.indexOf(prefix) === 0; });
+  });
 }
 
 function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
@@ -1405,26 +1430,47 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // this Task's own executable life, not whatever Started At happened
       // to read from its time as a Story.
       //
-      // Gated on allEvents.length === 0, not called unconditionally —
-      // Codex-reported gap in an earlier version of this fix, on two
-      // counts. Performance: every ordinary Task open (the vast majority
-      // of which were never a Story) would otherwise re-scan this script's
-      // entire, unboundedly-growing Sync Log on every single poll, just to
-      // learn "no" every time. Correctness: a page's Story history never
-      // expires on its own, even long after its own first post-conversion
-      // execution completed and closed a real Task-era event — an
-      // unconditional call would keep discarding a perfectly legitimate
-      // fresh Started At on every later reopen of that same now-ordinary
-      // Task, silently losing whatever work happened between the reopen
-      // and the next observed edit. allEvents.length === 0 is exactly the
-      // condition that actually needs this exception: it is only true for
-      // a page's first-ever event (nothing to distrust yet) or a page
-      // whose only "history" was just archived out from under it (the
-      // Story case this exists to catch) — the moment any real Task-era
-      // event exists, on any later reopen, the ordinary
-      // effectiveLatestHistoricalTimestamp freshness check below already
-      // does the right thing on its own, with no Story-specific override
-      // needed at all.
+      // Gated on "Started At would otherwise look fresh enough to trust",
+      // not called unconditionally, and not gated on allEvents.length === 0
+      // either (an earlier version of this gate — see below for why that
+      // was wrong too). Codex-reported gap in an earlier version of this
+      // fix, on two counts. Performance: every ordinary Task open (the vast
+      // majority of which were never a Story) would otherwise re-scan this
+      // script's entire, unboundedly-growing Sync Log on every single poll,
+      // just to learn "no" every time. Correctness: a page's Story history
+      // never expires on its own, even long after its own first
+      // post-conversion execution completed and closed a real Task-era
+      // event — an unconditional call would keep discarding a perfectly
+      // legitimate fresh Started At on every later reopen of that same
+      // now-ordinary Task, silently losing whatever work happened between
+      // the reopen and the next observed edit. The Sync Log check can only
+      // ever CHANGE the outcome when the ordinary freshness check below
+      // would otherwise trust `taskStartedAt` — if it wouldn't (already
+      // stale relative to `effectiveLatestHistoricalTimestamp`), `startAt`
+      // already correctly falls back to `when` regardless of what the Sync
+      // Log says, so there is nothing to gain from asking. Gating on that
+      // instead of allEvents.length === 0 exempts the same vast-majority
+      // case (an ordinary Task whose Started At is already known-stale
+      // relative to its own history) while fixing a real gap the old gate
+      // had — Codex-reported gap (round 21): allEvents.length === 0 only
+      // ever held for a page's first-ever event, or one whose entire
+      // history had just been archived away. A page with ANY older,
+      // unrelated closed Task-era event (from a genuinely earlier
+      // execution, long before ever becoming a Story) keeps allEvents
+      // non-empty forever — so if that same page later cycles through
+      // Story (In Progress) and back to an executable Type without ever
+      // leaving In Progress, the old gate skipped the Sync Log check
+      // entirely, even though the Story spell's own (freshly recorded)
+      // Started At could easily read newer than that old unrelated
+      // history, wrongly looking "trusted" and opening the new event at
+      // the Story's own start instead of this conversion's boundary —
+      // double-counting the intervening Story period. Checking freshness
+      // first, then only asking the Sync Log when the answer could still
+      // matter, catches this case too: taskStartedAtLooksFresh is computed
+      // from `effectiveLatestHistoricalTimestamp`, so a Started At that
+      // looks fresh only because of a since-archived-or-irrelevant old
+      // execution still triggers the same Story-history check that used to
+      // require an empty allEvents to run at all.
       //
       // Further narrowed to "most recent Story observation was itself In
       // Progress" rather than "was ever Story, regardless of what it was
@@ -1436,10 +1482,10 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // Progress at its last-known Story observation carries real risk:
       // nothing about staying continuously In Progress across a Type
       // change would ever prompt Started At to be refreshed.
-      const cameFromArchivedStoryHistory = allEvents.length === 0 && storyConversionHappenedWhileInProgress_(taskId);
-      const trustedTaskStart = taskStartedAt
-        && !cameFromArchivedStoryHistory
-        && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime())
+      const taskStartedAtLooksFresh = Boolean(taskStartedAt)
+        && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime());
+      const cameFromArchivedStoryHistory = taskStartedAtLooksFresh && storyConversionHappenedWhileInProgress_(taskId);
+      const trustedTaskStart = taskStartedAtLooksFresh && !cameFromArchivedStoryHistory
         ? taskStartedAt
         : null;
       const startAt = trustedTaskStart || when;
