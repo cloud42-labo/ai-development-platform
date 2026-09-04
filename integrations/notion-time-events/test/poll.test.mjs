@@ -3512,6 +3512,78 @@ test('backfillTaskOriginProvenance_ persists TASK_ORIGIN_BACKFILL_COMPLETE only 
   assert.equal(fullProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), 'true');
 });
 
+test('backfillTaskOriginProvenance_ still reaches a tied cohort member whose sibling was edited out of the tie before the resumed call', () => {
+  // Codex-reported gap (P1, round 28): the persisted resume state for a
+  // tied cohort split across two calls used to be a raw COUNT
+  // (the old TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET) of how many pages
+  // shared the resume cursor's timestamp last time -- not which specific
+  // pages. If an already-processed page in that tie is edited before the
+  // next call (its own last_edited_time moving later, out of the tie), the
+  // resumed on_or_after query returns a smaller tied cohort, and skipping
+  // the old (now too-large) count from it silently drops whichever page
+  // was never actually visited -- permanently, once this backfill fully
+  // drains and TASK_ORIGIN_BACKFILL_COMPLETE lets reconcileStoryTask_'s
+  // archive path treat its still-marker-less event as pre-fix Story stray
+  // data, even though it may be genuine pre-upgrade Task-era history.
+  const taskIdA = '3cafbd82-6f3b-8158-9622-d795b43dzz01';
+  const taskIdB = '3cafbd82-6f3b-8158-9622-d795b43dzz02';
+  const tiedTimestamp = '2026-08-01T02:00:00.000Z';
+  const movedTimestamp = '2026-08-01T03:00:00.000Z'; // taskA edited after call 1, before call 2
+
+  const taskA = taskPage(taskIdA, { status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp, type: 'Task' });
+  const taskB = taskPage(taskIdB, { status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp, type: 'Task' });
+  const eventA = eventPage('evt-tie-a', { actor: 'Claude', startedAt: '2026-07-01T00:00:00.000Z', endedAt: '2026-07-01T01:00:00.000Z' });
+  const eventB = eventPage('evt-tie-b', { actor: 'Claude', startedAt: '2026-07-01T00:00:00.000Z', endedAt: '2026-07-01T01:00:00.000Z' });
+
+  const eventsQueriedFor = [];
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const onOrAfter = body.filter && body.filter.timestamp === 'last_edited_time' && body.filter.last_edited_time.on_or_after;
+      const all = [taskA, taskB];
+      const filtered = onOrAfter ? all.filter((t) => t.last_edited_time >= onOrAfter) : all;
+      return { results: filtered.slice().sort((x, y) => (x.last_edited_time < y.last_edited_time ? -1 : 1)), has_more: false };
+    },
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      eventsQueriedFor.push(requestedTaskId);
+      if (requestedTaskId === taskIdA) return { results: [eventA], has_more: false };
+      if (requestedTaskId === taskIdB) return { results: [eventB], has_more: false };
+      return { results: [], has_more: false };
+    },
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+
+  // Seeds exactly the state a real first call would have persisted after
+  // processing ONLY taskA out of the {taskA, taskB} tie sharing
+  // tiedTimestamp -- i.e. this test starts at the resumed second call.
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      TASK_ORIGIN_BACKFILL_RESUME_CURSOR: tiedTimestamp,
+      TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS: taskIdA,
+    },
+    fetch: notionFetchStub(routes),
+  });
+
+  // Between the two calls, taskA is edited for an unrelated reason -- its
+  // own last_edited_time moves later, out of the tied cohort the resume
+  // point remembers.
+  taskA.last_edited_time = movedTimestamp;
+
+  const summary = sandbox.backfillTaskOriginProvenance_();
+
+  assert.ok(
+    eventsQueriedFor.indexOf(taskIdB) !== -1,
+    'expected taskB, the tie member never actually processed by the first call, to still be visited on resume'
+  );
+  assert.equal(summary.truncated, false);
+  assert.equal(summary.timedOut, false);
+  assert.equal(scriptProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), 'true');
+});
+
 test('an ambiguous open event does not silently keep accruing time once its Story page is reclassified to an executable Type with the same assignee', () => {
   // Codex-reported gap (P2, round 20): reconcileStoryTask_ leaves an
   // ambiguous-marked open event exactly as found -- correct while the page

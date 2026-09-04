@@ -1116,31 +1116,62 @@ function backfillStoryExclusion_() {
 //
 // Resumable and pagination-bounded the same way backfillStoryExclusion_
 // is, and for the identical reasons — see its own comment.
+// Tracks its resumed tie cohort by PAGE ID (TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS,
+// comma-joined), not by a raw count of how many shared the resume cursor's
+// timestamp last time (the position-based `tieOffset` pattern every other
+// resumable pass in this file still uses) — Codex-reported gap (round 28):
+// a count cannot tell "a page that was already processed left the tied
+// cohort" apart from "a page that was never processed left it too", so if
+// an already-processed page is edited between two calls (its own
+// last_edited_time moving later, out of the old tie) before this backfill
+// resumes, the resumed on_or_after query returns a now-SMALLER tied
+// cohort, and skipping the old (larger) count from it silently drops
+// whichever page never actually got visited — permanently, once this pass
+// fully drains and sets TASK_ORIGIN_BACKFILL_COMPLETE, since nothing else
+// ever re-visits it. For every other resumable pass in this file
+// (pollTaskChanges, backfillResultFingerprints_, backfillStoryExclusion_),
+// a page silently skipped this way just means one poll's worth of delay —
+// idempotent, and self-correcting the next time anything touches that
+// page. Here it is not: a marker-less event silently missed by this
+// specific backfill stays marker-less past TASK_ORIGIN_BACKFILL_COMPLETE,
+// and reconcileStoryTask_'s archive path can then permanently delete it as
+// though it were pre-fix Story stray data — even when it is genuine
+// pre-upgrade Task-era history. That asymmetric, irreversible consequence
+// is why only this one function gets the more expensive ID-based fix
+// rather than the same accepted, documentation-only treatment as the
+// others' identical-in-shape (but recoverable) tie limitation.
+//
+// Matching by ID rather than position also has no failure mode the old
+// count-based check didn't already share at genuine extreme scale: Script
+// Properties caps a single property's value size, so a tie cohort with
+// enough page IDs to exceed that (on the order of hundreds of UUIDs) hits
+// the same kind of hard, accepted limit `LAST_SYNC_CURSOR_TIE_OFFSET` and
+// friends already document for "thousands of pages sharing one exact
+// minute" — not a new gap this introduces, just the same one under a
+// slightly different shape.
 function backfillTaskOriginProvenance_() {
   return withPollLock_(function () {
     const runStartedAt = new Date();
     const props = PropertiesService.getScriptProperties();
     const resumeCursor = props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR');
-    const tieOffset = resumeCursor ? Number(props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET') || '0') : 0;
+    const resumeTieIds = resumeCursor
+      ? String(props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS') || '').split(',').filter(Boolean)
+      : [];
     // No Type restriction at all — see the function's own comment for why
     // every page needs a visit regardless of its current Type.
     const filter = resumeCursor
       ? { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } }
       : undefined;
-    function tieOffsetStartIndex_(results) {
-      let index = 0;
-      if (resumeCursor && tieOffset > 0) {
-        let skipped = 0;
-        while (
-          index < results.length &&
-          skipped < tieOffset &&
-          String(results[index].last_edited_time || '') === resumeCursor
-        ) {
-          skipped++;
-          index++;
-        }
-      }
-      return index;
+    // A result is already handled only if it BOTH shares the resume
+    // cursor's exact timestamp AND is one of the specific pages this
+    // resume point recorded as processed — never a raw position, so a page
+    // whose own edit moved it out of (or into) the tied cohort since the
+    // last call can never cause a different, still-unprocessed page to be
+    // skipped in its place.
+    function notYetProcessed_(results) {
+      return results.filter(function (r) {
+        return !(String(r.last_edited_time || '') === resumeCursor && resumeTieIds.indexOf(r.id) !== -1);
+      });
     }
     const result = paginateNotionQuery_(
       '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
@@ -1151,10 +1182,9 @@ function backfillTaskOriginProvenance_() {
       },
       runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
       runStartedAt.getTime() + MAX_RUN_DURATION_MS - MIN_PROCESSING_RESERVE_MS,
-      function (results) { return tieOffsetStartIndex_(results) < results.length; }
+      function (results) { return notYetProcessed_(results).length > 0; }
     );
-    const startIndex = tieOffsetStartIndex_(result.results);
-    const toProcess = result.results.slice(startIndex);
+    const toProcess = notYetProcessed_(result.results);
 
     const outcomes = [];
     let iterated = 0;
@@ -1172,12 +1202,11 @@ function backfillTaskOriginProvenance_() {
       const lastSeen = String(processed[processed.length - 1].last_edited_time || '');
       if (lastSeen) {
         props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR', lastSeen);
-        let newTieOffset = 0;
-        for (let i = 0; i < processed.length; i++) {
-          newTieOffset = String(processed[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
-        }
-        const cumulativeTieOffset = (lastSeen === resumeCursor ? tieOffset : 0) + newTieOffset;
-        props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET', String(cumulativeTieOffset));
+        const newTieIds = processed
+          .filter(function (r) { return String(r.last_edited_time || '') === lastSeen; })
+          .map(function (r) { return r.id; });
+        const cumulativeTieIds = (lastSeen === resumeCursor ? resumeTieIds : []).concat(newTieIds);
+        props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS', cumulativeTieIds.join(','));
       }
       Logger.log(
         'backfillTaskOriginProvenance_: stopped at the ' +
@@ -1188,15 +1217,14 @@ function backfillTaskOriginProvenance_() {
       );
     } else if (result.truncated || timedOut) {
       // Stopped with nothing new processed this call (the whole returned
-      // batch was already covered by the tie-offset skip): leave the
-      // resume state exactly as it was rather than losing the resume
-      // point — same rule the other backfills apply for the identical
-      // scenario.
+      // batch was already covered by the tie skip): leave the resume state
+      // exactly as it was rather than losing the resume point — same rule
+      // the other backfills apply for the identical scenario.
     } else {
       // Fully drained: clear any stale resume point so a future call
       // starts a fresh full pass.
       props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR', '');
-      props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET', '');
+      props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS', '');
       // Persist that a full, undrained-free pass has happened at least
       // once -- see taskOriginBackfillComplete_ and reconcileStoryTask_'s
       // own comment (Codex-reported gap, round 19) for why
