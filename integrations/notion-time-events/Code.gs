@@ -904,13 +904,11 @@ function backfillStoryExclusion_() {
 
 // Operator escape hatch for an EXISTING LIVE DEPLOYMENT being upgraded to
 // add the `Task Origin=` provenance marker (see
-// eventWasTouchedDuringTaskExecution_): retroactively stamps a provenance
-// marker onto every pre-existing Time Event that doesn't have one yet, for
-// EVERY Task/Subtask/Story page with an explicit Type — paired with a
-// matching Sync Log row — so eventWasTouchedDuringTaskExecution_ can
-// validate genuine Task-era events exactly like any event created after
-// this deploy, the moment a later reclassification to Story needs to tell
-// them apart from bogus pre-fix Story stray data.
+// eventWasTouchedDuringTaskExecution_): flags every pre-existing Time
+// Event that doesn't have one yet — across EVERY page, any Type — with the
+// `AMBIGUOUS_PROVENANCE_MARKER` sentinel (see eventProvenanceIsAmbiguous_),
+// so reconcileStoryTask_ never guesses at a pre-existing event's history
+// and instead leaves it exactly as found for an operator to review.
 //
 // Codex-reported gap: absence of `Task Origin=` must not default to "treat
 // as unproven, possibly-Story-origin data" for an event that simply
@@ -919,39 +917,40 @@ function backfillStoryExclusion_() {
 // bogus legacy Story stray data, but a genuinely pre-upgrade Task-era
 // event has the IDENTICAL signature (no marker at all, since the field
 // itself is new) with the OPPOSITE correct outcome (preserve). The two
-// cannot be told apart from the event's own data alone — only an
-// operator-run backfill, executed at a known point in time (immediately
-// after deploying THIS revision, before any of these Tasks are
-// reclassified to Story), can capture "this page's Type genuinely read
-// non-Story at the moment this distinction was introduced" as a permanent
-// anchor, mirroring backfillStoryExclusion_'s capture of the opposite
-// direction.
+// cannot be told apart from the event's own data alone.
+//
+// Deliberately does NOT try to infer a confirmed Task/Story origin from a
+// page's CURRENT Type at backfill time, in EITHER direction — Codex-
+// reported gap across two rounds of this exact fix. An earlier version
+// trusted the current Type when it read non-Story, reasoning that was
+// "the common case, and the only case where the current Type is itself
+// usable evidence" — but a page can have flipped Type any number of times
+// before this revision was ever deployed, with no historical record of
+// when: a page reclassified Story → Task before this deploy looks exactly
+// like an ordinary Task page, yet may still carry a genuinely bogus
+// pre-fix Story stray event created while it really was a Story: this
+// backfill would have wrongly certified it as Task-origin, letting
+// reconcileStoryTask_ preserve it forever the instant the page (or the
+// event itself, via some other path) is ever reclassified to Story again.
+// A prior round already covered the mirror-image case (Task → Story
+// before deploy). Both directions share one root cause — the page's
+// CURRENT Type never proves anything about pre-revision history — so
+// EVERY pre-existing event without a marker gets flagged ambiguous,
+// unconditionally, regardless of what Type its page currently reads.
+// Only events created after this deploy (via createNotionTimeEvent_,
+// which stamps the real, current Type directly and immutably) ever get a
+// confirmed `Task Origin=` value.
 //
 // MUST run once, immediately after deploying, BEFORE backfillStoryExclusion_
-// — Codex-reported gap in an earlier version of this fix: a page already
-// reclassified TO Story before this deploy has events whose true origin
-// (genuinely created while it was still a Task, vs. always-bogus Story
-// stray data) is unrecoverable from the page's CURRENT Type, since that
-// already reads Story either way. Restricting the query to currently
-// non-Story pages skipped exactly this case, leaving backfillStoryExclusion_
-// free to archive real historical work the instant it ran. Genuinely
-// non-Story pages (the common case, and the only case where the current
-// Type is itself usable evidence) still get the ordinary treatment: a
-// real `Task Origin=` tied to a Sync Log row recording the actual Type.
-// A page ALREADY Story at backfill time gets a distinct
-// `Task Origin=ambiguous-pre-upgrade:<event ID>` marker instead — its true
-// origin is unprovable one way or the other, so reconcileStoryTask_ (see
-// eventProvenanceIsAmbiguous_) skips such an event entirely rather than
-// guessing: neither preserved nor archived, left exactly as found, and
-// called out in its own Outcome so an operator can review and decide by
-// hand. A fresh deploy has no pre-existing Time Events at all and needs no
-// backfill — every event gets its `Task Origin=` at creation from day one.
+// — so every pre-existing event is flagged (and thus left alone) before
+// backfillStoryExclusion_ could otherwise archive it outright. A fresh
+// deploy has no pre-existing Time Events at all and needs no backfill —
+// every event gets its confirmed `Task Origin=` at creation from day one.
 //
-// Deliberately scoped to pages whose Type is explicitly recorded
-// (`is_not_empty`): a page with no Type at all gives
-// eventWasTouchedDuringTaskExecution_ nothing usable to stamp either (it
-// requires a non-empty value), so backfilling it would be a wasted API
-// call with no effect.
+// Queries every page regardless of Type (including pages with no Type set
+// at all): unlike the earlier, Type-dependent design, this backfill's
+// outcome for a given event never depends on its page's current Type, so
+// there is no page this could skip without leaving a gap.
 //
 // Resumable and pagination-bounded the same way backfillStoryExclusion_
 // is, and for the identical reasons — see its own comment.
@@ -961,12 +960,11 @@ function backfillTaskOriginProvenance_() {
     const props = PropertiesService.getScriptProperties();
     const resumeCursor = props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR');
     const tieOffset = resumeCursor ? Number(props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET') || '0') : 0;
-    const baseConditions = [
-      { property: 'Type', select: { is_not_empty: true } },
-    ];
+    // No Type restriction at all — see the function's own comment for why
+    // every page needs a visit regardless of its current Type.
     const filter = resumeCursor
-      ? { and: baseConditions.concat([{ timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } }]) }
-      : { and: baseConditions };
+      ? { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } }
+      : undefined;
     function tieOffsetStartIndex_(results) {
       let index = 0;
       if (resumeCursor && tieOffset > 0) {
@@ -1074,28 +1072,19 @@ function backfillTaskOriginProvenance_() {
 // side of an interruption converges correctly.
 function backfillTaskOriginForTask_(task) {
   const taskId = task.id;
-  const taskType = propertyText_(task.properties.Type);
-  const currentStatus = propertyText_(task.properties.Status);
-  const isCurrentlyStory = taskType === 'Story';
   const events = queryNotionTimeEventsForTask_(taskId);
   const actions = [];
   events.forEach(function (eventPage) {
-    const existingOrigin = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginSnapshotId;
+    const existingOrigin = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginType;
     if (existingOrigin) return;
-    const backfillSnapshotId = (isCurrentlyStory ? 'ambiguous-pre-upgrade:' : 'backfill:') + eventPage.id;
-    const outcomeLabel = isCurrentlyStory ? 'flagged_ambiguous_provenance:' : 'backfilled_task_origin:';
-    logSnapshot_(
-      backfillSnapshotId, 'task_origin_backfill', taskId, currentStatus,
-      new Date(), outcomeLabel + eventPage.id, taskType
-    );
     const existingNote = propertyText_(eventPage.properties.Note);
-    const marker = buildNote_({ taskOriginSnapshotId: backfillSnapshotId });
+    const marker = buildNote_({ taskOriginType: AMBIGUOUS_PROVENANCE_MARKER });
     notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
       properties: {
         Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
       },
     });
-    actions.push(outcomeLabel + eventPage.id);
+    actions.push('flagged_ambiguous_provenance:' + eventPage.id);
   });
   return actions.length ? actions.join(',') : 'no_backfill_needed:' + taskId;
 }
@@ -1216,6 +1205,7 @@ function isFreeOutcome_(outcome) {
 function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
   const taskId = task.id;
   const taskTitle = propertyText_(task.properties.Title) || taskId;
+  const taskType = propertyText_(task.properties.Type);
   const allEvents = queryNotionTimeEventsForTask_(taskId);
   const openEvents = allEvents.filter(function (eventPage) {
     return !propertyDate_(eventPage.properties['Ended At']);
@@ -1407,7 +1397,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const executionId = otherActor.length
         ? outgoingExecutionId
         : startAt.toISOString();
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId);
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType);
       actions.push('opened:' + created.id);
     }
   } else if (openEvents.length) {
@@ -1778,16 +1768,27 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, taskType) {
   const note = buildNote_({
     source: 'notion_reconcile',
     execution: executionId,
     snapshotId: snapshotId,
-    // Stamped here and ONLY here — see parseNoteMeta_'s taskOriginSnapshotId
-    // for why this must be this event's one permanent, unwritable-over
-    // record of the poll that actually created it, e.g. Task-era
-    // provenance for eventWasTouchedDuringTaskExecution_.
-    taskOriginSnapshotId: snapshotId,
+    // Stamped here and ONLY here — see parseNoteMeta_'s taskOriginType for
+    // why this must be this event's one permanent, unwritable-over record
+    // of what Type the page genuinely was at the moment this event was
+    // created, e.g. Task-era provenance for
+    // eventWasTouchedDuringTaskExecution_. Holds the Type value itself
+    // directly (not a Sync Log cross-reference) — Codex-reported gap in an
+    // earlier version of this fix: a snapshotId-based reference required a
+    // SEPARATE, later logSnapshot_ write to resolve, and if this Notion
+    // create succeeded but that later write never happened (Apps Script
+    // interrupted, or the Task's own state changed before a retry could
+    // reproduce the identical snapshotId), the reference would point at a
+    // Sync Log row that could never be written, permanently orphaning the
+    // marker. Embedding the Type directly makes this event's own Note the
+    // single, self-contained source of truth — no second write, nothing
+    // to desynchronize.
+    taskOriginType: taskType,
     changedBy: changedBy,
   });
 
@@ -1951,6 +1952,12 @@ function notionRequest_(method, path, body) {
 // unretrieved data.
 const QUERY_PAGE_SAFETY_LIMIT = 50;
 
+// Sentinel `Task Origin=` value for a pre-existing event whose true
+// history (genuine Task-era work vs. bogus pre-fix Story stray data)
+// cannot be determined from any data this script has access to — see
+// eventProvenanceIsAmbiguous_ and backfillTaskOriginForTask_.
+const AMBIGUOUS_PROVENANCE_MARKER = 'ambiguous-pre-upgrade';
+
 function paginateNotionQuery_(path, baseBody, deadlineMs, extendedDeadlineMs, hasProgress) {
   let cursor = null;
   let pageCount = 0;
@@ -2102,10 +2109,13 @@ function buildNote_(fields) {
   if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
   // Stamped ONLY at creation (see createNotionTimeEvent_), never again by
   // any later write to this event (a close, a reassignment, a Story-
-  // conversion close, ...) — see parseNoteMeta_'s taskOriginSnapshotId for
-  // why this must stay immutable and separate from the ordinary, mutable
-  // `Snapshot=` above.
-  if (fields.taskOriginSnapshotId) parts.push('Task Origin=' + fields.taskOriginSnapshotId);
+  // conversion close, ...) — see parseNoteMeta_'s taskOriginType for why
+  // this must stay immutable and separate from the ordinary, mutable
+  // `Snapshot=` above. Holds the Type value itself (or the
+  // 'ambiguous-pre-upgrade' sentinel — see backfillTaskOriginForTask_),
+  // not a Sync Log cross-reference: self-contained, nothing else to keep
+  // in sync.
+  if (fields.taskOriginType) parts.push('Task Origin=' + fields.taskOriginType);
   if (fields.changedBy) parts.push('Changed By=' + fields.changedBy);
   if (fields.resultFingerprint) parts.push('Result Fingerprint=' + fields.resultFingerprint);
   return parts.join(' | ');
@@ -2140,8 +2150,8 @@ function parseNoteMeta_(note) {
     // close, a reassignment, anything. Used where "what last happened to
     // this event" is the actual question (e.g. the Sheet projection's own
     // audit column). NOT usable to answer "was this event genuinely
-    // created during a Task execution": see taskOriginSnapshotId below,
-    // whose whole purpose is staying immutable where this field can't.
+    // created during a Task execution": see taskOriginType below, whose
+    // whole purpose is staying immutable where this field can't.
     snapshotId: noteField_(note, 'Snapshot'),
     // Codex-reported gap on the per-event Task-era provenance fix: reusing
     // the ordinary, mutable `Snapshot=` field for that check was self-
@@ -2150,15 +2160,19 @@ function parseNoteMeta_(note) {
     // which stamps a NEW `Snapshot=` (this exact Story-typed poll's own
     // snapshot) that overwrites what noteField_'s last-occurrence lookup
     // would return, poisoning the very evidence that just correctly
-    // classified this event as Task-era in the first place. Any LATER
-    // re-observation of this now-closed, now-mislabeled event would then
-    // see it as Story-typed and archive it, undoing the preservation this
-    // whole mechanism exists for. `Task Origin=` is written ONLY once, at
-    // createNotionTimeEvent_, and never touched by any later write to this
-    // event — immutable proof of what Type the page genuinely was at the
-    // moment this specific event was born, unaffected by anything that
-    // happens to the event afterward.
-    taskOriginSnapshotId: noteField_(note, 'Task Origin'),
+    // classified this event as Task-era in the first place. `Task Origin=`
+    // is written ONLY once, at createNotionTimeEvent_, and never touched
+    // by any later write to this event — immutable proof of what Type the
+    // page genuinely was at the moment this specific event was born,
+    // unaffected by anything that happens to the event afterward. Holds
+    // the Type value directly, not a Sync Log cross-reference — Codex-
+    // reported gap in an earlier (snapshotId-based) version: a separate,
+    // later logSnapshot_ write could fail or never run (Apps Script
+    // interrupted between the two), permanently orphaning the reference
+    // with no way to ever resolve it, and archiving real Task-era history
+    // the moment a Story conversion needed to check it. Embedding the
+    // value directly makes the event's own Note self-contained.
+    taskOriginType: noteField_(note, 'Task Origin'),
     changedBy: noteField_(note, 'Changed By'),
     // The *last* recorded value only — fine for every other field (only the
     // newest close/reassignment metadata ever matters), but NOT enough on
@@ -2288,12 +2302,12 @@ function storyConversionHappenedWhileInProgress_(taskId) {
 }
 
 // True if THIS SPECIFIC event's own immutable `Task Origin=` marker (see
-// parseNoteMeta_'s taskOriginSnapshotId — stamped ONCE, at creation, and
-// never touched again by any later write to this event) maps to a Sync
-// Log row with an explicit, POST-UPGRADE, non-Story `Type` recorded. Used
-// by reconcileStoryTask_ to tell genuine Task-era Time Events (created
-// while this exact page really was a Task, now attached to a page
-// reclassified TO Story) apart from pre-fix legacy stray data.
+// parseNoteMeta_'s taskOriginType — stamped ONCE, at creation, and never
+// touched again by any later write to this event) records an explicit,
+// non-Story Type. Used by reconcileStoryTask_ to tell genuine Task-era
+// Time Events (created while this exact page really was a Task, now
+// attached to a page reclassified TO Story) apart from pre-fix legacy
+// stray data.
 //
 // Deliberately reads `Task Origin=`, NOT the ordinary, mutable `Snapshot=`
 // — Codex-reported gap on an earlier version of this exact fix: using
@@ -2320,47 +2334,42 @@ function storyConversionHappenedWhileInProgress_(taskId) {
 // legacy Story event forever, the instant its page was ever glimpsed as
 // Task even in passing, defeating the whole exclusion.
 //
-// Also deliberately NOT inferred from the absence of a Story-path Outcome
-// marker alone — Codex-reported gap in an even earlier version: on an
-// EXISTING LIVE DEPLOYMENT being upgraded to this whole BUG-ADP-TTE-01
-// revision, the OLD reconciler had no Type awareness at all, so it ran
-// EVERY page — including genuine Stories — through
-// reconcileAuthoritativeTimeEvents_ and logged perfectly ordinary Task-path
-// Outcomes (`opened:`, `closed:`, `no_change:`, ...) for them. Those old
-// rows are exactly the ones proving nothing: they predate Type-based
-// routing entirely, so "not a Story-path Outcome" was never actually
-// evidence the page wasn't a Story — it only meant Type wasn't checked
-// yet. logSnapshot_'s Type column (added by this fix) is only ever
-// populated by THIS revision's own reconcileTaskPage_, so its mere
-// presence already proves the row is post-upgrade — a pre-upgrade row (or
-// one appended by the old six-argument logSnapshot_) reads back as `''`
-// for this column exactly like any other cell beyond what was written,
-// correctly failing the check below rather than being misread as `Story`
-// or anything else specific.
+// The recorded value is the Type string itself, embedded directly in this
+// event's own Note at creation — NOT a Sync Log cross-reference — Codex-
+// reported gap on an earlier (snapshotId-indirection) version: if the
+// Notion event-creation write succeeded but a later, separate Sync Log
+// write failed or never ran (Apps Script interrupted between them, or the
+// Task's own state changed before a retry could reproduce the identical
+// snapshot), the reference would point at a Sync Log row that could never
+// be written — permanently orphaning the marker with no way to resolve it,
+// archiving real Task-era history the moment a Story conversion needed to
+// check it. Embedding the value directly makes the event's own Note a
+// single, self-contained write with nothing else to keep in sync.
+// `ambiguous-pre-upgrade` (see eventProvenanceIsAmbiguous_ and
+// backfillTaskOriginForTask_) is deliberately excluded here even though it
+// is a non-empty, non-`Story` string: it explicitly means "unknown," never
+// "confirmed Task-era."
 function eventWasTouchedDuringTaskExecution_(eventPage) {
-  const originSnapshotId = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginSnapshotId;
-  if (!originSnapshotId) return false;
-  const sheet = ensureSyncLogSheet_();
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return false;
-  const rows = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
-  const match = rows.find(function (row) {
-    return row[0] === originSnapshotId;
-  });
-  if (!match) return false;
-  const recordedType = String(match[6] || '');
-  return Boolean(recordedType) && recordedType !== 'Story';
+  const recordedType = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginType;
+  return Boolean(recordedType) && recordedType !== 'Story' && recordedType !== AMBIGUOUS_PROVENANCE_MARKER;
 }
 
 // True if this event's `Task Origin=` marker is the special
-// `ambiguous-pre-upgrade:` sentinel backfillTaskOriginForTask_ stamps for a
-// page that was already Story at backfill time — see
-// backfillTaskOriginProvenance_'s comment for why such an event's true
-// origin cannot be determined at all, and reconcileStoryTask_'s own check
-// for what happens to it (neither preserved nor archived).
+// `ambiguous-pre-upgrade` sentinel backfillTaskOriginForTask_ stamps —
+// Codex-reported gap on an earlier version of this whole backfill: a
+// page's CURRENT Type at backfill time never proves anything about a
+// pre-existing event's true history, regardless of which way it currently
+// reads. A page reclassified Story → Task before this revision was ever
+// deployed looks exactly like an ordinary Task page at backfill time, yet
+// may still carry a genuinely bogus pre-fix Story stray event; the
+// reverse (Task → Story before deploy) has the identical problem in the
+// other direction (see backfillTaskOriginProvenance_'s own comment). No
+// pre-existing event's origin can be confirmed from data this script has
+// access to, so every one gets this sentinel instead of a confirmed
+// value, and reconcileStoryTask_ leaves it exactly as found (neither
+// preserved nor archived) rather than guessing.
 function eventProvenanceIsAmbiguous_(eventPage) {
-  const originSnapshotId = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginSnapshotId;
-  return originSnapshotId.indexOf('ambiguous-pre-upgrade:') === 0;
+  return parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginType === AMBIGUOUS_PROVENANCE_MARKER;
 }
 
 function ensureProjectionHeaders_() {
