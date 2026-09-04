@@ -2472,7 +2472,13 @@ test('classifyWorkType_ resolves a tie correctly for a boundary-stamped event, u
   // the tie-break would still find the reassignment's OLD (logged)
   // snapshot on the event and wrongly trust Sync Log's stale row.
   const taskId = 'task-boundary-snapshot-tie';
-  const { sandbox, fetchLog } = harness();
+  // A strictly-increasing fake clock guarantees the two logSnapshot_ calls
+  // below (earlier in program order) get a LOWER Write than the later
+  // stampExecutionBoundary_ call, deterministically -- the real clock could
+  // otherwise tie all three at the same millisecond on a fast run, hiding
+  // exactly the ordering this test exists to prove.
+  let clock = 1000;
+  const { sandbox, fetchLog } = harness({ now: () => clock++ });
   // The reassignment's own poll completed normally: its snapshot IS logged.
   sandbox.logSnapshot_('snap-reassignment', 'notion_poll', taskId, 'In Progress', new Date('2026-08-30T05:00:00.000Z'), 'closed:evt-cleared');
   // The Sync Log's latest row for this task is still this stale, unrelated
@@ -2501,6 +2507,54 @@ test('classifyWorkType_ resolves a tie correctly for a boundary-stamped event, u
   assert.equal(
     sandbox.classifyWorkType_([boundaryStampedEvent], taskId), 'Review Fix',
     'expected the boundary\'s own (never-logged) snapshot to win the tie, not the reassignment\'s (logged) one'
+  );
+});
+
+test('classifyWorkType_ prefers a tied Sync Log row over a close whose snapshot was never logged, when the row\'s own Write is genuinely newer', () => {
+  // Codex-reported gap (round 33): a close's own snapshot missing from the
+  // Sync Log does NOT prove the log is stale (the round-31/32 assumption).
+  // A close's poll can be interrupted before ITS OWN logSnapshot_ while a
+  // DIFFERENT, LATER poll still completes normally and logs fresh,
+  // unrelated status -- all inside the same Notion minute. Write=/column H
+  // (real Apps Script wall-clock ms, never truncated) is the only signal
+  // that can tell these two cases apart; snapshot presence/absence alone
+  // cannot.
+  const taskId = 'task-write-ms-log-wins';
+  const { sandbox } = harness({ now: () => 5000 });
+  // This poll's own Date.now() (5000) becomes the log row's Write, via the
+  // fake clock above.
+  sandbox.logSnapshot_('snap-later-backlog', 'notion_poll', taskId, 'Backlog', new Date('2026-08-30T04:00:00.000Z'), 'no_change:Backlog');
+
+  const closedFromReview = eventPage('evt-1', {
+    actor: 'Claude', startedAt: '2026-08-30T03:00:00.000Z', endedAt: '2026-08-30T04:00:00.000Z',
+    // No Snapshot= at all (this close's own poll never reached
+    // logSnapshot_), but its Write (3000) genuinely predates the log row's
+    // Write (5000) -- the log really is newer, despite the tied minute.
+    note: 'End Status=Review | Reason=left_in_progress | Write=3000',
+  });
+
+  assert.equal(
+    sandbox.classifyWorkType_([closedFromReview], taskId), 'Initial Work',
+    'expected the later-written Backlog log row to win over the close, whose snapshot was merely never logged'
+  );
+});
+
+test('classifyWorkType_ still prefers a tied close whose own Write postdates the Sync Log row\'s Write', () => {
+  // Companion to the regression above, in the other direction: proves the
+  // Write= comparison is symmetric, not a disguised "always prefer the
+  // log" rule.
+  const taskId = 'task-write-ms-close-wins';
+  const { sandbox } = harness({ now: () => 3000 });
+  sandbox.logSnapshot_('snap-stale', 'notion_poll', taskId, 'Backlog', new Date('2026-08-30T04:00:00.000Z'), 'no_change:Backlog');
+
+  const closedFromReview = eventPage('evt-1', {
+    actor: 'Claude', startedAt: '2026-08-30T03:00:00.000Z', endedAt: '2026-08-30T04:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress | Write=5000', // postdates the log row's Write (3000)
+  });
+
+  assert.equal(
+    sandbox.classifyWorkType_([closedFromReview], taskId), 'Review Fix',
+    'expected the close\'s own newer Write to win over the log row\'s older Write'
   );
 });
 
@@ -3107,6 +3161,46 @@ test('resolveReviewSource_ still credits a review submitted later in the SAME ro
     ),
     'Codex',
     'expected the same-minute review at :30 to still qualify, and the next-minute review to stay excluded'
+  );
+});
+
+test('resolveReviewSource_ rounds the cutoff to the containing minute, not a fixed 59999ms addition, when startAt itself carries seconds', () => {
+  // Codex-reported gap (round 33): startAt can come from trustedTaskStart
+  // (the Task's own Started At), which -- unlike the `when` fallback used
+  // in the test above -- can itself carry seconds. Blindly adding 59999ms
+  // to a value already at :00:30 would extend eligibility to :01:29,
+  // admitting a review at :01:20 that could not have caused a fix that
+  // started a full minute earlier.
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T10:00:59.000Z' }, // same containing minute -- eligible
+      { user: { login: 'komaba' }, submitted_at: '2026-08-30T10:01:20.000Z' }, // next minute -- must stay excluded
+    ]),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-9', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(
+    sandbox.resolveReviewSource_(
+      task,
+      new Date('2026-08-30T00:00:00.000Z'),
+      new Date('2026-08-30T10:00:30.000Z') // startAt itself carries seconds
+    ),
+    'Codex',
+    'expected the :59 review (same containing minute) to qualify, and the next-minute :01:20 review to stay excluded'
   );
 });
 

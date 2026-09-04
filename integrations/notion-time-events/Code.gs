@@ -257,7 +257,7 @@ function pollTaskChanges() {
       (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
     ) {
       const task = tasksToProcess[iterated];
-      const outcome = reconcileTaskPage_(task);
+      const outcome = reconcileTaskPage_(task, { runWriteMs: runStartedAt.getTime() });
       outcomes.push(outcome);
       lastScannedEdit = String(task.last_edited_time || '');
       iterated++;
@@ -361,7 +361,7 @@ function reconcileTaskById(pageId) {
   if (!normalized) throw new Error('reconcileTaskById requires a Notion page ID.');
   return withPollLock_(function () {
     resetSyncLogRowsCache_();
-    return reconcileTaskPage_(retrieveNotionPage_(normalized));
+    return reconcileTaskPage_(retrieveNotionPage_(normalized), { runWriteMs: Date.now() });
   });
 }
 
@@ -476,7 +476,7 @@ function backfillResultFingerprints_() {
       iterated < toProcess.length &&
       (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
     ) {
-      outcomes.push(reconcileTaskPage_(toProcess[iterated]));
+      outcomes.push(reconcileTaskPage_(toProcess[iterated], { runWriteMs: runStartedAt.getTime() }));
       iterated++;
     }
     const timedOut = iterated < toProcess.length;
@@ -562,6 +562,13 @@ function reconcileTaskPage_(task, options) {
   // an extra, harmless re-check, never a different outcome for unchanged
   // data.
   const bypassDedup = Boolean(options && options.bypassDedup);
+  // Reuses the CALLING run's own already-captured wall-clock ms (see e.g.
+  // pollTaskChanges' runStartedAt) whenever the caller provides one, rather
+  // than reading a fresh Date.now() per Task processed — see closeNotionTime
+  // Event_/stampExecutionBoundary_/logSnapshot_'s own writeMs comments.
+  // Falls back to a fresh read only for a caller that omits it (e.g. a
+  // direct test call to this function).
+  const writeMs = (options && options.runWriteMs) || Date.now();
 
   const pageId = task.id;
   const currentStatus = propertyText_(task.properties.Status);
@@ -627,11 +634,12 @@ function reconcileTaskPage_(task, options) {
         desiredActor,
         changedBy,
         snapshotId,
-        when
+        when,
+        writeMs
       );
 
   syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
-  logSnapshot_(snapshotId, 'notion_poll', pageId, currentStatus, when, outcome, taskType);
+  logSnapshot_(snapshotId, 'notion_poll', pageId, currentStatus, when, outcome, taskType, writeMs);
   return outcome;
 }
 
@@ -1005,7 +1013,7 @@ function backfillStoryExclusion_() {
       // Story page having also changed; reconcileStoryTask_ itself is
       // fully idempotent, so bypassing dedup here only ever costs an
       // extra, harmless re-check for a Story with nothing new to do.
-      outcomes.push(reconcileTaskPage_(toProcess[iterated], { bypassDedup: true }));
+      outcomes.push(reconcileTaskPage_(toProcess[iterated], { bypassDedup: true, runWriteMs: runStartedAt.getTime() }));
       iterated++;
     }
     const timedOut = iterated < toProcess.length;
@@ -1434,7 +1442,7 @@ function isFreeOutcome_(outcome) {
   });
 }
 
-function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
+function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when, writeMs) {
   const taskId = task.id;
   const taskTitle = propertyText_(task.properties.Title) || taskId;
   const taskType = propertyText_(task.properties.Type);
@@ -1483,11 +1491,11 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         const restartBoundary = when.getTime() >= eventStartedAt_(eventPage).getTime()
           ? when
           : eventStartedAt_(eventPage);
-        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart');
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart', writeMs);
         actions.push('closed_ambiguous_provenance_restart:' + eventPage.id);
         return;
       }
-      closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'reassignment');
+      closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'reassignment', writeMs);
       actions.push('closed_reassigned:' + eventPage.id);
     });
 
@@ -1500,7 +1508,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
     });
 
     for (let i = 1; i < sameActor.length; i++) {
-      closeNotionTimeEvent_(sameActor[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation');
+      closeNotionTimeEvent_(sameActor[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation', writeMs);
       actions.push('closed_duplicate:' + sameActor[i].id);
     }
 
@@ -1543,7 +1551,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const restartBoundary = when.getTime() >= eventStartedAt_(ambiguousOpenEvent).getTime()
         ? when
         : eventStartedAt_(ambiguousOpenEvent);
-      closeNotionTimeEvent_(ambiguousOpenEvent, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart');
+      closeNotionTimeEvent_(ambiguousOpenEvent, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart', writeMs);
       actions.push('closed_ambiguous_provenance_restart:' + ambiguousOpenEvent.id);
     }
 
@@ -1790,7 +1798,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
     // Review / Blocked / Ready / Backlog are non-active Task states and may close
     // intervals. Done is intentionally handled above and never closes timing.
     openEvents.forEach(function (eventPage) {
-      closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'left_in_progress');
+      closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'left_in_progress', writeMs);
       actions.push('closed:' + eventPage.id);
     });
   } else {
@@ -1852,7 +1860,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         // accepting a stale-Result reopen for the second — the Boundary=
         // stamp alone (still applied below) is enough for the legacy
         // heuristic to keep working for both.
-        stampExecutionBoundary_(mostRecentClosed, '', currentStatus, snapshotId);
+        stampExecutionBoundary_(mostRecentClosed, '', currentStatus, snapshotId, writeMs);
         actions.push('boundary:' + mostRecentClosed.id);
       }
     }
@@ -2136,7 +2144,7 @@ function markResultValidated_(eventPage, result) {
 // silently break). Kept as a parameter rather than dropped so a future,
 // genuinely safe backfill path (one with enough information to tell the
 // two cases apart) has an existing, tested hook to call into.
-function stampExecutionBoundary_(eventPage, executionId, observedStatus, snapshotId) {
+function stampExecutionBoundary_(eventPage, executionId, observedStatus, snapshotId, writeMs) {
   const existingNote = propertyText_(eventPage.properties.Note);
   // Also refreshes End Status= to the Task's status *now* (when this
   // execution is recognized as genuinely over), not left at whatever stale
@@ -2163,7 +2171,11 @@ function stampExecutionBoundary_(eventPage, executionId, observedStatus, snapsho
   // an interrupted boundary poll would then wrongly resolve in Sync Log's
   // favor even though the boundary's own observedStatus is the fresher
   // evidence.
-  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId, endStatus: observedStatus, snapshotId: snapshotId });
+  // `writeMs` reuses the caller's already-captured, once-per-run wall-clock
+  // ms (see reconcileTaskPage_'s runWriteMs) rather than reading a fresh
+  // one here — falls back to Date.now() only for a direct caller that
+  // omits it.
+  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId, endStatus: observedStatus, snapshotId: snapshotId, writeMs: writeMs || Date.now() });
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
     properties: {
       Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
@@ -2333,7 +2345,7 @@ function mostRecentLoggedEntry_(taskId) {
   // this list is already chronological; no separate sort or tie-breaking
   // pass is needed to get "most recent" or "earliest" right.
   const entries = [];
-  syncLogRows_().forEach(function (row) {
+  syncLogRows_().forEach(function (row, index) {
     if (String(row[0] || '') !== taskId) return;
     const status = String(row[1] || '');
     const at = row[2] instanceof Date ? row[2] : parseTimestamp_(row[2]);
@@ -2345,7 +2357,11 @@ function mostRecentLoggedEntry_(taskId) {
     // Progress) collapse into looking like one consecutive run, walking
     // the backward scan below straight through the intervening execution
     // into a stale, unrelated earlier Review period.
-    entries.push({ status: status, at: at });
+    // `sheetRow` (the Sheet's own row number) lets a caller fetch this
+    // row's Write Ms (column H) with a single targeted cell read — see
+    // syncLogRowWriteMs_ — only on the rare tie that actually needs it,
+    // instead of widening this cached 3-column scan for every call.
+    entries.push({ status: status, at: at, sheetRow: index + 2 });
   });
   if (!entries.length) return null;
   // Skip only TRAILING In Progress rows — it is the status the CURRENT
@@ -2377,12 +2393,28 @@ function mostRecentLoggedEntry_(taskId) {
   for (let i = lastIndex; i >= 0 && entries[i].status === lastStatus; i--) {
     periodStartAt = entries[i].at;
   }
-  return { status: lastStatus, at: periodStartAt };
+  // `sheetRow` always refers to the single MOST RECENT matching row overall
+  // (entries[lastIndex], before the period-start walk-back above) — the
+  // one whose actual write order is what a same-minute tie needs, not the
+  // (possibly much earlier) row where this status period began.
+  return { status: lastStatus, at: periodStartAt, sheetRow: entries[lastIndex].sheetRow };
 }
 
 function mostRecentLoggedStatus_(taskId) {
   const entry = mostRecentLoggedEntry_(taskId);
   return entry ? entry.status : '';
+}
+
+// Column H (Write Ms) holds the real Apps Script wall-clock ms read at the
+// exact moment logSnapshot_ appended this row — see logSnapshot_ and
+// parseNoteMeta_'s writeMs comment. Read only on demand, as a single
+// targeted cell (never part of the cached syncLogRows_ scan), because it
+// is needed only to break a genuine same-minute tie in
+// mostRecentStatusEvidence_, not on every ordinary call.
+function syncLogRowWriteMs_(sheetRow) {
+  if (!sheetRow) return null;
+  const value = ensureSyncLogSheet_().getRange(sheetRow, 8, 1, 1).getValues()[0][0];
+  return value ? Number(value) : null;
 }
 
 // Resolves the Task's single most recent status observation for Work Type /
@@ -2421,19 +2453,44 @@ function mostRecentLoggedStatus_(taskId) {
 // logSnapshot_'s write for the close's own poll never landed AND the
 // task's next distinct status happened to be observed in that same
 // minute: `mostRecentLoggedEntry_` then returns that unrelated, genuinely
-// OLDER status period, not anything that postdates the close. Since plain
-// timestamps can't order same-minute evidence, use `snapshotWasEverLogged_`
-// instead: if the close's own `Snapshot=` was never appended to the Sync
-// Log at all, its poll's `logSnapshot_` step never ran, so `logged` can
-// only be a stale row from some earlier, unrelated poll — prefer the
-// close. Otherwise the log itself is confirmed to have already observed
-// (at least) everything the close knows about, so keep preferring it.
+// OLDER status period, not anything that postdates the close.
+//
+// Round 31 tried to resolve this via `snapshotWasEverLogged_` (the close's
+// own snapshot missing from the log ⇒ its poll was interrupted ⇒ prefer
+// the close) — but Codex found a further gap (round 33): the close's own
+// snapshot being missing does NOT prove `logged` is stale. A close's poll
+// can be interrupted before ITS OWN `logSnapshot_`, while a DIFFERENT,
+// LATER poll still completes normally and logs fresh, unrelated status —
+// all inside the same Notion minute. Snapshot presence/absence alone
+// cannot tell those two cases apart.
+//
+// `Write=`/column H (see `parseNoteMeta_`, `logSnapshot_`) settles this
+// directly instead of inferring it: both sides stamp the real Apps Script
+// wall-clock ms at the moment of their own write, never truncated to
+// Notion's minute granularity, so comparing them gives a genuine total
+// order regardless of which side's snapshot happened to get logged.
+// `snapshotWasEverLogged_` remains as a fallback ONLY for legacy data
+// written before `Write=` existed on either side — strictly no worse than
+// the round-31 behavior it replaces, never silently wrong in a NEW way.
+//
+// `classifyWorkType_` and `reviewFixSinceTimestamp_` both call this SAME
+// function rather than each independently comparing the two sources, so
+// they can never disagree about which evidence won — the identical class
+// of gap Codex found once before between these two functions (see the
+// PR's own review history) when they each read Sync Log independently.
 function mostRecentStatusEvidence_(allEvents, taskId) {
   const logged = mostRecentLoggedEntry_(taskId);
   const priorClose = mostRecentGenuineClose_(allEvents);
   const priorCloseEndedAt = priorClose ? propertyDate_(priorClose.properties['Ended At']) : null;
   const priorMeta = priorClose ? parseNoteMeta_(propertyText_(priorClose.properties.Note)) : null;
   if (logged && priorCloseEndedAt && logged.at.getTime() === priorCloseEndedAt.getTime()) {
+    const loggedWriteMs = syncLogRowWriteMs_(logged.sheetRow);
+    const closeWriteMs = priorMeta.writeMs;
+    if (loggedWriteMs && closeWriteMs) {
+      return loggedWriteMs >= closeWriteMs
+        ? { status: logged.status, at: logged.at }
+        : { status: priorMeta.endStatus, at: priorCloseEndedAt };
+    }
     if (!snapshotWasEverLogged_(priorMeta.snapshotId)) {
       return { status: priorMeta.endStatus, at: priorCloseEndedAt };
     }
@@ -2522,16 +2579,20 @@ function classifyWorkType_(allEvents, taskId) {
 // existing call sites/tests that only ever cared about the lower bound keep
 // working unchanged.
 //
-// `untilFixStarted` itself is Notion's own minute-granular timestamp (see
-// `startAt` at the call site), but `review.submitted_at` carries full
-// second precision — Codex-reported gap (round 32): comparing them at face
-// value could exclude the very review that caused the fix, e.g. a review
-// submitted at :30 seconds discarded by an untilFixStarted rounded down to
-// :00 when the real reopen actually happened at :50. Rounding the upper
-// bound up to the END of its own minute keeps every review genuinely
-// within that same minute eligible, matching how this file treats
-// Notion's minute granularity everywhere else (see
-// `mostRecentStatusEvidence_`).
+// `untilFixStarted` is USUALLY Notion's own minute-granular timestamp (see
+// `startAt` at the call site's `when` fallback), but `review.submitted_at`
+// carries full second precision — Codex-reported gap (round 32): comparing
+// them at face value could exclude the very review that caused the fix,
+// e.g. a review submitted at :30 seconds discarded by an untilFixStarted
+// rounded down to :00 when the real reopen actually happened at :50.
+//
+// Rounding to the end of `untilFixStarted`'s OWN containing minute (not
+// blindly adding a fixed 59999ms) matters because `startAt`'s OTHER
+// possible source — `trustedTaskStart`, the Task's own Started At — can
+// itself carry seconds (Codex-reported gap, round 33): a fix starting at
+// :00:30 must stay bounded at :00:59, not be extended into :01:29 by
+// naively adding a minute's worth of ms to whatever seconds it already
+// has, which would admit a genuinely later, impossible-causation review.
 function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
   try {
     const parsed = parseGithubPullRequestUrl_(propertyText_(task.properties['Pull Request']));
@@ -2541,7 +2602,9 @@ function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
     const reviews = fetchAllGithubReviews_(token, parsed);
     if (!Array.isArray(reviews)) return 'Other';
     const sinceMs = sincePriorClose ? sincePriorClose.getTime() : 0;
-    const untilMs = untilFixStarted ? untilFixStarted.getTime() + 59999 : Infinity;
+    const untilMs = untilFixStarted
+      ? Math.floor(untilFixStarted.getTime() / 60000) * 60000 + 59999
+      : Infinity;
     let latest = null;
     reviews.forEach(function (review) {
       if (!review || !review.submitted_at) return;
@@ -2690,13 +2753,20 @@ function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId,
   });
 }
 
-function closeNotionTimeEvent_(eventPage, endStatus, changedBy, snapshotId, when, reason) {
+function closeNotionTimeEvent_(eventPage, endStatus, changedBy, snapshotId, when, reason, writeMs) {
   const existingNote = propertyText_(eventPage.properties.Note);
   const closeMeta = buildNote_({
     endStatus: endStatus,
     reason: reason,
     snapshotId: snapshotId,
     changedBy: changedBy,
+    // `writeMs` is normally the caller's already-captured, once-per-run
+    // wall-clock ms (see reconcileTaskPage_'s runWriteMs) so distinguishing
+    // two writes never costs an EXTRA Date.now() call per event closed --
+    // only reconcileStoryTask_'s Story-conversion closes (a rare
+    // cross-Type edge case, not on the Work Type/Review Source hot path)
+    // and any direct caller that omits it fall back to a fresh read here.
+    writeMs: writeMs || Date.now(),
   });
 
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
@@ -3023,6 +3093,11 @@ function buildNote_(fields) {
   if (fields.resultFingerprint) parts.push('Result Fingerprint=' + fields.resultFingerprint);
   if (fields.workType) parts.push('Work Type=' + fields.workType);
   if (fields.reviewSource) parts.push('Review Source=' + fields.reviewSource);
+  // See parseNoteMeta_'s writeMs comment. Not in isProtectedIdentitySegment
+  // (appendNote_): if compacted away under extreme Note length, callers
+  // simply fall back to the (still correct, if less precise)
+  // snapshotWasEverLogged_ tie-break, not to silently wrong behavior.
+  if (fields.writeMs) parts.push('Write=' + fields.writeMs);
   return parts.join(' | ');
 }
 
@@ -3100,6 +3175,18 @@ function parseNoteMeta_(note) {
     // field. See classifyWorkType_ / resolveReviewSource_.
     workType: noteField_(note, 'Work Type'),
     reviewSource: noteField_(note, 'Review Source'),
+    // Codex-reported gap (round 33): a genuine close whose OWN snapshot was
+    // never logged (see snapshotWasEverLogged_) is not proof the Sync Log's
+    // tied entry is stale -- a DIFFERENT, later poll can still have logged
+    // fresh, unrelated status between the close and the eventual reopen,
+    // all inside the same Notion minute. `Write=` is the real Apps Script
+    // wall-clock ms read at the moment THIS write actually happened (never
+    // truncated to Notion's minute granularity, unlike every other
+    // timestamp here), so comparing it against the Sync Log row's own
+    // Write value (see syncLogRowWriteMs_) settles a same-minute tie
+    // correctly regardless of which side's snapshot got logged. See
+    // mostRecentStatusEvidence_.
+    writeMs: Number(noteField_(note, 'Write')) || null,
   };
 }
 
@@ -3155,9 +3242,16 @@ function hasProcessedSnapshot_(snapshotId, taskId) {
 // `taskType` argument (optional; the Sync Log's 7th column) to avoid that
 // exact confusion. eventWasTouchedDuringTaskExecution_ depends on this
 // column only ever being populated with a genuine, current Type observation.
-function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType) {
+function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType, writeMs) {
   const sheet = ensureSyncLogSheet_();
-  sheet.appendRow([id || '', source || '', taskId || '', status || '', receivedAt || new Date(), outcome || '', taskType || '']);
+  // Column H: the real Apps Script wall-clock ms at this exact append call
+  // (see parseNoteMeta_'s writeMs comment / mostRecentStatusEvidence_) --
+  // deliberately independent of `receivedAt`, which is Notion's own
+  // minute-granular business timestamp and carries no sub-minute ordering
+  // information at all. Reuses the caller's already-captured, once-per-run
+  // value (reconcileTaskPage_'s runWriteMs) rather than reading a fresh one
+  // here — falls back to Date.now() only for a direct caller that omits it.
+  sheet.appendRow([id || '', source || '', taskId || '', status || '', receivedAt || new Date(), outcome || '', taskType || '', writeMs || Date.now()]);
 }
 
 // True if this Task page's MOST RECENT Sync Log observation as Type=Story
@@ -3395,8 +3489,8 @@ function ensureSyncLogSheet_() {
     sheet = ss.insertSheet(DEFAULTS.SYNC_LOG_SHEET);
     sheet.hideSheet();
   }
-  sheet.getRange(1, 1, 1, 7).setValues([[
-    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome', 'Type'
+  sheet.getRange(1, 1, 1, 8).setValues([[
+    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome', 'Type', 'Write Ms'
   ]]);
   return sheet;
 }
