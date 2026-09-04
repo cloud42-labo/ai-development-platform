@@ -554,6 +554,21 @@ function reconcileTaskPage_(task) {
   const when = authoritativeEditTime_(task);
   const changedBy = editorLabel_(task.last_edited_by);
   const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent);
+  const taskType = propertyText_(task.properties.Type);
+
+  // Type = Story is a rollup/container over its own child Subtasks/Tasks, not
+  // an execution unit — real effort is timed on the children, never on the
+  // Story page itself. Before this check, a Story sitting In Progress (its
+  // ordinary state for as long as child work is in flight, routinely days)
+  // opened and accumulated its own Active Time Event exactly like an
+  // executable Task, double-counting hours already timed on its children and
+  // inflating daily-report/KPI Active totals (BUG-ADP-TTE-01). A Story's own
+  // Done transition also needs no Time Event evidence — only its children's —
+  // so it must never reach the Done gate below either. See
+  // reconcileStoryTask_ for the reduced handling this gets instead: never
+  // open a new event regardless of Status, but still close out (and log) any
+  // event a Story already accumulated under the pre-fix behavior.
+  const isStory = taskType === 'Story';
 
   // Done is a completion gate that must be re-verified on every poll that
   // observes it — never short-circuited by the snapshot hash. Notion reports
@@ -564,21 +579,47 @@ function reconcileTaskPage_(task) {
   // persist indefinitely, since no further edit would ever change the hash.
   // Every other status is fine to dedup: skipping a re-read there just means
   // no new mutation was needed, not that an invalid state goes unchecked.
-  const mustReverify = currentStatus === DEFAULTS.DONE_STATUS;
+  // A Story is exempt regardless of Status — see isStory above, and
+  // reconcileStoryTask_ never enforces the Done gate at all.
+  const mustReverify = currentStatus === DEFAULTS.DONE_STATUS && !isStory;
   if (!mustReverify && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
 
-  const outcome = reconcileAuthoritativeTimeEvents_(
-    task,
-    currentStatus,
-    desiredActor,
-    changedBy,
-    snapshotId,
-    when
-  );
+  const outcome = isStory
+    ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId, when)
+    : reconcileAuthoritativeTimeEvents_(
+        task,
+        currentStatus,
+        desiredActor,
+        changedBy,
+        snapshotId,
+        when
+      );
 
   syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
   logSnapshot_(snapshotId, 'notion_poll', pageId, currentStatus, when, outcome);
   return outcome;
+}
+
+// Reduced reconciliation for Type = Story pages (see reconcileTaskPage_):
+// never opens a new Time Event no matter what Status reads, and never runs
+// the Done gate — a Story is a rollup, not an execution unit, so its own
+// completion needs no Time Event evidence. Its only remaining job is
+// cleanup: close out any open event a Story accumulated before this
+// exclusion existed, so a pre-fix stray open interval does not linger
+// forever (BUG-ADP-TTE-01) — the same close path and Reason-tagging
+// (`closeNotionTimeEvent_`) executable Tasks use, so it projects to the
+// Sheet and reads in Notion identically to any other closed interval, just
+// distinguishable by `Reason=story_excluded` in its Note.
+function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when) {
+  const openEvents = queryNotionTimeEventsForTask_(taskId).filter(function (eventPage) {
+    return !propertyDate_(eventPage.properties['Ended At']);
+  });
+  const actions = [];
+  openEvents.forEach(function (eventPage) {
+    closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'story_excluded');
+    actions.push('closed_story_event:' + eventPage.id);
+  });
+  return actions.length ? actions.join(',') : 'story_excluded';
 }
 
 // Tasks whose last_edited_time is at or after `since`, oldest first, so a
@@ -682,8 +723,14 @@ function isFreeOutcome_(outcome) {
   // duplicates. A rejected Done ('done_gate_rejected:...') still counts: it
   // made a real write (the rollback) and is exactly the case the always-
   // reverify rule exists to keep catching.
+  // 'story_excluded' makes no Notion write either (a Type = Story page with
+  // nothing open to close — see reconcileStoryTask_) — free to re-scan on
+  // every poll just like a duplicate or ignored outcome. A Story that DID
+  // have a stray open event closed reports 'closed_story_event:...' instead,
+  // which is a real write and does count, the same as any other close.
   return outcome === 'ignored:not_configured_task' ||
     outcome === 'done_gate_passed' ||
+    outcome === 'story_excluded' ||
     /^duplicate:/.test(String(outcome));
 }
 

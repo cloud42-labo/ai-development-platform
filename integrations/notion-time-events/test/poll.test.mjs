@@ -7,7 +7,7 @@ const EVENTS_DS = '544b9a17-2653-47aa-b62c-bb52425b3bf2';
 const TASKS_QUERY = 'POST /v1/data_sources/' + TASKS_DS + '/query';
 const EVENTS_QUERY = 'POST /v1/data_sources/' + EVENTS_DS + '/query';
 
-function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T' }) {
+function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T', type = null }) {
   return {
     object: 'page',
     id,
@@ -27,6 +27,11 @@ function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T'
       'Started At': { type: 'date', date: startedAt ? { start: startedAt } : null },
       Result: { type: 'rich_text', rich_text: [] },
       'Completed At': { type: 'date', date: null },
+      // `type` defaults to null (rendered as no Type at all) so every
+      // existing fixture keeps reading as a normal executable Task/Subtask —
+      // only tests that explicitly pass `type: 'Story'` exercise the
+      // Story-exclusion path (BUG-ADP-TTE-01).
+      Type: { type: 'select', select: type ? { name: type } : null },
     },
   };
 }
@@ -220,6 +225,104 @@ test('leaving In Progress with nothing open retroactively stamps the last closed
   // boundary stamp deliberately never backfills it — see the dedicated
   // tests below for why (an earlier version did, and why that was unsafe).
   assert.doesNotMatch(note, /Execution=/);
+});
+
+test('a Story In Progress opens no Time Event (BUG-ADP-TTE-01)', () => {
+  // Type = Story is a rollup over its own child Subtasks/Tasks, not an
+  // execution unit — before this exclusion, a Story sitting In Progress (its
+  // ordinary state for as long as child work is in flight) opened its own
+  // Active Time Event exactly like an executable Task, double-counting hours
+  // already timed on its children.
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T05:10:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+      type: 'Story',
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'story_excluded');
+  assert.equal(requestsTo(fetchLog, 'POST', '/v1/pages').length, 0);
+});
+
+test('a Story\'s stray open Time Event from before the exclusion existed gets closed, not left to linger', () => {
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [
+      eventPage('evt-story-stray', { actor: 'Claude', startedAt: '2026-08-12T12:42:00.000Z' }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'closed_story_event:evt-story-stray');
+  const closes = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-story-stray');
+  assert.equal(closes.length, 1);
+  const note = JSON.parse(closes[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.match(note, /Reason=story_excluded/);
+  // Never re-opened for the same still-In-Progress Story on this same call.
+  assert.equal(requestsTo(fetchLog, 'POST', '/v1/pages').length, 0);
+});
+
+test('a Story reaching Done needs no Time Event and is never rolled back by the Done gate', () => {
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+      // Deliberately no Result / Completed At — a Story needs none of the
+      // Done-gate evidence an executable Task does.
+    })],
+    noEventsForTaskIds: [taskId],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'story_excluded');
+  // No rollback write to Status, unlike an executable Task's
+  // done_gate_rejected path (enforceDoneGate_ -> updateTaskStatus_).
+  const statusWrites = requestsTo(fetchLog, 'PATCH', '/v1/pages/' + taskId).filter((entry) =>
+    JSON.parse(entry.options.payload).properties && JSON.parse(entry.options.payload).properties.Status
+  );
+  assert.equal(statusWrites.length, 0);
+});
+
+test('re-reading an unchanged Story in the overlap window makes no Notion mutation', () => {
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:10:00.000Z',
+    startedAt: '2026-08-30T05:10:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task] });
+
+  sandbox.pollTaskChanges();
+  const mutationsAfterFirst =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /^duplicate:/);
+  const mutationsAfterSecond =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+  assert.equal(mutationsAfterSecond, mutationsAfterFirst);
 });
 
 test('boundary-stamping a legacy event never backfills Execution=, even when it is this Task\'s own only execution', () => {

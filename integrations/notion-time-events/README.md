@@ -19,7 +19,8 @@ There is **no webhook, no public endpoint, and no receiver credential** anywhere
 ## Behavior
 
 - Each run asks Notion for `Stories & Tasks` pages whose `last_edited_time` is at or after the stored cursor (minus a fixed overlap), oldest first, and reconciles each one. The very first run (no cursor yet) additionally bootstraps every currently `Status = In Progress` Task directly, regardless of `last_edited_time` — see **Behavior of the cursor** below.
-- `Status = In Progress` ensures exactly one authoritative open Task Time Event for the currently mapped `Assigned Agent`.
+- **`Type = Story` pages are excluded from Time Event generation entirely (BUG-ADP-TTE-01).** A Story is a rollup over its own child Subtasks/Tasks, not an execution unit — real effort is timed on the children, never on the Story page itself. A Story never opens a new Time Event no matter what `Status` reads (including `In Progress`, its ordinary state for as long as child work is in flight, routinely days), and its own `Done` transition needs no Time Event evidence and never reaches the Done gate. The reconciler's only remaining job for a Story is cleanup: any open event a Story accumulated before this exclusion existed gets closed (`Reason=story_excluded`) rather than left to linger. This scoping keeps a Story's own In-Progress dwell time out of Active hour totals, without introducing a second event-classification scheme for ordinary Tasks.
+- `Status = In Progress` (on any non-`Story` Task) ensures exactly one authoritative open Task Time Event for the currently mapped `Assigned Agent`.
 - Moving from `In Progress` to `Review`, `Blocked`, `Ready`, or `Backlog` closes every authoritative open event for the Task, regardless of current assignee.
 - Changing or clearing `Assigned Agent` while the Task remains `In Progress` closes the old Actor event and opens the new Actor event when the new assignment maps to a supported Actor.
 - Duplicate open events for the same Task/Actor are reconciled to one open event.
@@ -209,6 +210,7 @@ The Done gate is reactive: it observes a Status that has already been set. An in
 - Repeated reconciliation of an unchanged Task does not duplicate authoritative events.
 - A Task already `In Progress` before the first-ever poll still receives an open Time Event, via the fresh-deploy bootstrap.
 - A dense cluster of already-reconciled Tasks inside the overlap window cannot permanently stall reconciliation of Tasks behind it.
+- A `Type = Story` page never opens a Time Event and is never subject to the Done gate; a stray open event it accumulated before this exclusion existed is closed rather than left open indefinitely.
 - A reopened Task's new interval starts from its current `Started At`, not from a later edit the poll happens to observe first.
 - A current execution that produced more than one closed event (e.g. an in-progress reassignment, including one that leaves a real time gap such as an assignment being cleared and only later reassigned) is not mistaken for stale prior-execution evidence — and a genuinely prior execution's closing event isn't mistaken for current-execution evidence just because it happens to coincide in time with something in the new one.
 - A large free-outcome scan (duplicates, or a large already-Done cohort) cannot run long enough to risk an uncaught Apps Script execution-limit kill; it stops and persists a resumable cursor first.
