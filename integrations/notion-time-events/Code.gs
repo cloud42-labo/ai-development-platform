@@ -630,12 +630,16 @@ function reconcileTaskPage_(task) {
 // them going forward by default, so none of them can ever resurface as
 // `openEvents` or in a future aggregation without this function needing to
 // track that itself, and every row remains recoverable from Notion's
-// trash if ever needed. Known residual gap: the Google Sheet projection is
-// a derived, non-authoritative view (see README) and this does not
-// retroactively delete a Sheet row one of these events may have already
-// been projected into — that row goes stale (never updated again) rather
-// than being removed, a smaller and purely cosmetic issue next to the
-// authoritative double-counting this fix actually closes.
+// trash if ever needed. archiveStoryTimeEvent_ also purges the event's row
+// from the Google Sheet projection outright — Codex-reported gap in an
+// earlier version of this fix: archiving removes the event from Notion's
+// own queries, so syncTaskProjection_'s ordinary re-sync never revisits an
+// already-projected row to update or delete it, and README documents the
+// Summary tab's actor totals and open-event counts as derived from this
+// same projection — a stale row (Duration (h) already computed, for a
+// closed legacy event) would keep feeding that aggregation the identical
+// double-counting this fix exists to stop, just moved from Notion to the
+// Sheet instead of eliminated.
 function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId) {
   const events = queryNotionTimeEventsForTask_(taskId);
   const actions = [];
@@ -649,7 +653,10 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId) {
 // Archives (see reconcileStoryTask_ for why) one of a Story's stray Time
 // Events, open or already closed, stamping the same Reason=story_excluded
 // marker used elsewhere in this file in the same request, so the record
-// still explains itself if ever restored from Notion's trash.
+// still explains itself if ever restored from Notion's trash. Also purges
+// the event's row from the Sheet projection outright (see
+// reconcileStoryTask_'s comment for why a stale row there matters, not
+// just a cosmetic leftover).
 function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
   const existingNote = propertyText_(eventPage.properties.Note);
   const marker = buildNote_({ reason: 'story_excluded', snapshotId: snapshotId, changedBy: changedBy });
@@ -659,6 +666,7 @@ function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
       Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
     },
   });
+  purgeSheetProjectionRow_(eventPage.id);
 }
 
 // Operator escape hatch for an EXISTING live deployment being upgraded to
@@ -1574,6 +1582,17 @@ function findSheetEventRowByEventId_(sheet, eventId) {
     .matchEntireCell(true)
     .findNext();
   return finder ? finder.getRow() : 0;
+}
+
+// Removes a Time Event's row from the Sheet projection outright, for an
+// event archiveStoryTimeEvent_ just archived rather than closed — see its
+// comment and reconcileStoryTask_'s for why a stale row here is not merely
+// cosmetic (it keeps feeding the Summary tab's own aggregation). A no-op
+// if the event was never projected in the first place.
+function purgeSheetProjectionRow_(eventId) {
+  const sheet = sheet_(DEFAULTS.TIME_EVENTS_SHEET);
+  const row = findSheetEventRowByEventId_(sheet, eventId);
+  if (row) sheet.deleteRow(row);
 }
 
 function retrieveNotionPage_(pageId) {

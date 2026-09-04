@@ -2535,3 +2535,66 @@ test('backfillStoryExclusion_ bounds its own pagination phase, reserving budget 
   const resumeCursor = scriptProps.get('STORY_EXCLUSION_RESUME_CURSOR');
   assert.ok(resumeCursor, 'expected a resume checkpoint to be persisted');
 });
+
+test('archiving a Story\'s Time Event also purges its Sheet projection row, not just Notion', () => {
+  // Codex-reported gap: archiving removes the event from Notion's own
+  // queries, so syncTaskProjection_'s ordinary re-sync (which runs right
+  // after reconcileStoryTask_, inside reconcileTaskPage_) never revisits an
+  // already-projected Sheet row to update or delete it. README documents
+  // the Summary tab's own actor totals / open-event counts as derived from
+  // this same projection, so a stale row (Duration (h) already computed,
+  // for a closed legacy event) would keep feeding it the identical
+  // double-counting this fix exists to stop, just moved from Notion to the
+  // Sheet instead of eliminated.
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const eventId = 'evt-story-projected';
+  // A generic events-query stub can't model archival's effect on
+  // subsequent queries (it doesn't track state), so this test needs its
+  // own: real Notion excludes an archived page from later queries the
+  // instant it's archived — including syncTaskProjection_'s own re-query
+  // later in the same reconcileTaskPage_ call — and the test must exercise
+  // that, not just check the archive PATCH was sent.
+  let archived = false;
+  const routes = {
+    [TASKS_QUERY]: () => ({
+      results: [taskPage(taskId, {
+        status: 'Done',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-30T06:00:00.000Z',
+        startedAt: '2026-08-12T12:42:00.000Z',
+        type: 'Story',
+      })],
+      has_more: false,
+    }),
+    [EVENTS_QUERY]: () => ({
+      results: archived ? [] : [eventPage(eventId, {
+        actor: 'Claude',
+        startedAt: '2026-08-12T12:42:00.000Z',
+        endedAt: '2026-08-20T09:00:00.000Z',
+      })],
+      has_more: false,
+    }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    ['PATCH /v1/pages/' + eventId]: () => { archived = true; return {}; },
+    'GET *': () => ({}),
+  };
+  const { sandbox, spreadsheet } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+  const sheet = spreadsheet.getSheetByName('Time Events');
+  sheet.appendRow([
+    'Event ID', 'Task ID', 'Task Title', 'Actor', 'Started At', 'Ended At',
+    'Duration (h)', 'Start Status', 'End Status', 'Changed By', 'Notion URL',
+    'Source Snapshot ID', 'Recorded At',
+  ]);
+  sheet.appendRow([
+    eventId, taskId, 'T', 'Claude', '2026-08-12T12:42:00.000Z',
+    '2026-08-20T09:00:00.000Z', 185, 'In Progress', 'Done', '', '', '', new Date(),
+  ]);
+
+  sandbox.pollTaskChanges();
+
+  assert.equal(archived, true, 'expected the event to actually be archived');
+  assert.equal(sheet.getLastRow(), 1, 'expected the stale Sheet row to be purged, leaving only the header');
+});

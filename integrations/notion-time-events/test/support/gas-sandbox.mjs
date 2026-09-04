@@ -38,6 +38,11 @@ class FakeSheet {
     return this.rows.length;
   }
 
+  deleteRow(rowPosition) {
+    this.rows.splice(rowPosition - 1, 1);
+    return this;
+  }
+
   appendRow(values) {
     this.rows.push(values.slice());
     return this;
