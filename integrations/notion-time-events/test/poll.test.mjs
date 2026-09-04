@@ -2443,12 +2443,16 @@ test('backfillStoryExclusion_ is a free re-scan once a Story has already been ar
 
   const second = sandbox.backfillStoryExclusion_();
 
-  // The Task's snapshot (id | last_edited_time | Status | Assigned Agent |
-  // Type) is unchanged between calls, so the second call's own dedup check
-  // (reconcileTaskPage_'s hasProcessedSnapshot_) reports it as a duplicate
-  // re-read rather than re-running reconcileStoryTask_ at all — free either
-  // way.
-  assert.match(second.outcomes[0], /^duplicate:/);
+  // backfillStoryExclusion_ deliberately bypasses reconcileTaskPage_'s
+  // ordinary snapshot dedup (round 23 — see its own call site comment: a
+  // Time Event can be added directly to an already-reconciled Story
+  // without the Story page's own snapshot ever changing, so relying on
+  // dedup here would leave such an event's archival waiting on an
+  // unrelated page edit that might never come). So the second call here
+  // genuinely re-runs reconcileStoryTask_ rather than short-circuiting on
+  // `duplicate:` — free either way, since there is nothing left to
+  // archive: 'story_excluded' this time, not `duplicate:`.
+  assert.equal(second.outcomes[0], 'story_excluded');
   const mutationsAfterSecond =
     requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
   assert.equal(mutationsAfterSecond, mutationsAfterFirst);
@@ -3288,10 +3292,16 @@ test('backfillStoryExclusion_ never resolves an ambiguous-marked event -- it sta
   // no caller ever resolves this marker -- proven here directly against
   // backfillStoryExclusion_, and by the existing pollTaskChanges-based
   // tests above for the other callers.
+  // Already closed — an OPEN ambiguous event is a distinct case (bounded,
+  // not archived, since round 23: see the "closes ambiguous open events
+  // in place" test below). This test's own purpose is narrower and
+  // unaffected by that: an already-closed ambiguous event must never be
+  // archived, by any caller.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dmm01';
   const ambiguousEvent = eventPage('evt-ambiguous-on-story', {
     actor: 'Claude',
     startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
     note: 'Task Origin=ambiguous-pre-upgrade',
   });
   const task = taskPage(taskId, {
@@ -3310,7 +3320,55 @@ test('backfillStoryExclusion_ never resolves an ambiguous-marked event -- it sta
 
   assert.equal(summary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-ambiguous-on-story');
   const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-on-story');
-  assert.equal(patches.length, 0, 'expected no archive/patch of the ambiguous-marked event from this backfill');
+  assert.equal(patches.length, 0, 'expected no archive/patch of an already-closed ambiguous-marked event from this backfill');
+});
+
+test('reconcileStoryTask_ closes an ambiguous OPEN event in place, bounding its duration, without archiving it or touching its Task Origin= marker', () => {
+  // Codex-reported gap (P1, round 23): leaving an ambiguous-marked OPEN
+  // event exactly as found is correct while its page keeps reading
+  // Type = Story (see this branch's own comment above) -- but "exactly as
+  // found" must still mean CLOSING it if it is still open, or it keeps
+  // accruing time indefinitely for as long as its page stays Story,
+  // reintroducing the double-counting BUG-ADP-TTE-01 exists to stop.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43drr01';
+  const ambiguousOpenEvent = eventPage('evt-ambiguous-open', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const observedEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: observedEdit,
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousOpenEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'closed_ambiguous_pre_upgrade_provenance:evt-ambiguous-open');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-open');
+  assert.equal(patches.length, 1);
+  const payload = JSON.parse(patches[0].options.payload);
+  assert.equal(payload.archived, undefined, 'expected a close, not an archive');
+  assert.equal(payload.properties['Ended At'].date.start, observedEdit);
+  const noteContent = payload.properties.Note.rich_text[0].text.content;
+  assert.match(noteContent, /Reason=ambiguous_provenance_bounded/);
+  // Its own Task Origin= survives the close untouched (appendNote_ only
+  // ever adds to a Note, never rewrites an existing field) -- still
+  // available for an operator to review by hand later.
+  assert.match(noteContent, /Task Origin=ambiguous-pre-upgrade/);
+
+  // A later re-observation (page still Story, event now closed) leaves it
+  // completely untouched from here on -- no re-close, no archive.
+  ambiguousOpenEvent.properties['Ended At'] = { type: 'date', date: payload.properties['Ended At'].date };
+  ambiguousOpenEvent.properties.Note = { type: 'rich_text', rich_text: [{ plain_text: noteContent }] };
+  task.last_edited_time = '2026-09-01T00:00:00.000Z';
+  const second = sandbox.pollTaskChanges();
+  assert.equal(second.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-ambiguous-open');
+  assert.equal(requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-open').length, 1, 'expected no further writes to the already-closed event');
 });
 
 test('an ordinary poll never archives a marker-less Story event before the provenance backfill has ever fully drained', () => {
@@ -3599,4 +3657,65 @@ test('storyConversionHappenedWhileInProgress_ recognizes a skipped-ambiguous or 
     creates[0].properties['Started At'].date.start, conversionEdit,
     'expected the conversion boundary to be trusted, not the Story spell\'s own stale Started At, even though the most recent Sync Log row was a skipped_ambiguous_pre_upgrade_provenance: outcome rather than story_excluded'
   );
+});
+
+test('backfillStoryExclusion_ bypasses reconcileTaskPage_\'s ordinary snapshot dedup, so it still reaches a Time Event added directly to an already-reconciled Story', () => {
+  // Codex-reported gap (P1, round 23): a Time Event added directly in
+  // Notion (not through this script) attaches to the Story via its own
+  // Task relation, not by editing the Story page itself -- so the Story
+  // page's own snapshot (id | last_edited_time | Status | Assigned Agent |
+  // Type) is completely unchanged. An ordinary reconcileTaskPage_ call
+  // (no bypass) therefore reports `duplicate:` and never even calls
+  // reconcileStoryTask_ again -- the new event would stay live until some
+  // unrelated edit to the Story page happened to bump its snapshot, which
+  // might never come. backfillStoryExclusion_ is the one caller that must
+  // not depend on that: it bypasses dedup so its own advertised archive
+  // path (see the E2E step above) is actually reachable on a repeated run.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dss01';
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-20T10:00:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story',
+  });
+  let strayEventAdded = false;
+  const strayEvent = eventPage('evt-added-after-reconcile', {
+    actor: 'Claude',
+    startedAt: '2026-08-25T00:00:00.000Z',
+    endedAt: '2026-08-25T01:00:00.000Z',
+  });
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [task], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: strayEventAdded ? [strayEvent] : [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    fetch: notionFetchStub(routes),
+  });
+
+  // Reconcile once with nothing to do -- records this exact snapshot as
+  // already processed.
+  const first = sandbox.reconcileTaskPage_(task);
+  assert.equal(first, 'story_excluded');
+
+  // A stray Time Event now exists, added directly (the Story page itself
+  // never changed).
+  strayEventAdded = true;
+
+  // An ordinary re-reconcile (no bypass) still reports duplicate: -- it
+  // never even sees the new event.
+  const ordinary = sandbox.reconcileTaskPage_(task);
+  assert.match(ordinary, /^duplicate:/);
+  assert.equal(requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-added-after-reconcile').length, 0);
+
+  // backfillStoryExclusion_ bypasses dedup and actually archives it.
+  const summary = sandbox.backfillStoryExclusion_();
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-added-after-reconcile');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-added-after-reconcile');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });

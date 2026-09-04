@@ -543,8 +543,19 @@ function backfillResultFingerprints_() {
 // timing and completion evidence are read from the page Notion returned; the
 // reconciler only ever moves Task Time Events toward the state Notion already
 // holds, so a repeated pass over the same page is a no-op.
-function reconcileTaskPage_(task) {
+function reconcileTaskPage_(task, options) {
   if (!isConfiguredTask_(task)) return 'ignored:not_configured_task';
+
+  // bypassDedup: only backfillStoryExclusion_ passes this — see its own
+  // call site and the dedup check below for why. Deliberately NOT the same
+  // shape as the reverted resolveAmbiguousProvenance option (round 17/18):
+  // this never changes what reconcileStoryTask_ decides for any event,
+  // only whether reconcileTaskPage_ actually calls it instead of
+  // short-circuiting on a stale snapshot hash — reconcileStoryTask_ itself
+  // stays fully idempotent regardless, so bypassing dedup only ever costs
+  // an extra, harmless re-check, never a different outcome for unchanged
+  // data.
+  const bypassDedup = Boolean(options && options.bypassDedup);
 
   const pageId = task.id;
   const currentStatus = propertyText_(task.properties.Status);
@@ -582,7 +593,7 @@ function reconcileTaskPage_(task) {
   // A Story is exempt regardless of Status — see isStory above, and
   // reconcileStoryTask_ never enforces the Done gate at all.
   const mustReverify = currentStatus === DEFAULTS.DONE_STATUS && !isStory;
-  if (!mustReverify && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
+  if (!mustReverify && !bypassDedup && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
 
   const outcome = isStory
     ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId, when)
@@ -699,6 +710,30 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
       // real failure mode (erasing real work, or reintroducing the
       // double-counting bug), so this is left exactly as found and called
       // out by its own Outcome for an operator to review by hand.
+      //
+      // "Left exactly as found" still means CLOSING it if it is still
+      // open — Codex-reported gap (round 23): while its page keeps
+      // reading Type = Story, nothing else in this file ever revisits an
+      // ambiguous event again, so an open one would otherwise keep
+      // accruing time indefinitely every time some downstream aggregation
+      // computes its running duration (e.g. the Sheet's own Duration (h)
+      // formula) — directly reintroducing the double-counting this whole
+      // exclusion exists to stop, just for the one population (ambiguous)
+      // this file was never taught to bound. Closing it fixes its
+      // duration in place without resolving anything about its true
+      // origin: its own Task Origin=ambiguous-pre-upgrade marker is left
+      // completely untouched (closeNotionTimeEvent_ never touches it),
+      // and it is reported under a distinct outcome
+      // (closed_ambiguous_pre_upgrade_provenance:, a real write, unlike
+      // the plain skip below) so an operator reviewing this Story's
+      // history can still find and judge it by hand later — the whole
+      // point is bounding growth, not asserting the guess this sentinel
+      // exists to avoid making.
+      if (!propertyDate_(eventPage.properties['Ended At'])) {
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'ambiguous_provenance_bounded');
+        actions.push('closed_ambiguous_pre_upgrade_provenance:' + eventPage.id);
+        return;
+      }
       actions.push('skipped_ambiguous_pre_upgrade_provenance:' + eventPage.id);
       return;
     }
@@ -908,7 +943,21 @@ function backfillStoryExclusion_() {
       iterated < toProcess.length &&
       (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
     ) {
-      outcomes.push(reconcileTaskPage_(toProcess[iterated]));
+      // bypassDedup: true — Codex-reported gap (round 23): a Time Event
+      // added directly to an already-reconciled Story (e.g. by hand,
+      // after TASK_ORIGIN_BACKFILL_COMPLETE — see the E2E step above)
+      // changes nothing about the Story PAGE's own snapshot (Status,
+      // Assigned Agent, last_edited_time, Type), so without this,
+      // reconcileTaskPage_'s ordinary dedup would return `duplicate:`
+      // before ever calling reconcileStoryTask_ again, and this backfill's
+      // advertised archive path would never actually reach the new event
+      // on any repeated run — only an unrelated edit to the Story page
+      // itself would ever surface it. This explicit, one-time (or
+      // re-run-to-convergence) operator cleanup pass must not rely on the
+      // Story page having also changed; reconcileStoryTask_ itself is
+      // fully idempotent, so bypassing dedup here only ever costs an
+      // extra, harmless re-check for a Story with nothing new to do.
+      outcomes.push(reconcileTaskPage_(toProcess[iterated], { bypassDedup: true }));
       iterated++;
     }
     const timedOut = iterated < toProcess.length;
@@ -2471,8 +2520,12 @@ function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType)
 // most recent one.
 //
 // Scans the Sync Log's full, unboundedly-growing history on every call —
-// callers must gate this behind allEvents.length === 0 (see the one call
-// site), never call it unconditionally on every ordinary Task open.
+// callers must gate this behind the ordinary freshness check already
+// trusting `Started At` (see the one call site's `taskStartedAtLooksFresh`,
+// and its own comment for why gating on that — not on
+// allEvents.length === 0, an earlier version of the gate — is both correct
+// and still narrow), never call it unconditionally on every ordinary Task
+// open.
 // Every per-event action reconcileStoryTask_ can ever push into its
 // comma-joined outcome — used below to recognize a Sync Log row as having
 // been logged while this page's Type read Story. Codex-reported gap
@@ -2494,6 +2547,10 @@ const STORY_RECONCILIATION_ACTION_PREFIXES = [
   'closed_task_era_at_story_conversion:',
   'skipped_pending_provenance_backfill:',
   'archived_story_event:',
+  // Round 23: reconcileStoryTask_'s ambiguous branch closing a still-open
+  // event in place (see its own comment) is itself just as much a Story
+  // observation as any of the above.
+  'closed_ambiguous_pre_upgrade_provenance:',
 ];
 
 function storyConversionHappenedWhileInProgress_(taskId) {
@@ -2502,11 +2559,30 @@ function storyConversionHappenedWhileInProgress_(taskId) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
   const rows = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+  // Scan from the END, stopping at the first (i.e. most recent) match,
+  // instead of scanning every row and repeatedly overwriting a running
+  // "most recent so far" — Codex-reported gap (round 23): the round-21 fix
+  // widened this function's own gate (taskStartedAtLooksFresh, see the one
+  // call site) from "only a page's first-ever event" to "any ordinary Task
+  // restart with a correctly-refreshed Started At" — the common, expected
+  // case for a legitimate reopen — so this now runs far more often than
+  // before. logSnapshot_ only ever appends, never inserts out of order, so
+  // the most recent row for a given Task ID is the LAST one matching it —
+  // scanning backward and returning on the first hit turns the common case
+  // (a Task recently active, whose own most recent row is near the end
+  // regardless of overall Sync Log size) into an early-exit instead of an
+  // unconditional full pass. This does not shrink the underlying
+  // getRange(...).getValues() transfer itself — reducing that further
+  // would need a persisted per-Task index/side-table, a larger change not
+  // taken here — but meaningfully bounds the per-call JS-side scan cost for
+  // the population this function is actually called against.
   let mostRecentRow = null;
-  rows.forEach(function (row) {
-    if (row[2] !== taskId) return;
-    mostRecentRow = row;
-  });
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i][2] === taskId) {
+      mostRecentRow = rows[i];
+      break;
+    }
+  }
   if (!mostRecentRow) return false;
   const outcome = String(mostRecentRow[5] || '');
   // Every action reconcileStoryTask_ can ever produce is itself proof this
