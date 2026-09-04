@@ -3757,14 +3757,14 @@ test('closing an ambiguous open event is clamped to never precede the event\'s o
   );
 });
 
-test('storyConversionHappenedWhileInProgress_ still finds a Task\'s Sync Log row beyond the first tail chunk', () => {
-  // Codex-reported gap (P2, round 24), fixing the round-23 attempt: the
-  // backward JS scan alone still materialized the ENTIRE Sync Log via one
-  // getRange(...).getValues() call before it could exit early. Reading in
-  // bounded tail chunks instead means the common case (a Task recently
-  // active) resolves in the first chunk without ever touching the rest of
-  // the log -- but must still correctly walk further back and find a
-  // match that happens to sit beyond that first chunk.
+test('storyConversionHappenedWhileInProgress_ still finds a Task\'s Sync Log row when many unrelated rows sit closer to the end', () => {
+  // Originally written for round 24's bounded-tail-chunk implementation
+  // (fixing the round-23 attempt, which materialized the ENTIRE Sync Log via
+  // one getRange(...).getValues() call regardless of where the match sat).
+  // Round 26 replaced tail-chunking with a Range#createTextFinder search
+  // (see that function's own comment) -- this test still matters under the
+  // new implementation too: it proves the match is found correctly however
+  // far it sits from the log's end, not only when it happens to be near it.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43duu01';
   const oldUnrelatedEvent = eventPage('evt-old-unrelated-3', {
     actor: 'Claude',
@@ -3804,6 +3804,59 @@ test('storyConversionHappenedWhileInProgress_ still finds a Task\'s Sync Log row
   assert.equal(
     creates[0].properties['Started At'].date.start, conversionEdit,
     'expected the conversion boundary to be trusted, proving the Story observation beyond the first tail chunk was still found'
+  );
+});
+
+test('storyConversionHappenedWhileInProgress_ makes no Sync Log row-data transfer for a Task that has never appeared in it', () => {
+  // Codex-reported gap (P2, round 26), fixing the round-24 tail-chunk
+  // implementation itself: the single most common caller of this function
+  // is an ordinary Task's very first Time Event -- by definition a Task ID
+  // with NO Sync Log row of its own yet. Bounded tail chunking only ever
+  // paid off once a page already had a Story-marked row on file; for the
+  // never-observed case, every chunk still had to be read, oldest included,
+  // before concluding "no match" -- every first-ever Task open in the whole
+  // deployment paid a cost proportional to the ENTIRE append-only log,
+  // unboundedly growing over the deployment's life, with the runtime
+  // deadline checked only outside this reconciliation (see poll's own
+  // MAX_RUN_DURATION_MS comment). Round 26's fix (Range#createTextFinder's
+  // findAll(), see the function's own comment) answers "does this Task ID
+  // appear anywhere" via a server-side search returning match positions
+  // only, so it transfers no row data at all when there is nothing to find.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dww01';
+  const startedAt = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: startedAt,
+    startedAt,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog, spreadsheet } = harness({ tasks: [task], events: [] });
+
+  // A large, entirely unrelated Sync Log history -- large enough that the
+  // old tail-chunk implementation would have needed several chunk reads
+  // (SYNC_LOG_TAIL_CHUNK_ROWS was 200) to walk all of it before giving up.
+  for (let i = 0; i < 500; i++) {
+    sandbox.logSnapshot_(
+      'snap-filler-' + i, 'notion_poll', 'unrelated-task-' + i, 'Ready',
+      new Date('2026-08-26T00:00:00.000Z'), 'no_change:Ready'
+    );
+  }
+
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  syncLogSheet.getValuesCallCount = 0; // reset the setup-time appendRow calls above
+
+  sandbox.pollTaskChanges();
+
+  assert.equal(
+    syncLogSheet.getValuesCallCount, 0,
+    'expected no Sync Log row-data transfer for a Task ID that has never appeared in the log, however large the log has grown'
+  );
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, startedAt,
+    'expected the Task\'s own fresh Started At to still be trusted with no Story history on file at all'
   );
 });
 

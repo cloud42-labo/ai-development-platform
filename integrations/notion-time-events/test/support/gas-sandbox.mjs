@@ -27,6 +27,14 @@ class FakeSheet {
     this.name = name;
     this.rows = [];
     this.hidden = false;
+    // Counts real Sheets-transfer calls a test can assert against, to prove
+    // a fix's *cost* characteristic (e.g. "does not scale with log size"),
+    // not only its correctness. getValues() stands in for a genuine
+    // row-data transfer; findAll()/findNext() are deliberately not counted
+    // here since they represent a server-side TextFinder search returning
+    // only match positions, the cheaper operation these counts exist to
+    // distinguish from.
+    this.getValuesCallCount = 0;
   }
 
   hideSheet() {
@@ -59,6 +67,7 @@ class FakeSheet {
     const sheet = this;
     return {
       getValues() {
+        sheet.getValuesCallCount++;
         const result = [];
         for (let rowOffset = 0; rowOffset < numRows; rowOffset++) {
           const source = sheet.rows[row - 1 + rowOffset] || [];
@@ -97,6 +106,22 @@ class FakeSheet {
               }
             }
             return null;
+          },
+          // Real TextFinder#findAll returns every match within the searched
+          // range, in the order encountered scanning forward from the range's
+          // own start -- i.e. ascending row order for a column range, since
+          // this codebase's sheets are only ever appended to. Code.gs relies
+          // on that ordering (the last element is the most recent match).
+          findAll() {
+            const matches = [];
+            for (let offset = 0; offset < numRows; offset++) {
+              const candidate = (sheet.rows[row - 1 + offset] || [])[column - 1];
+              if (String(candidate) === String(text)) {
+                const matchedRow = row + offset;
+                matches.push({ getRow: () => matchedRow });
+              }
+            }
+            return matches;
           },
         };
       },

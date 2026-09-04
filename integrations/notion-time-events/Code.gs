@@ -2564,16 +2564,13 @@ function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType)
 // order, so the last matching row encountered is, by construction, the
 // most recent one.
 //
-// Scans the Sync Log's history in bounded tail chunks (see
-// SYNC_LOG_TAIL_CHUNK_ROWS below) rather than materializing all of it at
-// once, but callers must still gate this behind the ordinary freshness
-// check already trusting `Started At` (see the one call site's
-// `taskStartedAtLooksFresh`, and its own comment for why gating on that —
-// not on allEvents.length === 0, an earlier version of the gate — is both
-// correct and still narrow), never call it unconditionally on every
-// ordinary Task open: a Task whose most recent Sync Log row genuinely sits
-// far from the end (rare, but possible) still walks the whole log,
-// chunk by chunk.
+// Callers must still gate this behind the ordinary freshness check already
+// trusting `Started At` (see the one call site's `taskStartedAtLooksFresh`,
+// and its own comment for why gating on that — not on allEvents.length ===
+// 0, an earlier version of the gate — is both correct and still narrow):
+// this runs on every ordinary Task's very first Time Event, Story history
+// or not, so it must stay cheap even for the common case of a page that has
+// never once appeared in the Sync Log.
 // Every per-event action reconcileStoryTask_ can ever push into its
 // comma-joined outcome — used below to recognize a Sync Log row as having
 // been logged while this page's Type read Story. Codex-reported gap
@@ -2601,44 +2598,38 @@ const STORY_RECONCILIATION_ACTION_PREFIXES = [
   'closed_ambiguous_pre_upgrade_provenance:',
 ];
 
-// Bounds each single Sheets transfer this function's tail scan performs —
-// Codex-reported gap (round 24), on the round-23 fix itself: scanning the
-// already-fully-materialized rows array backward and breaking on the first
-// match bounded the JS-side comparison cost, but every call still issued
-// one getRange(...).getValues() covering the ENTIRE Sync Log up front,
-// before that backward loop ever got a chance to exit early — the actual
-// Sheets-transfer/heap cost Codex's finding was about was untouched.
-// Reading in bounded tail chunks instead (this constant's worth of rows at
-// a time, oldest-first within each chunk but chunks themselves walked
-// newest-first) means the common case this function is actually called
-// against — a Task recently active, whose own most recent Sync Log row
-// sits near the end regardless of overall log size — typically resolves
-// within the first chunk, never materializing the rest of the log at all.
-const SYNC_LOG_TAIL_CHUNK_ROWS = 200;
-
+// Codex-reported gap (round 26), on the round-24 tail-chunk fix itself: the
+// bounded chunk reads only ever paid off for a page WITH a Story-marked row
+// on file. The single most common caller of this function is the opposite
+// case — an ordinary Task reaching its very first Time Event, which by
+// definition has no Sync Log row for its own ID at all — and for that case
+// every chunk still had to be read, oldest chunk included, before the loop
+// could conclude "no match" and return false. Every first-ever Task open in
+// the entire deployment paid the full tail-chunk walk, growing without
+// bound as the append-only log grows, with no early-exit signal available.
+//
+// Searched via Range#createTextFinder instead — the same mechanism this
+// file already uses for hasProcessedSnapshot_ and
+// findSheetEventRowByEventId_'s single-match lookups. TextFinder runs the
+// search on Sheets' own servers rather than transferring row data into this
+// script's memory, so a single findAll() call (one round trip regardless of
+// how large the Sync Log has grown) both answers "does this Task ID appear
+// anywhere in the log at all" for the common never-seen case and locates
+// every match when it does, without ever materializing unrelated rows.
 function storyConversionHappenedWhileInProgress_(taskId) {
   if (!taskId) return false;
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
-  let mostRecentRow = null;
-  let chunkEnd = lastRow;
-  while (chunkEnd >= 2 && !mostRecentRow) {
-    const chunkStart = Math.max(2, chunkEnd - SYNC_LOG_TAIL_CHUNK_ROWS + 1);
-    const chunkRows = sheet.getRange(chunkStart, 1, chunkEnd - chunkStart + 1, 7).getValues();
-    // Scan this chunk from its own end, stopping at the first (i.e. most
-    // recent) match — logSnapshot_ only ever appends, never inserts out of
-    // order, so within any one chunk the most recent row for this Task ID
-    // is the LAST one matching it.
-    for (let i = chunkRows.length - 1; i >= 0; i--) {
-      if (chunkRows[i][2] === taskId) {
-        mostRecentRow = chunkRows[i];
-        break;
-      }
-    }
-    chunkEnd = chunkStart - 1;
-  }
-  if (!mostRecentRow) return false;
+  const matches = sheet.getRange(2, 3, lastRow - 1, 1)
+    .createTextFinder(String(taskId))
+    .matchEntireCell(true)
+    .findAll();
+  if (!matches.length) return false;
+  // logSnapshot_ only ever appends, never inserts out of order, so matches
+  // come back in ascending row order — the LAST one is the most recent.
+  const mostRecentMatchRow = matches[matches.length - 1].getRow();
+  const mostRecentRow = sheet.getRange(mostRecentMatchRow, 1, 1, 7).getValues()[0];
   const outcome = String(mostRecentRow[5] || '');
   // Every action reconcileStoryTask_ can ever produce is itself proof this
   // row was logged while Type read Story — checked as a substring anywhere
