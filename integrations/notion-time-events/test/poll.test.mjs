@@ -3101,10 +3101,12 @@ test('backfillTaskOriginProvenance_ stamps Task Origin= onto pre-existing Task-e
   const summary = sandbox.backfillTaskOriginProvenance_();
 
   const query = JSON.parse(requestsTo(fetchLog, 'POST', TASKS_DS)[0].options.payload);
+  // Not scoped to non-Story pages: a page already reclassified to Story
+  // before this deploy also needs a visit (see the function's own comment
+  // for the ambiguous-provenance case that requires).
   assert.deepEqual(query.filter, {
     and: [
       { property: 'Type', select: { is_not_empty: true } },
-      { property: 'Type', select: { does_not_equal: 'Story' } },
     ],
   });
   assert.equal(summary.scanned, 1);
@@ -3183,4 +3185,104 @@ test('after backfillTaskOriginProvenance_, a pre-upgrade Task-era event survives
     archivePatches.length, 1,
     'expected only the backfill\'s own PATCH -- no archive PATCH from the reclassification'
   );
+});
+
+test('backfillTaskOriginProvenance_ flags events on already-Story pages as ambiguous, and reconcileStoryTask_ skips them entirely', () => {
+  // Codex-reported gap (P1): the earlier backfill excluded currently-Story
+  // pages, so an event genuinely created while its page was still a Task
+  // -- but the page was already reclassified to Story before this
+  // revision was deployed -- would never get any Task Origin= marker at
+  // all, and backfillStoryExclusion_ would archive it as though it were
+  // bogus pre-fix Story stray data, permanently erasing real work. The
+  // true origin is genuinely unrecoverable for such a page (its current
+  // Type already reads Story either way), so this proves the fix: a
+  // distinct 'ambiguous-pre-upgrade:' marker instead, and
+  // reconcileStoryTask_ leaves it completely untouched rather than
+  // guessing in either direction.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43djj01';
+  const ambiguousEvent = eventPage('evt-ambiguous', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
+  });
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-01T00:05:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story', // already Story at backfill time
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousEvent] });
+
+  const backfillSummary = sandbox.backfillTaskOriginProvenance_();
+  assert.equal(backfillSummary.outcomes[0], 'flagged_ambiguous_provenance:evt-ambiguous');
+  const backfillPatch = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous')[0].options.payload
+  );
+  const noteContent = backfillPatch.properties.Note.rich_text[0].text.content;
+  assert.match(noteContent, /Task Origin=ambiguous-pre-upgrade:evt-ambiguous/);
+  ambiguousEvent.properties.Note = { type: 'rich_text', rich_text: [{ plain_text: noteContent }] };
+
+  // A later poll re-observing the (still Story-typed) page must leave the
+  // flagged event completely untouched -- no archive, no close.
+  task.last_edited_time = '2026-09-01T00:00:00.000Z';
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-ambiguous');
+  const laterPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous');
+  assert.equal(
+    laterPatches.length, 1,
+    'expected only the backfill\'s own PATCH -- no archive/close PATCH from the later poll'
+  );
+});
+
+test('backfillTaskOriginForTask_ writes the Sync Log row before patching the event, so an interrupted Notion write still leaves the marker resolvable on retry', () => {
+  // Codex-reported gap (P2): if the Sync Log write happened AFTER the
+  // Notion patch and the patch succeeded but the Sync Log write failed
+  // (or Apps Script was interrupted between them), the event would carry
+  // a Task Origin= marker with no matching Sync Log row -- unresolvable
+  // by eventWasTouchedDuringTaskExecution_, and the backfill's own
+  // existingOrigin check would skip it on any retry since it already
+  // "has" a marker, so the gap could never self-heal. This simulates the
+  // Notion patch itself failing and asserts the Sync Log row is already
+  // durably written regardless.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dkk01';
+  const baseStub = notionFetchStub({
+    [TASKS_QUERY]: () => ({
+      results: [taskPage(taskId, {
+        status: 'Done', agent: 'Claude Opus',
+        lastEdited: '2026-08-01T00:05:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Task',
+      })],
+      has_more: false,
+    }),
+    [EVENTS_QUERY]: () => ({
+      results: [eventPage('evt-retry-safety', {
+        actor: 'Claude', startedAt: '2026-08-01T00:00:00.000Z', endedAt: '2026-08-01T02:00:00.000Z',
+      })],
+      has_more: false,
+    }),
+    'GET *': () => ({}),
+  });
+  let patchAttempted = false;
+  const fetchStub = (url, options) => {
+    const method = String((options && options.method) || 'get').toUpperCase();
+    if (method === 'PATCH' && url.indexOf('/v1/pages/evt-retry-safety') >= 0) {
+      patchAttempted = true;
+      return { getResponseCode: () => 500, getContentText: () => '{"message":"simulated failure"}' };
+    }
+    return baseStub(url, options);
+  };
+  const { sandbox, spreadsheet } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: fetchStub,
+  });
+
+  assert.throws(() => sandbox.backfillTaskOriginProvenance_(), /Notion API failed/);
+
+  assert.equal(patchAttempted, true, 'expected the Notion patch to actually have been attempted');
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  assert.equal(syncLogSheet.getLastRow(), 2, 'expected the Sync Log row to already be written (header + 1 row)');
+  const loggedRow = syncLogSheet.rows[1];
+  assert.equal(loggedRow[0], 'backfill:evt-retry-safety');
+  assert.equal(loggedRow[6], 'Task');
 });
