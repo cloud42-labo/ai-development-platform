@@ -650,6 +650,14 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
 // tied last_edited_time at the truncation boundary resumes correctly
 // rather than silently dropping its remainder) tracks how far a prior call
 // actually got.
+//
+// Also bounds its own pagination phase the same way backfillResultFingerprints_
+// does, and for the same reason: an unbounded fetch (up to
+// QUERY_PAGE_SAFETY_LIMIT round trips) could otherwise spend the entire
+// MAX_RUN_DURATION_MS budget just fetching pages before the processing loop
+// below ever runs its own deadline check — leaving nothing processed, and
+// therefore no checkpoint to persist, so every retry would repeat the
+// identical fetch-only pass forever instead of ever making progress.
 function backfillStoryExclusion_() {
   return withPollLock_(function () {
     const runStartedAt = new Date();
@@ -666,26 +674,43 @@ function backfillStoryExclusion_() {
           { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } },
           { property: 'Type', select: { equals: 'Story' } },
         ] };
+    function tieOffsetStartIndex_(results) {
+      let index = 0;
+      if (resumeCursor && tieOffset > 0) {
+        let skipped = 0;
+        while (
+          index < results.length &&
+          skipped < tieOffset &&
+          String(results[index].last_edited_time || '') === resumeCursor
+        ) {
+          skipped++;
+          index++;
+        }
+      }
+      return index;
+    }
+    // Reserve half the run budget for pagination, leaving the rest
+    // (MIN_PROCESSING_RESERVE_MS short of the full budget) for actually
+    // processing and checkpointing whatever got retrieved. A resumed call
+    // whose persisted tie offset already exceeds what the half-budget alone
+    // can fetch is allowed to keep fetching past that primary deadline —
+    // hasProgress below reports whether the current fetch already has
+    // something past the tie-offset skip to work with — same escalation
+    // pattern as backfillResultFingerprints_, for the identical reason: a
+    // second, independent pagination pass starting over would only re-fetch
+    // from page 1 again and waste the time this one already spent.
     const result = paginateNotionQuery_(
       '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
       {
         page_size: 100,
         filter: filter,
         sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
-      }
+      },
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS - MIN_PROCESSING_RESERVE_MS,
+      function (results) { return tieOffsetStartIndex_(results) < results.length; }
     );
-    let startIndex = 0;
-    if (resumeCursor && tieOffset > 0) {
-      let skipped = 0;
-      while (
-        startIndex < result.results.length &&
-        skipped < tieOffset &&
-        String(result.results[startIndex].last_edited_time || '') === resumeCursor
-      ) {
-        skipped++;
-        startIndex++;
-      }
-    }
+    const startIndex = tieOffsetStartIndex_(result.results);
     const toProcess = result.results.slice(startIndex);
 
     const outcomes = [];
