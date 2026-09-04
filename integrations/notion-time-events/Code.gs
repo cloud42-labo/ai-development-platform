@@ -1313,11 +1313,44 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       return eventStartedAt_(b).getTime() - eventStartedAt_(a).getTime();
     });
 
-    if (sameActor.length) {
-      for (let i = 1; i < sameActor.length; i++) {
-        closeNotionTimeEvent_(sameActor[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation');
-        actions.push('closed_duplicate:' + sameActor[i].id);
-      }
+    for (let i = 1; i < sameActor.length; i++) {
+      closeNotionTimeEvent_(sameActor[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation');
+      actions.push('closed_duplicate:' + sameActor[i].id);
+    }
+
+    // Codex-reported gap (round 20): the most-recently-started sameActor
+    // event (index 0) is not automatically safe to keep continuing just
+    // because it is still open for the right actor. A page that was
+    // Type = Story, had its stray open event backfilled to
+    // Task Origin=ambiguous-pre-upgrade (see backfillTaskOriginProvenance_
+    // — genuinely unprovable, left exactly as found by reconcileStoryTask_
+    // the whole time it stayed Story), and is THEN reclassified to an
+    // executable Type while remaining In Progress with the same assignee
+    // never routes through reconcileStoryTask_ again — that only runs
+    // while Type still reads Story. This generic path would otherwise
+    // treat that same still-open, unverifiable event as "already_open",
+    // silently continuing to accrue time on it indefinitely: its eventual
+    // Ended At would span from whatever it originally started (possibly
+    // long before this deploy, possibly genuinely Story-era) all the way
+    // through the Task's own new execution, reintroducing exactly the
+    // double-counting this whole file exists to stop — just for the one
+    // population (ambiguous, not confirmed either way) this generic path
+    // was never taught to recognize as special. Restart instead of
+    // continuing: close the ambiguous event at this observed boundary
+    // (distinct Reason=ambiguous_provenance_restart, its own
+    // Task Origin=ambiguous-pre-upgrade left completely untouched — still
+    // available for an operator to review by hand, per
+    // eventProvenanceIsAmbiguous_'s own comment) and fall through to the
+    // same path used when there was no sameActor event at all, opening a
+    // fresh, confirmed Task-origin event for the genuinely-observed new
+    // work from here forward.
+    const ambiguousOpenEvent = sameActor.length && eventProvenanceIsAmbiguous_(sameActor[0]) ? sameActor[0] : null;
+    if (ambiguousOpenEvent) {
+      closeNotionTimeEvent_(ambiguousOpenEvent, currentStatus, changedBy, snapshotId, when, 'ambiguous_provenance_restart');
+      actions.push('closed_ambiguous_provenance_restart:' + ambiguousOpenEvent.id);
+    }
+
+    if (sameActor.length && !ambiguousOpenEvent) {
       actions.push('already_open:' + sameActor[0].id);
     } else {
       // Prefer the Task's own current Started At over `when` (the observed
@@ -1341,9 +1374,20 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // at the reassignment boundary — overlapping the outgoing actor's own
       // interval and double-counting effort. `when` (this observed edit,
       // i.e. the reassignment itself) must count as part of history
-      // whenever we just closed something this call.
+      // whenever we just closed something this call. The same staleness
+      // applies to ambiguousOpenEvent above, for the identical reason: it
+      // was also just closed via a PATCH this same call, so allEvents' own
+      // in-memory copy still shows it open (no Ended At), and
+      // latestEventTimestamp_ can only see its old, possibly pre-deploy
+      // Started At — which can easily equal the Task's own unchanged
+      // Started At (both set from the same original moment), making a
+      // stale Started At look "trusted" and reopening the new event at
+      // that same ancient timestamp instead of this restart's own boundary,
+      // silently re-creating the exact interval ambiguousOpenEvent was just
+      // closed specifically to stop extending.
       const latestHistoricalTimestamp = latestEventTimestamp_(allEvents);
-      const effectiveLatestHistoricalTimestamp = otherActor.length
+      const justClosedSomethingThisCall = otherActor.length > 0 || Boolean(ambiguousOpenEvent);
+      const effectiveLatestHistoricalTimestamp = justClosedSomethingThisCall
         ? (latestHistoricalTimestamp && latestHistoricalTimestamp.getTime() > when.getTime() ? latestHistoricalTimestamp : when)
         : latestHistoricalTimestamp;
       const taskStartedAt = propertyDate_(task.properties['Started At']);

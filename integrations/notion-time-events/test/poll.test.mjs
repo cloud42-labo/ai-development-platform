@@ -3384,3 +3384,70 @@ test('backfillTaskOriginProvenance_ persists TASK_ORIGIN_BACKFILL_COMPLETE only 
   assert.equal(summary.timedOut, false);
   assert.equal(fullProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), 'true');
 });
+
+test('an ambiguous open event does not silently keep accruing time once its Story page is reclassified to an executable Type with the same assignee', () => {
+  // Codex-reported gap (P2, round 20): reconcileStoryTask_ leaves an
+  // ambiguous-marked open event exactly as found -- correct while the page
+  // stays Type = Story (see its own comment). But reconcileStoryTask_ never
+  // runs again once the page is reclassified to an executable Type -- the
+  // generic reconcileAuthoritativeTimeEvents_ path takes over, and its
+  // ordinary "sameActor already open, just keep going" logic has no idea
+  // this particular open event's provenance is unverifiable. Left alone,
+  // its eventual Ended At would span from whenever it originally opened
+  // (possibly long before this deploy) all the way through the new
+  // execution -- reintroducing the exact double-counting this file exists
+  // to stop, for precisely the population (ambiguous, not confirmed either
+  // way) the generic path was never taught to recognize.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43doo01';
+  const staleStart = '2026-07-01T00:00:00.000Z';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const ambiguousEvent = eventPage('evt-ambiguous-restart', {
+    actor: 'Claude',
+    startedAt: staleStart,
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    // The Task's own Started At is unchanged from the same original moment
+    // the ambiguous event itself opened -- the realistic case for a page
+    // that never left In Progress across the Type change.
+    startedAt: staleStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /^closed_ambiguous_provenance_restart:evt-ambiguous-restart,opened:/);
+
+  // The old ambiguous event is closed AT THE CONVERSION BOUNDARY, not left
+  // open -- its duration is now fixed instead of ever-growing.
+  const closePatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-restart');
+  assert.equal(closePatches.length, 1);
+  const closePayload = JSON.parse(closePatches[0].options.payload);
+  assert.equal(closePayload.properties['Ended At'].date.start, conversionEdit);
+  assert.match(closePayload.properties.Note.rich_text[0].text.content, /Reason=ambiguous_provenance_restart/);
+  // Its own Task Origin= survives the close untouched (appendNote_ only
+  // ever adds to a Note, never rewrites an existing field) -- still
+  // available for an operator to review by hand later, exactly as
+  // backfillTaskOriginProvenance_ left it.
+  assert.match(closePayload.properties.Note.rich_text[0].text.content, /Task Origin=ambiguous-pre-upgrade/);
+
+  // A genuinely new, confirmed event opens starting at the conversion
+  // boundary (`when`) -- NOT at the stale original Started At, which would
+  // silently re-create the exact interval the close above exists to stop
+  // extending. This is the regression this test specifically guards: the
+  // in-memory `allEvents` this call started with still shows the ambiguous
+  // event as open (it was only just closed via PATCH, same call), so
+  // latestEventTimestamp_ alone would see only its stale Started At --
+  // matching the Task's own unchanged Started At and wrongly looking
+  // "trusted" without the effectiveLatestHistoricalTimestamp fix.
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, conversionEdit,
+    'expected the new event to start at the conversion boundary, not the stale pre-deploy Started At'
+  );
+});
