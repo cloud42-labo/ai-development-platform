@@ -3110,6 +3110,47 @@ test('resolveReviewSource_ still credits a review submitted later in the SAME ro
   );
 });
 
+test('resolveReviewSource_ rounds a second-precise untilFixStarted up to the end of its OWN minute, not a flat 59999ms later', () => {
+  // Codex-reported gap (round 33): untilFixStarted is not always Notion's
+  // own minute-granular timestamp -- trustedTaskStart (the Task's own
+  // Started At) can carry genuine seconds. Adding a flat 59999ms to a
+  // second-precise :00:30 lands at :01:29, a full extra minute later than
+  // "the end of :00:30's own minute" (:00:59.999) -- wrongly admitting a
+  // review submitted in the NEXT minute that could not have caused a fix
+  // that had already started a minute earlier.
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T10:00:45.000Z' }, // same minute as untilFixStarted -- eligible
+      { user: { login: 'komaba' }, submitted_at: '2026-08-30T10:01:20.000Z' }, // next minute -- must stay excluded even though it's within flat+59999ms
+    ]),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-9', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(
+    sandbox.resolveReviewSource_(
+      task,
+      new Date('2026-08-30T00:00:00.000Z'),
+      new Date('2026-08-30T10:00:30.000Z') // second-precise trustedTaskStart, not minute-aligned
+    ),
+    'Codex',
+    'expected the same-minute review at :00:45 to still qualify, and the next-minute review at :01:20 to stay excluded despite being within a flat +59999ms of :00:30'
+  );
+});
+
 test('resolveReviewSource_ has no upper bound when untilFixStarted is omitted, matching every prior call site', () => {
   const routes = {
     [TASKS_QUERY]: () => ({ results: [], has_more: false }),

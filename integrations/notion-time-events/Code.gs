@@ -2428,6 +2428,24 @@ function mostRecentLoggedStatus_(taskId) {
 // only be a stale row from some earlier, unrelated poll — prefer the
 // close. Otherwise the log itself is confirmed to have already observed
 // (at least) everything the close knows about, so keep preferring it.
+//
+// Codex-reported gap (round 32): "the close's own snapshot was never
+// logged" does NOT, on its own, prove `logged` is a stale, pre-close row —
+// a separate, later poll can just as legitimately have observed and
+// logged a genuine subsequent status change (e.g. this same `Review` close
+// followed by `Review` → `Backlog`) that happens to round to the same
+// displayed minute, in which case `logged` is the newer, correct answer
+// and this branch gets it backwards. Both explanations produce the exact
+// same observable signature here (a tie, and the close's snapshot absent
+// from the log) and Notion's API exposes nothing — no per-property change
+// history, no sub-minute precision — to place the missing close relative
+// to `logged` once it never made it into the append-ordered Sync Log at
+// all. Deliberately left preferring the close anyway rather than guessing
+// a fix for the ambiguity: see the "Known limitations" entry in this
+// integration's README (search "Work Type/Review Source tie") for why
+// round 30's scenario is kept correct in preference to round 32's, and why
+// a poll-level self-heal already closes the window down to a narrow
+// overlap in most real deployments.
 function mostRecentStatusEvidence_(allEvents, taskId) {
   const logged = mostRecentLoggedEntry_(taskId);
   const priorClose = mostRecentGenuineClose_(allEvents);
@@ -2522,16 +2540,28 @@ function classifyWorkType_(allEvents, taskId) {
 // existing call sites/tests that only ever cared about the lower bound keep
 // working unchanged.
 //
-// `untilFixStarted` itself is Notion's own minute-granular timestamp (see
-// `startAt` at the call site), but `review.submitted_at` carries full
-// second precision — Codex-reported gap (round 32): comparing them at face
-// value could exclude the very review that caused the fix, e.g. a review
-// submitted at :30 seconds discarded by an untilFixStarted rounded down to
-// :00 when the real reopen actually happened at :50. Rounding the upper
-// bound up to the END of its own minute keeps every review genuinely
-// within that same minute eligible, matching how this file treats
-// Notion's minute granularity everywhere else (see
-// `mostRecentStatusEvidence_`).
+// `untilFixStarted` is usually Notion's own minute-granular timestamp (see
+// `startAt` at the call site — `when`), but `review.submitted_at` carries
+// full second precision — Codex-reported gap (round 32): comparing them at
+// face value could exclude the very review that caused the fix, e.g. a
+// review submitted at :30 seconds discarded by an untilFixStarted rounded
+// down to :00 when the real reopen actually happened at :50. Rounding the
+// upper bound up to the END of its own minute keeps every review genuinely
+// within that same minute eligible, matching how this file treats Notion's
+// minute granularity everywhere else (see `mostRecentStatusEvidence_`).
+//
+// `startAt` at the call site is NOT always minute-granular, though —
+// `trustedTaskStart` (the Task's own `Started At` property) can carry
+// genuine second precision when it was written that way. Codex-reported
+// gap (round 33): adding a flat 59999ms to a second-precise value doesn't
+// round up to the end of ITS OWN minute, it slides the whole window
+// forward by up to a minute — e.g. a fix starting at :00:30 would admit
+// reviews as late as :01:29, a full minute after the fix actually began,
+// which could not have caused it and can overwrite the correct reviewer.
+// Flooring to the containing minute first, THEN adding 59999ms, rounds up
+// to the end of `untilFixStarted`'s own minute regardless of whether it
+// arrived already minute-aligned (the flooring is then a no-op) or with
+// real seconds on it (the flooring discards them before rounding up).
 function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
   try {
     const parsed = parseGithubPullRequestUrl_(propertyText_(task.properties['Pull Request']));
@@ -2541,7 +2571,9 @@ function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
     const reviews = fetchAllGithubReviews_(token, parsed);
     if (!Array.isArray(reviews)) return 'Other';
     const sinceMs = sincePriorClose ? sincePriorClose.getTime() : 0;
-    const untilMs = untilFixStarted ? untilFixStarted.getTime() + 59999 : Infinity;
+    const untilMs = untilFixStarted
+      ? Math.floor(untilFixStarted.getTime() / 60000) * 60000 + 59999
+      : Infinity;
     let latest = null;
     reviews.forEach(function (review) {
       if (!review || !review.submitted_at) return;
