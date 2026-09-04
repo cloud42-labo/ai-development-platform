@@ -638,49 +638,107 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
 // applies to every poll from day one. Run once from the editor immediately
 // after deploying this revision.
 //
-// Deliberately simpler than backfillResultFingerprints_'s resumable design:
-// this has no persisted cursor/tie-offset to manage, because re-running it
-// is always safe and cheap on its own — a Story already reconciled by an
-// earlier call has no open event left to close, so a re-scan is the free
-// 'story_excluded' outcome (see isFreeOutcome_), not a repeated write. If a
-// call is capped by the pagination safety limit or the wall-clock bound
-// below, calling it again picks up the same query fresh; anything that
-// call already closed just costs a cheap free re-read, not lost progress.
+// Resumable the same way backfillResultFingerprints_ is, and for the same
+// reason: closing a Story's Time Event does not remove the Story itself
+// from this query's own Type=Story/Status=In Progress result set (nothing
+// about its Status or Type changed), so a truncated call's unqualified
+// re-run would keep re-fetching the identical oldest prefix forever —
+// reconciling it again is a free re-scan, but Story pages *beyond* that
+// prefix would never be reached despite the "call again to continue"
+// instruction below. STORY_EXCLUSION_RESUME_CURSOR (queried with
+// on_or_after, plus a local STORY_EXCLUSION_RESUME_TIE_OFFSET skip so a
+// tied last_edited_time at the truncation boundary resumes correctly
+// rather than silently dropping its remainder) tracks how far a prior call
+// actually got.
 function backfillStoryExclusion_() {
   return withPollLock_(function () {
     const runStartedAt = new Date();
+    const props = PropertiesService.getScriptProperties();
+    const resumeCursor = props.getProperty('STORY_EXCLUSION_RESUME_CURSOR');
+    const tieOffset = resumeCursor ? Number(props.getProperty('STORY_EXCLUSION_RESUME_TIE_OFFSET') || '0') : 0;
+    const filter = resumeCursor
+      ? { and: [
+          { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } },
+          { property: 'Type', select: { equals: 'Story' } },
+          { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
+        ] }
+      : { and: [
+          { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } },
+          { property: 'Type', select: { equals: 'Story' } },
+        ] };
     const result = paginateNotionQuery_(
       '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
       {
         page_size: 100,
-        filter: {
-          and: [
-            { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } },
-            { property: 'Type', select: { equals: 'Story' } },
-          ],
-        },
+        filter: filter,
         sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
       }
     );
+    let startIndex = 0;
+    if (resumeCursor && tieOffset > 0) {
+      let skipped = 0;
+      while (
+        startIndex < result.results.length &&
+        skipped < tieOffset &&
+        String(result.results[startIndex].last_edited_time || '') === resumeCursor
+      ) {
+        skipped++;
+        startIndex++;
+      }
+    }
+    const toProcess = result.results.slice(startIndex);
+
     const outcomes = [];
     let iterated = 0;
     while (
-      iterated < result.results.length &&
+      iterated < toProcess.length &&
       (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
     ) {
-      outcomes.push(reconcileTaskPage_(result.results[iterated]));
+      outcomes.push(reconcileTaskPage_(toProcess[iterated]));
       iterated++;
     }
-    const timedOut = iterated < result.results.length;
-    if (result.truncated || timedOut) {
+    const timedOut = iterated < toProcess.length;
+    const processed = toProcess.slice(0, iterated);
+
+    if ((result.truncated || timedOut) && processed.length) {
+      const lastSeen = String(processed[processed.length - 1].last_edited_time || '');
+      if (lastSeen) {
+        props.setProperty('STORY_EXCLUSION_RESUME_CURSOR', lastSeen);
+        // Same carry-over rule as backfillResultFingerprints_: if this
+        // call's own tail is still the exact same tied timestamp the
+        // resume cursor already pointed at, the members that resume's own
+        // tieOffset already skipped (processed by an earlier call, not
+        // present in `processed` at all) belong to the same tie and must
+        // be counted cumulatively — otherwise every further call spanning
+        // the same cohort re-skips to only what THAT call processed and
+        // re-walks the same middle slice forever.
+        let newTieOffset = 0;
+        for (let i = 0; i < processed.length; i++) {
+          newTieOffset = String(processed[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
+        }
+        const cumulativeTieOffset = (lastSeen === resumeCursor ? tieOffset : 0) + newTieOffset;
+        props.setProperty('STORY_EXCLUSION_RESUME_TIE_OFFSET', String(cumulativeTieOffset));
+      }
       Logger.log(
         'backfillStoryExclusion_: stopped at the ' +
         (timedOut ? 'wall-clock bound' : 'pagination safety limit') +
         ' after reconciling ' + iterated + ' of ' + result.results.length +
-        ' Story page(s) still In Progress — call again to continue (a Story ' +
-        'this call already closed costs only a free re-scan next time).'
+        ' Story page(s) still In Progress this call — call again to resume' +
+        (processed.length ? ' from ' + processed[processed.length - 1].last_edited_time : '') + '.'
       );
+    } else if (result.truncated || timedOut) {
+      // Stopped with nothing new processed this call (the whole returned
+      // batch was already covered by the tie-offset skip): leave the
+      // resume state exactly as it was rather than losing the resume
+      // point — same rule pollTaskChanges/backfillResultFingerprints_
+      // apply for the identical scenario.
+    } else {
+      // Fully drained: clear any stale resume point so a future call
+      // starts a fresh full pass.
+      props.setProperty('STORY_EXCLUSION_RESUME_CURSOR', '');
+      props.setProperty('STORY_EXCLUSION_RESUME_TIE_OFFSET', '');
     }
+
     return {
       scanned: result.results.length,
       processed: iterated,

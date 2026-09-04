@@ -2356,3 +2356,62 @@ test('backfillStoryExclusion_ is a free re-scan once a Story has already been cl
     requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
   assert.equal(mutationsAfterSecond, mutationsAfterFirst);
 });
+
+test('backfillStoryExclusion_ resumes past a truncated prefix instead of re-fetching it forever', () => {
+  // Codex-reported gap: closing a Story's Time Event does not remove the
+  // Story itself from this query's own Type=Story/Status=In Progress result
+  // set (nothing about its Status or Type changed), so — before this fix —
+  // a truncated call's unqualified re-run kept re-fetching the identical
+  // oldest 50-page prefix forever, and a Story beyond it could never be
+  // reached despite the "call again to continue" instruction.
+  let pageCalls = 0;
+  const seenFilters = [];
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      pageCalls += 1;
+      seenFilters.push(body.filter);
+      // Force paginateNotionQuery_'s own truncation (QUERY_PAGE_SAFETY_LIMIT
+      // = 50 pages) by always claiming more exist, one Story per page.
+      const idx = pageCalls;
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dg' + String(idx).padStart(3, '0'), {
+        status: 'In Progress',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-01T00:' + String(idx).padStart(2, '0') + ':00.000Z',
+        startedAt: '2026-08-01T00:00:00.000Z',
+        type: 'Story',
+      });
+      return { results: [task], has_more: true, next_cursor: 'cursor-' + idx };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  const firstRun = sandbox.backfillStoryExclusion_();
+
+  assert.equal(firstRun.truncated, true);
+  assert.equal(firstRun.scanned, 50); // QUERY_PAGE_SAFETY_LIMIT
+  assert.deepEqual(seenFilters[0], {
+    and: [
+      { property: 'Status', select: { equals: 'In Progress' } },
+      { property: 'Type', select: { equals: 'Story' } },
+    ],
+  }); // first call: no resume clause yet
+  const resumeCursor = scriptProps.get('STORY_EXCLUSION_RESUME_CURSOR');
+  assert.ok(resumeCursor, 'expected a resume cursor to be persisted after a truncated backfill');
+
+  sandbox.backfillStoryExclusion_();
+
+  // The second call's query must be filtered to on-or-after the persisted
+  // resume cursor — not the same bare two-clause filter as the first call,
+  // which would just return the identical 50-page prefix again.
+  const secondCallFilter = seenFilters[seenFilters.length - 50];
+  assert.ok(secondCallFilter.and, 'expected the resumed call to use a compound and-filter');
+  const onOrAfterClause = secondCallFilter.and.find((f) => f.timestamp === 'last_edited_time');
+  assert.equal(onOrAfterClause.last_edited_time.on_or_after, resumeCursor);
+});
