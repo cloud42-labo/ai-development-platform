@@ -2332,18 +2332,18 @@ test('Type is part of the reconciliation snapshot, so becoming a Story is never 
 
   const second = sandbox.pollTaskChanges();
 
-  // The event is genuine Task-era history (this exact page was reconciled
-  // through the ordinary Task path on the first poll, per
-  // taskWasEverReconciledAsTask_) — it is CLOSED at the conversion
-  // boundary, preserving the interval, not archived away as bogus stray
-  // data (see the "preserves genuine Task-era Time Events" test below for
-  // the fix this exercises alongside the snapshot-hash regression above).
-  assert.equal(second.outcomes[0], 'closed_task_era_at_story_conversion:evt-pre-story');
+  // Archived, not preserved: Type was never explicitly recorded as
+  // anything but Story on this page — the first poll's own Sync Log row
+  // carries an EMPTY Type column (Type was absent, propertyText_ reads
+  // ''), which taskWasEverReconciledAsTask_ correctly refuses to count as
+  // proof of genuine Task-era history (see its own comment — an unset
+  // Type is exactly as ambiguous as a pre-upgrade row with no Type column
+  // at all). Contrast with the "preserves genuine Task-era Time Events"
+  // test below, whose fixture explicitly records `type: 'Task'`.
+  assert.equal(second.outcomes[0], 'archived_story_event:evt-pre-story');
   const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-pre-story');
   assert.equal(patches.length, 1);
-  const closePatch = JSON.parse(patches[0].options.payload);
-  assert.equal(closePatch.archived, undefined);
-  assert.equal(closePatch.properties['Ended At'].date.start, sameMinute);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });
 
 test('backfillStoryExclusion_ queries every Type=Story page regardless of Status, and archives stray open events', () => {
@@ -2782,11 +2782,12 @@ test('a Task reclassified to Story preserves genuine Task-era Time Events instea
     events: [openEvent, closedEvent],
   });
   // Seed proof this exact page was reconciled through the ordinary Task
-  // path on some earlier poll — the same Outcome shape
-  // reconcileAuthoritativeTimeEvents_ itself would have logged.
+  // path on some earlier poll, with an explicit post-upgrade Type record
+  // — the same Outcome shape (and Type column) reconcileTaskPage_ itself
+  // would have logged via logSnapshot_.
   sandbox.logSnapshot_(
     'snap-task-era', 'notion_poll', taskId, 'In Progress',
-    new Date('2026-08-28T00:00:00.000Z'), 'opened:' + openEvent.id
+    new Date('2026-08-28T00:00:00.000Z'), 'opened:' + openEvent.id, 'Task'
   );
 
   const summary = sandbox.pollTaskChanges();
@@ -2836,5 +2837,95 @@ test('a Story converted to Task while idle trusts the freshly recorded Started A
     creates[0].properties['Started At'].date.start,
     freshStart,
     'expected the fresh Started At to be trusted since the page was idle (Ready), not In Progress, at its last-known Story observation'
+  );
+});
+
+test('a pre-upgrade legacy Story\'s old Task-path Sync Log rows are not mistaken for genuine Task-era history', () => {
+  // Codex-reported gap (P1): on an existing live deployment being upgraded
+  // to this whole BUG-ADP-TTE-01 revision, the OLD reconciler had no Type
+  // awareness at all and ran EVERY page — including genuine Stories —
+  // through the ordinary Task path, logging perfectly ordinary Outcomes
+  // (opened:, closed:, no_change:, ...) for them, with no Type column
+  // (that column didn't exist yet). taskWasEverReconciledAsTask_ must not
+  // mistake those pre-upgrade rows for proof of genuine Task-era history —
+  // otherwise a Story's own pre-fix bogus stray event would be preserved
+  // or closed instead of archived and purged, reintroducing exactly the
+  // double-counting this whole exclusion exists to stop, on precisely the
+  // common case (an existing deployment's pre-fix Stories).
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee99';
+  const strayEvent = eventPage('evt-legacy-story-stray', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-05T00:00:00.000Z',
+  });
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-09-04T05:00:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [strayEvent] });
+  // Simulate an OLD, pre-upgrade Sync Log row for this same page: an
+  // ordinary Task-path Outcome (from before Type-based routing existed),
+  // with no Type column populated — exactly what the old logSnapshot_
+  // (six positional arguments) would have written.
+  sandbox.logSnapshot_(
+    'snap-pre-upgrade', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-01T00:05:00.000Z'), 'opened:' + strayEvent.id
+  );
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-legacy-story-stray');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-story-stray');
+  assert.equal(patches.length, 1);
+  assert.equal(
+    JSON.parse(patches[0].options.payload).archived,
+    true,
+    'expected the pre-upgrade legacy stray event to still be archived, not preserved as though it were genuine Task-era history'
+  );
+});
+
+test('an idle Task observation after a Story\'s In-Progress spell clears the stale Story carryover', () => {
+  // Codex-reported gap (P2) on the idle-conversion fix itself: taking only
+  // the last Story-marked row's Status ignored any LATER, non-Story row in
+  // between. A Story last seen In Progress, reclassified to Task and left
+  // idle (Status = Ready) in the same edit, reconciled once while idle,
+  // and only later actually beginning In Progress must have that later
+  // fresh Started At trusted — the intervening idle observation proves
+  // Type had already changed and the page was NOT continuously In
+  // Progress across the conversion.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dff01';
+  const freshStart = '2026-08-30T05:10:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:15:00.000Z',
+    startedAt: freshStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], noEventsForTaskIds: [taskId] });
+  // Oldest: last seen as Story, still In Progress.
+  sandbox.logSnapshot_(
+    'snap-story-inprogress', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-20T00:00:00.000Z'), 'story_excluded'
+  );
+  // Newer: reclassified to Task and observed idle (Ready) — this is the
+  // row that must clear the carryover, even though it isn't itself a
+  // Story marker.
+  sandbox.logSnapshot_(
+    'snap-idle-task', 'notion_poll', taskId, 'Ready',
+    new Date('2026-08-25T00:00:00.000Z'), 'no_change:Ready', 'Task'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start,
+    freshStart,
+    'expected the fresh Started At to be trusted -- the intervening idle Task observation should have cleared the stale In-Progress Story carryover'
   );
 });

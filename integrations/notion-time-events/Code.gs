@@ -596,7 +596,7 @@ function reconcileTaskPage_(task) {
       );
 
   syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
-  logSnapshot_(snapshotId, 'notion_poll', pageId, currentStatus, when, outcome);
+  logSnapshot_(snapshotId, 'notion_poll', pageId, currentStatus, when, outcome, taskType);
   return outcome;
 }
 
@@ -1969,9 +1969,14 @@ function hasProcessedSnapshot_(snapshotId) {
     .createTextFinder(snapshotId).matchEntireCell(true).findNext());
 }
 
-function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
+// `source` is what triggered this reconciliation (e.g. 'notion_poll'), not
+// the Notion page's own Type property — kept as a separate, later
+// `taskType` argument (optional; the Sync Log's 7th column) to avoid that
+// exact confusion. taskWasEverReconciledAsTask_ depends on this column
+// only ever being populated with a genuine, current Type observation.
+function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType) {
   const sheet = ensureSyncLogSheet_();
-  sheet.appendRow([id || '', type || '', taskId || '', status || '', receivedAt || new Date(), outcome || '']);
+  sheet.appendRow([id || '', source || '', taskId || '', status || '', receivedAt || new Date(), outcome || '', taskType || '']);
 }
 
 // True if this Task page's MOST RECENT Sync Log observation as Type=Story
@@ -1999,9 +2004,26 @@ function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
 // the next observed edit. Only a page still In Progress at its *last*
 // Story observation carries the real risk this function exists to catch:
 // nothing about remaining continuously In Progress across a Type change
-// would ever prompt Started At to be refreshed. The Sync Log rows are
-// scanned in their natural append-only chronological order, so the last
-// matching row encountered is, by construction, the most recent one.
+// would ever prompt Started At to be refreshed.
+//
+// Looks at this Task's single MOST RECENT Sync Log row overall — Story-
+// marked or not — rather than the most recent Story-marked row specifically
+// — Codex-reported gap on an earlier version of this same fix: taking the
+// last Story-marked row's own Status ignores any LATER, non-Story row in
+// between, e.g. a Story last seen In Progress that gets reclassified to
+// Task and left idle (`Status = Ready`) in the same edit, reconciled once
+// while idle, and only later actually begins In Progress — the old logic
+// would still find that stale In-Progress Story row as the "last" Story
+// observation and wrongly distrust the later poll's genuinely fresh
+// Started At, since no NEWER Story-marked row ever gets written to clear
+// it. Taking the single most recent row overall self-corrects: once any
+// later poll observes the page through the ordinary Task path (any Status,
+// even idle), that row becomes the most recent one and the carryover is
+// gone — only a page whose most recent observation, period, is itself a
+// Story-marked one with Status = In Progress still carries the risk. The
+// Sync Log rows are scanned in their natural append-only chronological
+// order, so the last matching row encountered is, by construction, the
+// most recent one.
 //
 // Scans the Sync Log's full, unboundedly-growing history on every call —
 // callers must gate this behind allEvents.length === 0 (see the one call
@@ -2011,40 +2033,60 @@ function storyConversionHappenedWhileInProgress_(taskId) {
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
-  const rows = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
-  let lastKnownStoryStatus = null;
+  const rows = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+  let mostRecentRow = null;
   rows.forEach(function (row) {
     if (row[2] !== taskId) return;
-    const outcome = String(row[5] || '');
-    if (outcome === 'story_excluded' || outcome.indexOf('archived_story_event:') === 0) {
-      lastKnownStoryStatus = row[3];
-    }
+    mostRecentRow = row;
   });
-  return lastKnownStoryStatus === DEFAULTS.START_STATUS;
+  if (!mostRecentRow) return false;
+  const outcome = String(mostRecentRow[5] || '');
+  const wasStoryObservation = outcome === 'story_excluded' || outcome.indexOf('archived_story_event:') === 0;
+  return wasStoryObservation && mostRecentRow[3] === DEFAULTS.START_STATUS;
 }
 
 // True if this Task page was ever reconciled through the ordinary Task
-// path (reconcileAuthoritativeTimeEvents_), i.e. its Type read something
-// other than Story on at least one prior poll — the mirror-image check to
+// path (reconcileAuthoritativeTimeEvents_) with an explicit, POST-UPGRADE
+// record of what its Type actually was — the mirror-image check to
 // storyConversionHappenedWhileInProgress_ above, used by
 // reconcileStoryTask_ to tell genuine Task-era Time Events (created while
 // this exact page really was a Task, now attached to a page reclassified
-// TO Story) apart from pre-fix legacy stray data (which, by construction,
-// could only ever have accumulated while every poll that touched the page
-// already saw Type = Story — a Task-typed page has never once been allowed
-// to skip past reconcileAuthoritativeTimeEvents_). Any Sync Log Outcome for
-// this Task ID that is NOT one of the Story path's own two markers proves
-// at least one such poll happened.
+// TO Story) apart from pre-fix legacy stray data.
+//
+// Deliberately NOT inferred from the absence of a Story-path Outcome
+// marker alone — Codex-reported gap in an earlier version of this fix: on
+// an EXISTING LIVE DEPLOYMENT being upgraded to this whole BUG-ADP-TTE-01
+// revision, the OLD reconciler had no Type awareness at all, so it ran
+// EVERY page — including genuine Stories — through
+// reconcileAuthoritativeTimeEvents_ and logged perfectly ordinary Task-path
+// Outcomes (`opened:`, `closed:`, `no_change:`, ...) for them. Those old
+// rows are exactly the ones proving nothing: they predate Type-based
+// routing entirely, so "not a Story-path Outcome" was never actually
+// evidence the page wasn't a Story — it only meant Type wasn't checked
+// yet. Inferring Task-era history from their mere presence would preserve
+// or close precisely the legacy bogus events this whole exclusion exists
+// to archive, on precisely the pages most likely to have them (an existing
+// deployment's pre-fix Stories, the common case per reconcileStoryTask_'s
+// own comment) — reintroducing the original double-counting bug through
+// the fix meant to prevent losing real data.
+//
+// logSnapshot_'s Type column (added by this fix) is only ever populated by
+// THIS revision's own reconcileTaskPage_, so its mere presence already
+// proves the row is post-upgrade — a pre-upgrade row appended by the old
+// logSnapshot_ (six positional arguments, no Type) reads back as `''` for
+// this column exactly like any other cell beyond what was written,
+// correctly failing the check below rather than being misread as `Story`
+// or anything else specific.
 function taskWasEverReconciledAsTask_(taskId) {
   if (!taskId) return false;
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
-  const rows = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+  const rows = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
   return rows.some(function (row) {
     if (row[2] !== taskId) return false;
-    const outcome = String(row[5] || '');
-    return outcome !== 'story_excluded' && outcome.indexOf('archived_story_event:') !== 0;
+    const recordedType = String(row[6] || '');
+    return Boolean(recordedType) && recordedType !== 'Story';
   });
 }
 
@@ -2072,8 +2114,8 @@ function ensureSyncLogSheet_() {
     sheet = ss.insertSheet(DEFAULTS.SYNC_LOG_SHEET);
     sheet.hideSheet();
   }
-  sheet.getRange(1, 1, 1, 6).setValues([[
-    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome'
+  sheet.getRange(1, 1, 1, 7).setValues([[
+    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome', 'Type'
   ]]);
   return sheet;
 }
