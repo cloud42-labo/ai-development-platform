@@ -2760,14 +2760,21 @@ test('a Task reclassified to Story preserves genuine Task-era Time Events instea
   // closed one left completely untouched — neither archived away as
   // though it were pre-fix bogus stray data.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dbb01';
+  // Each event's own Note carries the Snapshot= marker from whichever poll
+  // most recently wrote to it — eventWasTouchedDuringTaskExecution_ looks
+  // this up directly on the event, not the page, so the fixture must tie
+  // each event to its own Sync Log row rather than merely seeding one for
+  // the Task ID.
   const openEvent = eventPage('evt-open-task-era', {
     actor: 'Claude',
     startedAt: '2026-08-28T00:00:00.000Z',
+    note: 'Snapshot=snap-task-era-open',
   });
   const closedEvent = eventPage('evt-closed-task-era', {
     actor: 'Claude',
     startedAt: '2026-08-20T00:00:00.000Z',
     endedAt: '2026-08-20T02:00:00.000Z',
+    note: 'Snapshot=snap-task-era-closed',
   });
   const conversionEdit = '2026-08-30T05:00:00.000Z';
   const task = taskPage(taskId, {
@@ -2781,13 +2788,18 @@ test('a Task reclassified to Story preserves genuine Task-era Time Events instea
     tasks: [task],
     events: [openEvent, closedEvent],
   });
-  // Seed proof this exact page was reconciled through the ordinary Task
-  // path on some earlier poll, with an explicit post-upgrade Type record
-  // — the same Outcome shape (and Type column) reconcileTaskPage_ itself
-  // would have logged via logSnapshot_.
+  // Seed proof each specific event was itself touched by the ordinary Task
+  // path, with an explicit post-upgrade Type record — the same Outcome
+  // shape (and Type column) reconcileTaskPage_ itself would have logged
+  // via logSnapshot_, keyed by the exact Snapshot ID each event's own Note
+  // carries above.
   sandbox.logSnapshot_(
-    'snap-task-era', 'notion_poll', taskId, 'In Progress',
+    'snap-task-era-open', 'notion_poll', taskId, 'In Progress',
     new Date('2026-08-28T00:00:00.000Z'), 'opened:' + openEvent.id, 'Task'
+  );
+  sandbox.logSnapshot_(
+    'snap-task-era-closed', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-20T00:00:00.000Z'), 'opened:' + closedEvent.id, 'Task'
   );
 
   const summary = sandbox.pollTaskChanges();
@@ -2846,17 +2858,19 @@ test('a pre-upgrade legacy Story\'s old Task-path Sync Log rows are not mistaken
   // awareness at all and ran EVERY page — including genuine Stories —
   // through the ordinary Task path, logging perfectly ordinary Outcomes
   // (opened:, closed:, no_change:, ...) for them, with no Type column
-  // (that column didn't exist yet). taskWasEverReconciledAsTask_ must not
-  // mistake those pre-upgrade rows for proof of genuine Task-era history —
-  // otherwise a Story's own pre-fix bogus stray event would be preserved
-  // or closed instead of archived and purged, reintroducing exactly the
-  // double-counting this whole exclusion exists to stop, on precisely the
-  // common case (an existing deployment's pre-fix Stories).
+  // (that column didn't exist yet). eventWasTouchedDuringTaskExecution_
+  // must not mistake this event's own tie to that pre-upgrade row for
+  // proof of genuine Task-era history — otherwise a Story's own pre-fix
+  // bogus stray event would be preserved or closed instead of archived and
+  // purged, reintroducing exactly the double-counting this whole exclusion
+  // exists to stop, on precisely the common case (an existing deployment's
+  // pre-fix Stories).
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee99';
   const strayEvent = eventPage('evt-legacy-story-stray', {
     actor: 'Claude',
     startedAt: '2026-08-01T00:00:00.000Z',
     endedAt: '2026-08-05T00:00:00.000Z',
+    note: 'Snapshot=snap-pre-upgrade',
   });
   const task = taskPage(taskId, {
     status: 'Done',
@@ -2866,10 +2880,11 @@ test('a pre-upgrade legacy Story\'s old Task-path Sync Log rows are not mistaken
     type: 'Story',
   });
   const { sandbox, fetchLog } = harness({ tasks: [task], events: [strayEvent] });
-  // Simulate an OLD, pre-upgrade Sync Log row for this same page: an
-  // ordinary Task-path Outcome (from before Type-based routing existed),
-  // with no Type column populated — exactly what the old logSnapshot_
-  // (six positional arguments) would have written.
+  // Simulate an OLD, pre-upgrade Sync Log row for exactly the Snapshot ID
+  // this event's own Note carries: an ordinary Task-path Outcome (from
+  // before Type-based routing existed), with no Type column populated —
+  // exactly what the old logSnapshot_ (six positional arguments) would
+  // have written.
   sandbox.logSnapshot_(
     'snap-pre-upgrade', 'notion_poll', taskId, 'In Progress',
     new Date('2026-08-01T00:05:00.000Z'), 'opened:' + strayEvent.id
@@ -2927,5 +2942,64 @@ test('an idle Task observation after a Story\'s In-Progress spell clears the sta
     creates[0].properties['Started At'].date.start,
     freshStart,
     'expected the fresh Started At to be trusted -- the intervening idle Task observation should have cleared the stale In-Progress Story carryover'
+  );
+});
+
+test('a page briefly observed as an idle Task does not retroactively legitimize an untouched legacy Story event', () => {
+  // Codex-reported gap (P1): the page-level taskWasEverReconciledAsTask_
+  // was replaced with the per-event eventWasTouchedDuringTaskExecution_
+  // for exactly this reason. A page can be observed as an idle Task
+  // (Type = Task, Status = Ready, say) and have that observation logged
+  // with a genuine post-upgrade Type — but if there is nothing open to
+  // close and nothing new to open for THIS specific pre-existing event at
+  // that moment, the observation never writes anything to the event's own
+  // Note at all. Proving the PAGE was once seen as Task must not be
+  // enough to preserve an event that observation never actually touched:
+  // this event's own Snapshot= still points at an old, pre-upgrade row
+  // with no Type recorded, exactly like a legacy Story event that merely
+  // happens to still be attached to a page that later, briefly, looked
+  // like a Task.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dgg01';
+  // Already closed before the later idle-Task observation, so that
+  // observation (Status = Ready, nothing open to close) never touches
+  // this event's own Note.
+  const legacyClosedEvent = eventPage('evt-legacy-untouched', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
+    note: 'Snapshot=snap-pre-upgrade-close',
+  });
+  const task = taskPage(taskId, {
+    status: 'Backlog',
+    agent: 'Claude Opus',
+    lastEdited: '2026-09-04T05:00:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [legacyClosedEvent] });
+  // This event's own Snapshot=: a pre-upgrade row, no Type column — exactly
+  // what an old legacy event looks like.
+  sandbox.logSnapshot_(
+    'snap-pre-upgrade-close', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-01T00:05:00.000Z'), 'closed:' + legacyClosedEvent.id
+  );
+  // A LATER, genuinely post-upgrade Task-typed observation of the PAGE
+  // itself — but one that never touches this specific event (Status =
+  // Ready, the event is already closed, nothing open to close, nothing
+  // new to open).
+  sandbox.logSnapshot_(
+    'snap-idle-task-page', 'notion_poll', taskId, 'Ready',
+    new Date('2026-08-15T00:00:00.000Z'), 'no_change:Ready', 'Task'
+  );
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-legacy-untouched');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-untouched');
+  assert.equal(patches.length, 1);
+  assert.equal(
+    JSON.parse(patches[0].options.payload).archived,
+    true,
+    'expected the untouched legacy event to still be archived -- the page-level idle Task observation never touched this event itself'
   );
 });

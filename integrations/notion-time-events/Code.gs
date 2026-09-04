@@ -646,28 +646,27 @@ function reconcileTaskPage_(task) {
 // are supported symmetrically (see storyConversionHappenedWhileInProgress_ for the
 // mirror-image Story-to-Task case), so a page can just as well go the
 // other way, FROM a real executable Task WITH legitimate Time Events TO
-// Type = Story. Every event this function sees for such a page was created
-// by the ordinary reconcileAuthoritativeTimeEvents_ path while this exact
-// page genuinely was a Task — real, completed or in-flight work — and
-// archiving it outright would erase that work the moment someone
-// reclassifies the page. taskWasEverReconciledAsTask_ distinguishes the
-// two cases using the same durable Sync Log this file already relies on
-// for the mirror case: any Outcome NOT stamped by this Story path itself
-// (`story_excluded`/`archived_story_event:`) proves at least one earlier
-// poll saw this exact page through the Task path, i.e. Type genuinely was
-// not Story then — only possible if the events attached to it now are
-// real Task-era history, not pre-fix stray data (which, by construction,
-// could ONLY have accumulated while Type already read Story on every poll
-// that touched it — a Task-typed page has never once been allowed to skip
-// straight past reconcileAuthoritativeTimeEvents_).
+// Type = Story. An event genuinely created (or touched) by the ordinary
+// reconcileAuthoritativeTimeEvents_ path while this exact page really was
+// a Task — real, completed or in-flight work — must never be archived
+// outright the moment someone reclassifies the page.
+// eventWasTouchedDuringTaskExecution_ decides this per EVENT, not per
+// page — Codex-reported gap on an earlier, page-level version of this
+// same fix: a page can be observed as an idle Task (Type = Task, e.g.
+// Status = Ready) WITHOUT that observation ever touching a specific
+// PRE-EXISTING event's own Note at all (nothing open to close, nothing
+// new to open) — proving the PAGE was once seen as Task proves nothing
+// about whether THIS event specifically was created or touched during
+// that window, vs. being a pre-upgrade legacy Story event that merely
+// happens to still be attached to a page that later, briefly, looked
+// like a Task.
 function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when) {
   const events = queryNotionTimeEventsForTask_(taskId);
   if (!events.length) return 'story_excluded';
 
-  const hasLegitimateTaskHistory = taskWasEverReconciledAsTask_(taskId);
   const actions = [];
   events.forEach(function (eventPage) {
-    if (hasLegitimateTaskHistory) {
+    if (eventWasTouchedDuringTaskExecution_(eventPage)) {
       // Preserve, never erase: an open Task-era interval is closed at the
       // conversion boundary exactly like any other Task leaving `In
       // Progress` (real work, real duration, correctly stopped from
@@ -1972,8 +1971,8 @@ function hasProcessedSnapshot_(snapshotId) {
 // `source` is what triggered this reconciliation (e.g. 'notion_poll'), not
 // the Notion page's own Type property — kept as a separate, later
 // `taskType` argument (optional; the Sync Log's 7th column) to avoid that
-// exact confusion. taskWasEverReconciledAsTask_ depends on this column
-// only ever being populated with a genuine, current Type observation.
+// exact confusion. eventWasTouchedDuringTaskExecution_ depends on this
+// column only ever being populated with a genuine, current Type observation.
 function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType) {
   const sheet = ensureSyncLogSheet_();
   sheet.appendRow([id || '', source || '', taskId || '', status || '', receivedAt || new Date(), outcome || '', taskType || '']);
@@ -2045,17 +2044,30 @@ function storyConversionHappenedWhileInProgress_(taskId) {
   return wasStoryObservation && mostRecentRow[3] === DEFAULTS.START_STATUS;
 }
 
-// True if this Task page was ever reconciled through the ordinary Task
-// path (reconcileAuthoritativeTimeEvents_) with an explicit, POST-UPGRADE
-// record of what its Type actually was — the mirror-image check to
-// storyConversionHappenedWhileInProgress_ above, used by
-// reconcileStoryTask_ to tell genuine Task-era Time Events (created while
-// this exact page really was a Task, now attached to a page reclassified
-// TO Story) apart from pre-fix legacy stray data.
+// True if THIS SPECIFIC event's own most recent `Snapshot=` marker (see
+// parseNoteMeta_ — stamped by whichever poll most recently actually wrote
+// to this event's Note: its creation, or a later close/re-close) maps to
+// a Sync Log row with an explicit, POST-UPGRADE, non-Story `Type`
+// recorded. Used by reconcileStoryTask_ to tell genuine Task-era Time
+// Events (created or touched while this exact page really was a Task,
+// now attached to a page reclassified TO Story) apart from pre-fix
+// legacy stray data.
 //
-// Deliberately NOT inferred from the absence of a Story-path Outcome
-// marker alone — Codex-reported gap in an earlier version of this fix: on
-// an EXISTING LIVE DEPLOYMENT being upgraded to this whole BUG-ADP-TTE-01
+// Deliberately PER EVENT, not per Task page — Codex-reported gap on an
+// earlier, page-level version of this same fix (then named
+// taskWasEverReconciledAsTask_): a page can be observed as an idle Task
+// (Type = Task, e.g. Status = Ready) WITHOUT that observation ever
+// touching a specific pre-existing event's own Note at all — nothing open
+// to close, nothing new to open, so nothing about that poll gets written
+// to the event itself. Proving the PAGE was once seen as Task proved
+// nothing about whether THIS event specifically was created or touched
+// during that window; the page-level version would preserve a pre-upgrade
+// legacy Story event forever, the instant its page was ever glimpsed as
+// Task even in passing, defeating the whole exclusion.
+//
+// Also deliberately NOT inferred from the absence of a Story-path Outcome
+// marker alone — Codex-reported gap in an even earlier version: on an
+// EXISTING LIVE DEPLOYMENT being upgraded to this whole BUG-ADP-TTE-01
 // revision, the OLD reconciler had no Type awareness at all, so it ran
 // EVERY page — including genuine Stories — through
 // reconcileAuthoritativeTimeEvents_ and logged perfectly ordinary Task-path
@@ -2063,31 +2075,26 @@ function storyConversionHappenedWhileInProgress_(taskId) {
 // rows are exactly the ones proving nothing: they predate Type-based
 // routing entirely, so "not a Story-path Outcome" was never actually
 // evidence the page wasn't a Story — it only meant Type wasn't checked
-// yet. Inferring Task-era history from their mere presence would preserve
-// or close precisely the legacy bogus events this whole exclusion exists
-// to archive, on precisely the pages most likely to have them (an existing
-// deployment's pre-fix Stories, the common case per reconcileStoryTask_'s
-// own comment) — reintroducing the original double-counting bug through
-// the fix meant to prevent losing real data.
-//
-// logSnapshot_'s Type column (added by this fix) is only ever populated by
-// THIS revision's own reconcileTaskPage_, so its mere presence already
-// proves the row is post-upgrade — a pre-upgrade row appended by the old
-// logSnapshot_ (six positional arguments, no Type) reads back as `''` for
-// this column exactly like any other cell beyond what was written,
+// yet. logSnapshot_'s Type column (added by this fix) is only ever
+// populated by THIS revision's own reconcileTaskPage_, so its mere
+// presence already proves the row is post-upgrade — a pre-upgrade row (or
+// one appended by the old six-argument logSnapshot_) reads back as `''`
+// for this column exactly like any other cell beyond what was written,
 // correctly failing the check below rather than being misread as `Story`
 // or anything else specific.
-function taskWasEverReconciledAsTask_(taskId) {
-  if (!taskId) return false;
+function eventWasTouchedDuringTaskExecution_(eventPage) {
+  const snapshotId = parseNoteMeta_(propertyText_(eventPage.properties.Note)).snapshotId;
+  if (!snapshotId) return false;
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
   const rows = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
-  return rows.some(function (row) {
-    if (row[2] !== taskId) return false;
-    const recordedType = String(row[6] || '');
-    return Boolean(recordedType) && recordedType !== 'Story';
+  const match = rows.find(function (row) {
+    return row[0] === snapshotId;
   });
+  if (!match) return false;
+  const recordedType = String(match[6] || '');
+  return Boolean(recordedType) && recordedType !== 'Story';
 }
 
 function ensureProjectionHeaders_() {
