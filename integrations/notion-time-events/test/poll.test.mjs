@@ -2598,3 +2598,101 @@ test('archiving a Story\'s Time Event also purges its Sheet projection row, not 
   assert.equal(archived, true, 'expected the event to actually be archived');
   assert.equal(sheet.getLastRow(), 1, 'expected the stale Sheet row to be purged, leaving only the header');
 });
+
+test('archiveStoryTimeEvent_ purges the Sheet row before archiving in Notion, so a failed/interrupted archive still leaves it purged', () => {
+  // Codex-reported gap on the purge fix itself: archiving in Notion and
+  // purging the Sheet row are two separate remote writes, not one
+  // transaction. If the archive happened first and then Apps Script died
+  // (or the Sheet write simply failed) before the purge ran, a retry would
+  // find nothing to do — the event is already excluded from
+  // queryNotionTimeEventsForTask_'s results the instant it's archived, so
+  // archiveStoryTimeEvent_ would never be called for it again, and the
+  // stale row would linger forever. Purging first makes an interruption
+  // between the two writes safe: this test simulates the Notion archive
+  // itself failing (HTTP 500) and asserts the Sheet row was still purged
+  // before that failure — proving the ordering, not just the outcome of a
+  // fully successful run (already covered above).
+  const eventId = 'evt-story-projected-2';
+  let patchCalled = false;
+  const fetchStub = (url, options) => {
+    const method = String((options && options.method) || 'get').toUpperCase();
+    if (method === 'PATCH') {
+      patchCalled = true;
+      return { getResponseCode: () => 500, getContentText: () => '{"message":"simulated failure"}' };
+    }
+    return { getResponseCode: () => 200, getContentText: () => '{}' };
+  };
+  const { sandbox, spreadsheet } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: fetchStub,
+  });
+  const sheet = spreadsheet.getSheetByName('Time Events');
+  sheet.appendRow([
+    'Event ID', 'Task ID', 'Task Title', 'Actor', 'Started At', 'Ended At',
+    'Duration (h)', 'Start Status', 'End Status', 'Changed By', 'Notion URL',
+    'Source Snapshot ID', 'Recorded At',
+  ]);
+  sheet.appendRow([
+    eventId, 'some-task-id', 'T', 'Claude', '2026-08-12T12:42:00.000Z',
+    '2026-08-20T09:00:00.000Z', 185, 'In Progress', 'Done', '', '', '', new Date(),
+  ]);
+
+  assert.throws(() => {
+    sandbox.archiveStoryTimeEvent_({ id: eventId, properties: { Note: { rich_text: [] } } }, 'user:1', 'snap-1');
+  }, /Notion API failed/);
+
+  assert.equal(patchCalled, true, 'expected the Notion archive PATCH to actually have been attempted');
+  assert.equal(sheet.getLastRow(), 1, 'expected the Sheet row to already be purged even though the Notion archive failed');
+});
+
+test('a Task reclassified from Story does not trust its stale Story-era Started At', () => {
+  // Codex-reported gap: a page that was Type=Story before being reclassified
+  // as Task carries no Time Event history of its own by the time this call
+  // sees it — reconcileStoryTask_ already archived every event the Story
+  // ever accumulated, and an archived page never resurfaces in
+  // queryNotionTimeEventsForTask_'s results. So the "first-ever event"
+  // branch below finds allEvents empty exactly like it would for a
+  // genuinely brand-new Task, and would otherwise unconditionally trust the
+  // Task's own Started At — but here that Started At (2026-08-12, over
+  // three weeks earlier) still reflects when this page first went In
+  // Progress AS A STORY, not when its now-executable Task life began. The
+  // fix (taskWasEverReconciledAsStory_) uses this script's own Sync Log —
+  // the durable record reconcileStoryTask_ itself wrote every time this
+  // exact page was reconciled as a Story — to detect that history and
+  // refuse to trust Started At, falling back to the observed edit time of
+  // this exact reclassification instead.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-09-04T05:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Task',
+    })],
+    // This Task's own event history is empty — its Story-era events were
+    // already archived away and no longer surface in a query, exactly as a
+    // live reclassification would look.
+    noEventsForTaskIds: [taskId],
+  });
+  // Seed the Sync Log with the same Outcome marker reconcileStoryTask_
+  // itself writes, proving this exact page was reconciled as a Story on a
+  // prior poll.
+  sandbox.logSnapshot_(
+    'snap-story-1', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-30T00:00:00.000Z'), 'story_excluded'
+  );
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /^opened:/);
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.equal(
+    created.properties['Started At'].date.start,
+    '2026-09-04T05:00:00.000Z',
+    'expected the event to start at the Story-to-Task reclassification edit, not the stale Story-era Started At'
+  );
+});

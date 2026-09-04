@@ -657,7 +657,23 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId) {
 // the event's row from the Sheet projection outright (see
 // reconcileStoryTask_'s comment for why a stale row there matters, not
 // just a cosmetic leftover).
+//
+// Purges the Sheet row BEFORE archiving in Notion, not after — Codex-
+// reported gap in an earlier version of this fix: this whole operation is
+// two separate remote writes, not one transaction, so Apps Script can be
+// terminated (or the Sheet write can simply fail) between them. Archiving
+// first would leave a retry with nothing to recover from: the event is
+// already excluded from queryNotionTimeEventsForTask_'s results the moment
+// it is archived (see reconcileStoryTask_'s comment), so a subsequent poll
+// would never call this function for it again, and the stale Sheet row
+// would linger forever, permanently inflating the Summary tab totals this
+// fix exists to protect. Purging first makes the interruption safe instead:
+// purgeSheetProjectionRow_ is already a no-op when the row is absent, so a
+// retry that reaches this function again for the same still-unarchived
+// event (still visible in queryNotionTimeEventsForTask_) simply re-attempts
+// the purge (harmless) and then the archive — converging either way.
 function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
+  purgeSheetProjectionRow_(eventPage.id);
   const existingNote = propertyText_(eventPage.properties.Note);
   const marker = buildNote_({ reason: 'story_excluded', snapshotId: snapshotId, changedBy: changedBy });
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
@@ -666,7 +682,6 @@ function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
       Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
     },
   });
-  purgeSheetProjectionRow_(eventPage.id);
 }
 
 // Operator escape hatch for an EXISTING live deployment being upgraded to
@@ -1023,7 +1038,18 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         ? (latestHistoricalTimestamp && latestHistoricalTimestamp.getTime() > when.getTime() ? latestHistoricalTimestamp : when)
         : latestHistoricalTimestamp;
       const taskStartedAt = propertyDate_(task.properties['Started At']);
-      const trustedTaskStart = taskStartedAt && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime())
+      // A page that was ever Type=Story (see taskWasEverReconciledAsStory_)
+      // must never have its Started At trusted here, however fresh it looks
+      // against allEvents — allEvents is empty for it precisely because its
+      // real history was archived away, not because Started At is reliable.
+      // Fall through to `when` (this observed edit, i.e. the Story-to-Task
+      // reclassification itself) as the execution's start instead, exactly
+      // as Codex's finding suggested: the type-change edit is what actually
+      // begins this Task's own executable life, not whatever Started At
+      // happened to read from its time as a Story.
+      const trustedTaskStart = taskStartedAt
+        && !taskWasEverReconciledAsStory_(taskId)
+        && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime())
         ? taskStartedAt
         : null;
       const startAt = trustedTaskStart || when;
@@ -1871,6 +1897,40 @@ function hasProcessedSnapshot_(snapshotId) {
 function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
   const sheet = ensureSyncLogSheet_();
   sheet.appendRow([id || '', type || '', taskId || '', status || '', receivedAt || new Date(), outcome || '']);
+}
+
+// True if this Task page was ever reconciled through reconcileStoryTask_
+// (i.e. its Type read Story on some prior poll) — Codex-reported gap on
+// BUG-ADP-TTE-01's own fix: a Story carries no Time Event history of its
+// own once reclassified as an executable Task, because reconcileStoryTask_
+// archives every event a Story ever accumulates, and an archived page never
+// resurfaces in queryNotionTimeEventsForTask_'s results (see its own
+// comment). So reconcileAuthoritativeTimeEvents_'s "first-ever event"
+// branch finds allEvents empty for a just-reclassified Task exactly as it
+// would for a genuinely brand-new one, and would otherwise unconditionally
+// trust the Task's own Started At — but for a page that sat In Progress as
+// a Story for days before conversion, that Started At still reflects the
+// STORY's start, not the Task's, so trusting it would attribute the whole
+// prior Story interval to the new Task the moment its first event opens.
+//
+// The Sync Log is this script's own durable record of what it observed
+// every page's Type as on every prior poll: reconcileStoryTask_ is the only
+// code path that ever writes an Outcome of 'story_excluded' or
+// 'archived_story_event:<id>' for a Task ID, so finding either among this
+// Task's own Sync Log rows is authoritative proof this exact page was
+// classified Story at least once — independent of, and unaffected by,
+// Notion's own archived-page exclusion that hides the events themselves.
+function taskWasEverReconciledAsStory_(taskId) {
+  if (!taskId) return false;
+  const sheet = ensureSyncLogSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  const rows = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+  return rows.some(function (row) {
+    if (row[2] !== taskId) return false;
+    const outcome = String(row[5] || '');
+    return outcome === 'story_excluded' || outcome.indexOf('archived_story_event:') === 0;
+  });
 }
 
 function ensureProjectionHeaders_() {

@@ -58,6 +58,18 @@ class FakeSheet {
   getRange(row, column, numRows = 1, numColumns = 1) {
     const sheet = this;
     return {
+      getValues() {
+        const result = [];
+        for (let rowOffset = 0; rowOffset < numRows; rowOffset++) {
+          const source = sheet.rows[row - 1 + rowOffset] || [];
+          const line = [];
+          for (let columnOffset = 0; columnOffset < numColumns; columnOffset++) {
+            line.push(source[column - 1 + columnOffset] !== undefined ? source[column - 1 + columnOffset] : '');
+          }
+          result.push(line);
+        }
+        return result;
+      },
       setValues(values) {
         values.forEach((rowValues, rowOffset) => {
           const target = sheet._cell(row + rowOffset, column + rowValues.length - 1);
