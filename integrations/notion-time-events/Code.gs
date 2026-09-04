@@ -730,7 +730,20 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
       // point is bounding growth, not asserting the guess this sentinel
       // exists to avoid making.
       if (!propertyDate_(eventPage.properties['Ended At'])) {
-        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'ambiguous_provenance_bounded');
+        // Clamped to never precede this event's own Started At — Codex-
+        // reported gap (round 24): `when` is the STORY PAGE's own observed
+        // edit time (authoritativeEditTime_), not this event's. A Time
+        // Event added directly in Notion, attached to the Story via its
+        // own Task relation, does not touch the Story page itself, so
+        // `when` can be older than an event added after the page's last
+        // real edit — closing at `when` in that case would set Ended At
+        // before Started At, a negative duration in Notion and the Sheet
+        // projection. Bounding growth must never manufacture an invalid
+        // interval to do it.
+        const boundaryNoEarlierThanStart = when.getTime() >= eventStartedAt_(eventPage).getTime()
+          ? when
+          : eventStartedAt_(eventPage);
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, boundaryNoEarlierThanStart, 'ambiguous_provenance_bounded');
         actions.push('closed_ambiguous_pre_upgrade_provenance:' + eventPage.id);
         return;
       }
@@ -2519,13 +2532,16 @@ function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType)
 // order, so the last matching row encountered is, by construction, the
 // most recent one.
 //
-// Scans the Sync Log's full, unboundedly-growing history on every call —
-// callers must gate this behind the ordinary freshness check already
-// trusting `Started At` (see the one call site's `taskStartedAtLooksFresh`,
-// and its own comment for why gating on that — not on
-// allEvents.length === 0, an earlier version of the gate — is both correct
-// and still narrow), never call it unconditionally on every ordinary Task
-// open.
+// Scans the Sync Log's history in bounded tail chunks (see
+// SYNC_LOG_TAIL_CHUNK_ROWS below) rather than materializing all of it at
+// once, but callers must still gate this behind the ordinary freshness
+// check already trusting `Started At` (see the one call site's
+// `taskStartedAtLooksFresh`, and its own comment for why gating on that —
+// not on allEvents.length === 0, an earlier version of the gate — is both
+// correct and still narrow), never call it unconditionally on every
+// ordinary Task open: a Task whose most recent Sync Log row genuinely sits
+// far from the end (rare, but possible) still walks the whole log,
+// chunk by chunk.
 // Every per-event action reconcileStoryTask_ can ever push into its
 // comma-joined outcome — used below to recognize a Sync Log row as having
 // been logged while this page's Type read Story. Codex-reported gap
@@ -2553,35 +2569,42 @@ const STORY_RECONCILIATION_ACTION_PREFIXES = [
   'closed_ambiguous_pre_upgrade_provenance:',
 ];
 
+// Bounds each single Sheets transfer this function's tail scan performs —
+// Codex-reported gap (round 24), on the round-23 fix itself: scanning the
+// already-fully-materialized rows array backward and breaking on the first
+// match bounded the JS-side comparison cost, but every call still issued
+// one getRange(...).getValues() covering the ENTIRE Sync Log up front,
+// before that backward loop ever got a chance to exit early — the actual
+// Sheets-transfer/heap cost Codex's finding was about was untouched.
+// Reading in bounded tail chunks instead (this constant's worth of rows at
+// a time, oldest-first within each chunk but chunks themselves walked
+// newest-first) means the common case this function is actually called
+// against — a Task recently active, whose own most recent Sync Log row
+// sits near the end regardless of overall log size — typically resolves
+// within the first chunk, never materializing the rest of the log at all.
+const SYNC_LOG_TAIL_CHUNK_ROWS = 200;
+
 function storyConversionHappenedWhileInProgress_(taskId) {
   if (!taskId) return false;
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
-  const rows = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
-  // Scan from the END, stopping at the first (i.e. most recent) match,
-  // instead of scanning every row and repeatedly overwriting a running
-  // "most recent so far" — Codex-reported gap (round 23): the round-21 fix
-  // widened this function's own gate (taskStartedAtLooksFresh, see the one
-  // call site) from "only a page's first-ever event" to "any ordinary Task
-  // restart with a correctly-refreshed Started At" — the common, expected
-  // case for a legitimate reopen — so this now runs far more often than
-  // before. logSnapshot_ only ever appends, never inserts out of order, so
-  // the most recent row for a given Task ID is the LAST one matching it —
-  // scanning backward and returning on the first hit turns the common case
-  // (a Task recently active, whose own most recent row is near the end
-  // regardless of overall Sync Log size) into an early-exit instead of an
-  // unconditional full pass. This does not shrink the underlying
-  // getRange(...).getValues() transfer itself — reducing that further
-  // would need a persisted per-Task index/side-table, a larger change not
-  // taken here — but meaningfully bounds the per-call JS-side scan cost for
-  // the population this function is actually called against.
   let mostRecentRow = null;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    if (rows[i][2] === taskId) {
-      mostRecentRow = rows[i];
-      break;
+  let chunkEnd = lastRow;
+  while (chunkEnd >= 2 && !mostRecentRow) {
+    const chunkStart = Math.max(2, chunkEnd - SYNC_LOG_TAIL_CHUNK_ROWS + 1);
+    const chunkRows = sheet.getRange(chunkStart, 1, chunkEnd - chunkStart + 1, 7).getValues();
+    // Scan this chunk from its own end, stopping at the first (i.e. most
+    // recent) match — logSnapshot_ only ever appends, never inserts out of
+    // order, so within any one chunk the most recent row for this Task ID
+    // is the LAST one matching it.
+    for (let i = chunkRows.length - 1; i >= 0; i--) {
+      if (chunkRows[i][2] === taskId) {
+        mostRecentRow = chunkRows[i];
+        break;
+      }
     }
+    chunkEnd = chunkStart - 1;
   }
   if (!mostRecentRow) return false;
   const outcome = String(mostRecentRow[5] || '');

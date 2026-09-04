@@ -3719,3 +3719,90 @@ test('backfillStoryExclusion_ bypasses reconcileTaskPage_\'s ordinary snapshot d
   assert.equal(patches.length, 1);
   assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });
+
+test('closing an ambiguous open event is clamped to never precede the event\'s own Started At', () => {
+  // Codex-reported gap (P2, round 24): `when` passed into reconcileStoryTask_
+  // is the STORY PAGE's own observed edit time (authoritativeEditTime_),
+  // not this event's. A Time Event added directly in Notion (attached via
+  // its own Task relation) never touches the Story page itself, so it can
+  // easily have a Started At AFTER the page's own last real edit. Closing
+  // at the unclamped `when` in that case would set Ended At before
+  // Started At -- a negative duration in both Notion and the Sheet
+  // projection.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dtt01';
+  const pageLastEdited = '2026-08-20T10:00:00.000Z';
+  const eventAddedAfter = '2026-08-25T00:00:00.000Z'; // after pageLastEdited
+  const ambiguousOpenEvent = eventPage('evt-added-after-page-edit', {
+    actor: 'Claude',
+    startedAt: eventAddedAfter,
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: pageLastEdited,
+    startedAt: pageLastEdited,
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousOpenEvent] });
+
+  sandbox.pollTaskChanges();
+
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-added-after-page-edit');
+  assert.equal(patches.length, 1);
+  const payload = JSON.parse(patches[0].options.payload);
+  assert.equal(
+    payload.properties['Ended At'].date.start, eventAddedAfter,
+    'expected Ended At clamped to the event\'s own Started At, not the earlier Story page edit time'
+  );
+});
+
+test('storyConversionHappenedWhileInProgress_ still finds a Task\'s Sync Log row beyond the first tail chunk', () => {
+  // Codex-reported gap (P2, round 24), fixing the round-23 attempt: the
+  // backward JS scan alone still materialized the ENTIRE Sync Log via one
+  // getRange(...).getValues() call before it could exit early. Reading in
+  // bounded tail chunks instead means the common case (a Task recently
+  // active) resolves in the first chunk without ever touching the rest of
+  // the log -- but must still correctly walk further back and find a
+  // match that happens to sit beyond that first chunk.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43duu01';
+  const oldUnrelatedEvent = eventPage('evt-old-unrelated-3', {
+    actor: 'Claude',
+    startedAt: '2026-07-01T00:00:00.000Z',
+    endedAt: '2026-07-01T01:00:00.000Z',
+  });
+  const storyStart = '2026-08-25T00:05:00.000Z';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    startedAt: storyStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [oldUnrelatedEvent] });
+
+  // The target task's own Story observation, logged first (near the top of
+  // the Sync Log).
+  sandbox.logSnapshot_(
+    'snap-story-old-position', 'notion_poll', taskId, 'In Progress',
+    new Date(storyStart), 'story_excluded'
+  );
+  // More than one tail chunk's worth of unrelated rows for OTHER Task IDs,
+  // pushing the target row well beyond the first chunk.
+  for (let i = 0; i < 250; i++) {
+    sandbox.logSnapshot_(
+      'snap-filler-' + i, 'notion_poll', 'unrelated-task-' + i, 'Ready',
+      new Date('2026-08-26T00:00:00.000Z'), 'no_change:Ready'
+    );
+  }
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, conversionEdit,
+    'expected the conversion boundary to be trusted, proving the Story observation beyond the first tail chunk was still found'
+  );
+});
