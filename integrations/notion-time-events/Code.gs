@@ -2457,12 +2457,19 @@ function syncLogRowWriteMs_(sheetRow) {
 //
 // Round 31 tried to resolve this via `snapshotWasEverLogged_` (the close's
 // own snapshot missing from the log ⇒ its poll was interrupted ⇒ prefer
-// the close) — but Codex found a further gap (round 33): the close's own
-// snapshot being missing does NOT prove `logged` is stale. A close's poll
-// can be interrupted before ITS OWN `logSnapshot_`, while a DIFFERENT,
-// LATER poll still completes normally and logs fresh, unrelated status —
-// all inside the same Notion minute. Snapshot presence/absence alone
-// cannot tell those two cases apart.
+// the close) — but Codex found a further gap (round 32/33, two concurrent
+// sessions independently reaching this same PR numbered it differently):
+// the close's own snapshot being missing does NOT prove `logged` is
+// stale. A close's poll can be interrupted before ITS OWN `logSnapshot_`,
+// while a DIFFERENT, LATER poll still completes normally and logs fresh,
+// unrelated status — all inside the same Notion minute. Snapshot
+// presence/absence alone cannot tell those two cases apart, and a first
+// pass at this PR concluded the ambiguity was unresolvable from any data
+// this script has access to and documented it as a Known Limitation
+// instead of fixing it (see git history) — but that conclusion held only
+// because it never considered adding a NEW field: nothing forced this
+// integration to keep inferring order from data collected for other
+// purposes.
 //
 // `Write=`/column H (see `parseNoteMeta_`, `logSnapshot_`) settles this
 // directly instead of inferring it: both sides stamp the real Apps Script
