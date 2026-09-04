@@ -760,7 +760,18 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
       // conversion and was never part of the bug this exclusion exists to
       // fix in the first place.
       if (!propertyDate_(eventPage.properties['Ended At'])) {
-        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'left_in_progress');
+        // Clamped to never precede this event's own Started At — Codex-
+        // reported gap (round 25), the same class of gap as the
+        // ambiguous-close clamp above: `when` is derived from the Task
+        // page's own minute-granular `last_edited_time`, and an event that
+        // opened with a Started At carrying seconds can, within that same
+        // observed minute, read as later than `when` — closing at `when`
+        // in that case would set Ended At before Started At, a negative
+        // duration.
+        const boundaryNoEarlierThanStart = when.getTime() >= eventStartedAt_(eventPage).getTime()
+          ? when
+          : eventStartedAt_(eventPage);
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, boundaryNoEarlierThanStart, 'left_in_progress');
         actions.push('closed_task_era_at_story_conversion:' + eventPage.id);
       }
       return;
@@ -1066,9 +1077,19 @@ function backfillStoryExclusion_() {
 //
 // MUST run once, immediately after deploying, BEFORE backfillStoryExclusion_
 // — so every pre-existing event is flagged (and thus left alone) before
-// backfillStoryExclusion_ could otherwise archive it outright. A fresh
-// deploy has no pre-existing Time Events at all and needs no backfill —
-// every event gets its confirmed `Task Origin=` at creation from day one.
+// backfillStoryExclusion_ could otherwise archive it outright. Run this
+// even on a genuinely fresh deployment, not only an existing one being
+// upgraded — Codex-reported gap (round 25): a fresh deployment has no
+// pre-existing Time Events created BY THIS SCRIPT (every one gets its
+// confirmed `Task Origin=` at creation from day one), but backfillStoryExclusion_
+// also supports a Time Event added directly in Notion, not through this
+// script, at any later point — and that path's own archiving is gated on
+// TASK_ORIGIN_BACKFILL_COMPLETE (see taskOriginBackfillComplete_), which
+// stays false forever if this backfill is skipped as "not needed" on a
+// fresh deploy. A zero-result full drain still sets that flag (see its own
+// "fully drained" branch below), so running this once, even against an
+// empty history, is what unlocks that archive path for any such
+// future stray data — cheap, since there is nothing to scan or flag yet.
 //
 // Queries every page regardless of Type (including pages with no Type set
 // at all): unlike the earlier, Type-dependent design, this backfill's
@@ -1433,7 +1454,18 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
     // work from here forward.
     const ambiguousOpenEvent = sameActor.length && eventProvenanceIsAmbiguous_(sameActor[0]) ? sameActor[0] : null;
     if (ambiguousOpenEvent) {
-      closeNotionTimeEvent_(ambiguousOpenEvent, currentStatus, changedBy, snapshotId, when, 'ambiguous_provenance_restart');
+      // Clamped to never precede this event's own Started At — Codex-
+      // reported gap (round 25), the same class of gap as
+      // reconcileStoryTask_'s own ambiguous-close and confirmed-Task-era-
+      // close clamps: `when` is derived from the Task page's own
+      // minute-granular last_edited_time, and this event's Started At can
+      // carry seconds, so within the same observed minute Started At can
+      // read later than `when` — closing at `when` in that case would set
+      // Ended At before Started At, a negative duration.
+      const restartBoundary = when.getTime() >= eventStartedAt_(ambiguousOpenEvent).getTime()
+        ? when
+        : eventStartedAt_(ambiguousOpenEvent);
+      closeNotionTimeEvent_(ambiguousOpenEvent, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart');
       actions.push('closed_ambiguous_provenance_restart:' + ambiguousOpenEvent.id);
     }
 
