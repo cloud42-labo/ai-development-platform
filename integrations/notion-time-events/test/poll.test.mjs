@@ -7,7 +7,7 @@ const EVENTS_DS = '544b9a17-2653-47aa-b62c-bb52425b3bf2';
 const TASKS_QUERY = 'POST /v1/data_sources/' + TASKS_DS + '/query';
 const EVENTS_QUERY = 'POST /v1/data_sources/' + EVENTS_DS + '/query';
 
-function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T' }) {
+function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T', type = null }) {
   return {
     object: 'page',
     id,
@@ -27,6 +27,11 @@ function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T'
       'Started At': { type: 'date', date: startedAt ? { start: startedAt } : null },
       Result: { type: 'rich_text', rich_text: [] },
       'Completed At': { type: 'date', date: null },
+      // `type` defaults to null (rendered as no Type at all) so every
+      // existing fixture keeps reading as a normal executable Task/Subtask —
+      // only tests that explicitly pass `type: 'Story'` exercise the
+      // Story-exclusion path (BUG-ADP-TTE-01).
+      Type: { type: 'select', select: type ? { name: type } : null },
     },
   };
 }
@@ -220,6 +225,151 @@ test('leaving In Progress with nothing open retroactively stamps the last closed
   // boundary stamp deliberately never backfills it — see the dedicated
   // tests below for why (an earlier version did, and why that was unsafe).
   assert.doesNotMatch(note, /Execution=/);
+});
+
+test('a Story In Progress opens no Time Event (BUG-ADP-TTE-01)', () => {
+  // Type = Story is a rollup over its own child Subtasks/Tasks, not an
+  // execution unit — before this exclusion, a Story sitting In Progress (its
+  // ordinary state for as long as child work is in flight) opened its own
+  // Active Time Event exactly like an executable Task, double-counting hours
+  // already timed on its children.
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T05:10:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+      type: 'Story',
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'story_excluded');
+  assert.equal(requestsTo(fetchLog, 'POST', '/v1/pages').length, 0);
+});
+
+test('a Story\'s stray open Time Event from before the exclusion existed gets archived, not left to linger', () => {
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    // TASK_ORIGIN_BACKFILL_COMPLETE: this event has no Task Origin= marker
+    // (it predates that feature), and reconcileStoryTask_'s archive
+    // fallback now gates on the provenance backfill having fully drained
+    // at least once -- see its own comment (Codex-reported gap, round 19).
+    // Simulates the operator having already run backfillTaskOriginProvenance_
+    // to completion, per the documented upgrade order.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [
+      eventPage('evt-story-stray', { actor: 'Claude', startedAt: '2026-08-12T12:42:00.000Z' }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-story-stray');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-story-stray');
+  assert.equal(patches.length, 1);
+  const payload = JSON.parse(patches[0].options.payload);
+  // Archived, not closed: no Ended At, so no fictitious Duration (h) can
+  // ever compute for this stray interval.
+  assert.equal(payload.archived, true);
+  assert.equal(payload.properties['Ended At'], undefined);
+  const note = payload.properties.Note.rich_text[0].text.content;
+  assert.match(note, /Reason=story_excluded/);
+  // Never re-opened for the same still-In-Progress Story on this same call.
+  assert.equal(requestsTo(fetchLog, 'POST', '/v1/pages').length, 0);
+});
+
+test('an ordinary poll also archives a Story\'s already-closed legacy Time Event, not only open ones', () => {
+  // Codex-reported gap: reconcileStoryTask_ originally filtered to
+  // openEvents only, so a Story that had already left In Progress under
+  // the pre-fix reconciler — the ordinary case for most Stories, since a
+  // Story sitting In Progress forever is the exception — kept its closed,
+  // fictitiously-durationed legacy event untouched even when the Story
+  // itself was later edited and picked up by a normal incremental poll.
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    // See the previous test's comment on TASK_ORIGIN_BACKFILL_COMPLETE.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    tasks: [taskPage(taskId, {
+      status: 'Review',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [
+      eventPage('evt-story-legacy-closed', {
+        actor: 'Claude',
+        startedAt: '2026-08-12T12:42:00.000Z',
+        endedAt: '2026-08-20T09:00:00.000Z',
+      }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-story-legacy-closed');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-story-legacy-closed');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
+});
+
+test('a Story reaching Done needs no Time Event and is never rolled back by the Done gate', () => {
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+      // Deliberately no Result / Completed At — a Story needs none of the
+      // Done-gate evidence an executable Task does.
+    })],
+    noEventsForTaskIds: [taskId],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'story_excluded');
+  // No rollback write to Status, unlike an executable Task's
+  // done_gate_rejected path (enforceDoneGate_ -> updateTaskStatus_).
+  const statusWrites = requestsTo(fetchLog, 'PATCH', '/v1/pages/' + taskId).filter((entry) =>
+    JSON.parse(entry.options.payload).properties && JSON.parse(entry.options.payload).properties.Status
+  );
+  assert.equal(statusWrites.length, 0);
+});
+
+test('re-reading an unchanged Story in the overlap window makes no Notion mutation', () => {
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:10:00.000Z',
+    startedAt: '2026-08-30T05:10:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task] });
+
+  sandbox.pollTaskChanges();
+  const mutationsAfterFirst =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /^duplicate:/);
+  const mutationsAfterSecond =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+  assert.equal(mutationsAfterSecond, mutationsAfterFirst);
 });
 
 test('boundary-stamping a legacy event never backfills Execution=, even when it is this Task\'s own only execution', () => {
@@ -2158,4 +2308,1855 @@ test('a rejected Done rolls Status back with a select write, not a status write'
   assert.equal(patches.length, 1);
   const body = JSON.parse(patches[0].options.payload);
   assert.deepEqual(body.properties.Status, { select: { name: 'Review' } });
+});
+
+test('Type is part of the reconciliation snapshot, so becoming a Story is never masked as a duplicate re-read', () => {
+  // Codex-reported gap: authoritativeSnapshotId_ originally hashed only ID,
+  // last_edited_time, Status and Assigned Agent — not Type. A page edited to
+  // Type = Story without also changing Status/assignee in the same minute as
+  // its previously processed snapshot would then hash identically to that
+  // prior snapshot and be skipped as `duplicate:` before reconcileStoryTask_
+  // ever ran, leaving a stray open event uncleaned until some unrelated
+  // later edit happened to change the hash.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee02';
+  const sameMinute = '2026-08-30T05:10:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: sameMinute,
+    startedAt: sameMinute,
+  });
+  const { sandbox, fetchLog } = harness({
+    // See "a Story's stray open Time Event..." test above for why this is
+    // needed: evt-pre-story has no Task Origin= marker.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    tasks: [task],
+    events: [eventPage('evt-pre-story', { actor: 'Claude', startedAt: sameMinute })],
+  });
+
+  // First poll processes the page as an ordinary Task (Type absent).
+  const first = sandbox.pollTaskChanges();
+  assert.match(first.outcomes[0], /^already_open:/);
+
+  // Type becomes Story with last_edited_time/Status/Assigned Agent all
+  // unchanged, exactly as a same-minute edit looks through Notion's API.
+  task.properties.Type = { type: 'select', select: { name: 'Story' } };
+
+  const second = sandbox.pollTaskChanges();
+
+  // Archived, not preserved: Type was never explicitly recorded as
+  // anything but Story on this page — the first poll's own Sync Log row
+  // carries an EMPTY Type column (Type was absent, propertyText_ reads
+  // ''), which taskWasEverReconciledAsTask_ correctly refuses to count as
+  // proof of genuine Task-era history (see its own comment — an unset
+  // Type is exactly as ambiguous as a pre-upgrade row with no Type column
+  // at all). Contrast with the "preserves genuine Task-era Time Events"
+  // test below, whose fixture explicitly records `type: 'Task'`.
+  assert.equal(second.outcomes[0], 'archived_story_event:evt-pre-story');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-pre-story');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
+});
+
+test('reconciling back to an identical earlier snapshot within one minute is not masked as a duplicate re-read', () => {
+  // Codex-reported gap (round 27): hasProcessedSnapshot_ originally matched
+  // "was this exact snapshot ever logged, at any point in this page's
+  // history" -- not only its most recent one. With Type now part of the
+  // snapshot hash (see the previous test), a page observed as Task/In
+  // Progress, reconciled once as Story (closing/archiving its open event
+  // via reconcileStoryTask_), and then changed back to that identical
+  // Task/In Progress state within the same last_edited_time minute
+  // produces a snapshot byte-identical to the FIRST Task observation
+  // already on file. Matching against "ever seen anywhere in history"
+  // found that old row and skipped this final transition as `duplicate:`
+  // before any reconciliation ran at all -- even though the Story pass in
+  // between had genuinely archived the event, leaving the page stuck In
+  // Progress with no open Time Event until some unrelated later edit
+  // changed the hash.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dff01';
+  const sameMinute = '2026-08-30T05:10:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: sameMinute,
+    startedAt: sameMinute,
+    type: 'Task',
+  });
+  const openEvent = eventPage('evt-round27', { actor: 'Claude', startedAt: sameMinute });
+  const { sandbox, fetchLog } = harness({
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    tasks: [task],
+    events: [openEvent],
+  });
+
+  // First poll: an ordinary Task with an already-open event -- nothing to
+  // do, but this is the exact observation the buggy dedup would later
+  // collide with.
+  const first = sandbox.pollTaskChanges();
+  assert.match(first.outcomes[0], /^already_open:/);
+
+  // Type becomes Story, last_edited_time/Status/Assigned Agent unchanged --
+  // exactly as a same-minute edit looks through Notion's API.
+  task.properties.Type = { type: 'select', select: { name: 'Story' } };
+  const second = sandbox.pollTaskChanges();
+  assert.equal(second.outcomes[0], 'archived_story_event:evt-round27');
+
+  // Reverted back to Task, still the same minute -- Notion now reports the
+  // exact same (id, last_edited_time, Status, Assigned Agent, Type) tuple
+  // as the very first observation above.
+  task.properties.Type = { type: 'select', select: { name: 'Task' } };
+  const third = sandbox.pollTaskChanges();
+
+  assert.doesNotMatch(
+    third.outcomes[0], /^duplicate:/,
+    'expected the Story detour in between to prevent this from being masked as a duplicate of the original Task observation'
+  );
+});
+
+test('backfillStoryExclusion_ queries every Type=Story page regardless of Status, and archives stray open events', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee03';
+  const { sandbox, fetchLog } = harness({
+    // See "a Story's stray open Time Event..." test above for why this is
+    // needed.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-12T12:42:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [eventPage('evt-old-story', { actor: 'Claude', startedAt: '2026-08-12T12:42:00.000Z' })],
+  });
+
+  const summary = sandbox.backfillStoryExclusion_();
+
+  const query = JSON.parse(requestsTo(fetchLog, 'POST', TASKS_DS)[0].options.payload);
+  // Not scoped to Status = In Progress: most Stories on a live deployment
+  // have already left In Progress with a closed, fictitiously-durationed
+  // legacy event under the pre-fix reconciler, and only a Type-only filter
+  // catches those too (see the function's own comment).
+  assert.deepEqual(query.filter, { property: 'Type', select: { equals: 'Story' } });
+  assert.equal(summary.scanned, 1);
+  assert.equal(summary.processed, 1);
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-old-story');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-old-story');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
+});
+
+test('backfillStoryExclusion_ also archives an already-closed legacy Story event, not only open ones', () => {
+  // Codex-reported gap: the reconciler only ever archived openEvents,
+  // never events a Story already had closed under the pre-fix generic
+  // path (real Ended At, a fictitious multi-day Duration (h) already
+  // computed) — those would sit in the authoritative data forever,
+  // uncorrected, since a Status = In Progress-scoped backfill query would
+  // never even see that Story again either.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee06';
+  const { sandbox, fetchLog } = harness({
+    // See "a Story's stray open Time Event..." test above for why this is
+    // needed.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    tasks: [taskPage(taskId, {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-20T10:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [eventPage('evt-legacy-closed-story', {
+      actor: 'Claude',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      endedAt: '2026-08-19T09:00:00.000Z',
+    })],
+  });
+
+  const summary = sandbox.backfillStoryExclusion_();
+
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-legacy-closed-story');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-closed-story');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
+});
+
+test('backfillStoryExclusion_ is a free re-scan once a Story has already been archived out', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee04';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-12T12:42:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [],
+  });
+
+  sandbox.backfillStoryExclusion_();
+  const mutationsAfterFirst =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+
+  const second = sandbox.backfillStoryExclusion_();
+
+  // backfillStoryExclusion_ deliberately bypasses reconcileTaskPage_'s
+  // ordinary snapshot dedup (round 23 — see its own call site comment: a
+  // Time Event can be added directly to an already-reconciled Story
+  // without the Story page's own snapshot ever changing, so relying on
+  // dedup here would leave such an event's archival waiting on an
+  // unrelated page edit that might never come). So the second call here
+  // genuinely re-runs reconcileStoryTask_ rather than short-circuiting on
+  // `duplicate:` — free either way, since there is nothing left to
+  // archive: 'story_excluded' this time, not `duplicate:`.
+  assert.equal(second.outcomes[0], 'story_excluded');
+  const mutationsAfterSecond =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+  assert.equal(mutationsAfterSecond, mutationsAfterFirst);
+});
+
+test('backfillStoryExclusion_ resumes past a truncated prefix instead of re-fetching it forever', () => {
+  // Codex-reported gap: archiving a Story's Time Event does not remove the
+  // Story itself from this query's own Type=Story result set (nothing
+  // about its Type changed), so — before this fix — a truncated call's
+  // unqualified re-run kept re-fetching the identical oldest 50-page
+  // prefix forever, and a Story beyond it could never be reached despite
+  // the "call again to continue" instruction.
+  let pageCalls = 0;
+  const seenFilters = [];
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      pageCalls += 1;
+      seenFilters.push(body.filter);
+      // Force paginateNotionQuery_'s own truncation (QUERY_PAGE_SAFETY_LIMIT
+      // = 50 pages) by always claiming more exist, one Story per page.
+      const idx = pageCalls;
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dg' + String(idx).padStart(3, '0'), {
+        status: 'In Progress',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-01T00:' + String(idx).padStart(2, '0') + ':00.000Z',
+        startedAt: '2026-08-01T00:00:00.000Z',
+        type: 'Story',
+      });
+      return { results: [task], has_more: true, next_cursor: 'cursor-' + idx };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  const firstRun = sandbox.backfillStoryExclusion_();
+
+  assert.equal(firstRun.truncated, true);
+  assert.equal(firstRun.scanned, 50); // QUERY_PAGE_SAFETY_LIMIT
+  assert.deepEqual(seenFilters[0], { property: 'Type', select: { equals: 'Story' } }); // first call: no resume clause yet
+  const resumeCursor = scriptProps.get('STORY_EXCLUSION_RESUME_CURSOR');
+  assert.ok(resumeCursor, 'expected a resume cursor to be persisted after a truncated backfill');
+
+  sandbox.backfillStoryExclusion_();
+
+  // The second call's query must be filtered to on-or-after the persisted
+  // resume cursor — not the same bare single-clause filter as the first
+  // call, which would just return the identical 50-page prefix again.
+  const secondCallFilter = seenFilters[seenFilters.length - 50];
+  assert.ok(secondCallFilter.and, 'expected the resumed call to use a compound and-filter');
+  const onOrAfterClause = secondCallFilter.and.find((f) => f.timestamp === 'last_edited_time');
+  assert.equal(onOrAfterClause.last_edited_time.on_or_after, resumeCursor);
+});
+
+test('backfillStoryExclusion_ bounds its own pagination phase, reserving budget to still process and checkpoint what it fetched', () => {
+  // Codex-reported gap: the pagination call had no wall-clock bound of its
+  // own, only QUERY_PAGE_SAFETY_LIMIT (50 pages) — so many matching Stories
+  // or a slow Notion response could spend this whole call's entire
+  // MAX_RUN_DURATION_MS budget just fetching pages, leaving the processing
+  // loop below no time to reconcile or checkpoint a single Story. Nothing
+  // processed means no `processed` item to derive a checkpoint from, so
+  // every retry would repeat the identical fetch-only pass forever.
+  let pageCalls = 0;
+  const routes = {
+    [TASKS_QUERY]: () => {
+      pageCalls += 1;
+      const idx = pageCalls;
+      const ts = '2026-08-01T00:' + String(idx).padStart(2, '0') + ':00.000Z';
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43dh' + String(idx).padStart(3, '0'), {
+        status: 'In Progress', agent: 'Claude Opus', lastEdited: ts, startedAt: ts, type: 'Story',
+      });
+      // Far more pages available (20) than the fake clock below will let
+      // pagination actually reach — proves the deadline, not exhaustion of
+      // available data, is what stops it here.
+      return { results: [task], has_more: idx < 20, next_cursor: 'cursor-' + idx };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  // 25 simulated seconds per Date() read. Pagination's own deadline check
+  // (MAX_RUN_DURATION_MS / 2 = 120s past runStartedAt) lands partway
+  // through the run, well before all 20 available pages are fetched and
+  // well before MAX_RUN_DURATION_MS (240s) itself elapses — leaving real
+  // budget behind for the processing loop.
+  let ticks = 0;
+  const now = () => {
+    ticks += 1;
+    return ticks * 25 * 1000;
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+    now,
+  });
+
+  const summary = sandbox.backfillStoryExclusion_();
+
+  assert.equal(summary.truncated, true);
+  assert.ok(pageCalls < 20, 'expected the deadline, not exhausting available pages, to stop pagination: fetched ' + pageCalls);
+  // The real point of the fix: budget reserved for processing must not be
+  // zero just because pagination itself got cut short.
+  assert.ok(summary.processed > 0, 'expected the processing loop to still make progress after a bounded pagination phase');
+  const resumeCursor = scriptProps.get('STORY_EXCLUSION_RESUME_CURSOR');
+  assert.ok(resumeCursor, 'expected a resume checkpoint to be persisted');
+});
+
+test('archiving a Story\'s Time Event also purges its Sheet projection row, not just Notion', () => {
+  // Codex-reported gap: archiving removes the event from Notion's own
+  // queries, so syncTaskProjection_'s ordinary re-sync (which runs right
+  // after reconcileStoryTask_, inside reconcileTaskPage_) never revisits an
+  // already-projected Sheet row to update or delete it. README documents
+  // the Summary tab's own actor totals / open-event counts as derived from
+  // this same projection, so a stale row (Duration (h) already computed,
+  // for a closed legacy event) would keep feeding it the identical
+  // double-counting this fix exists to stop, just moved from Notion to the
+  // Sheet instead of eliminated.
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const eventId = 'evt-story-projected';
+  // A generic events-query stub can't model archival's effect on
+  // subsequent queries (it doesn't track state), so this test needs its
+  // own: real Notion excludes an archived page from later queries the
+  // instant it's archived — including syncTaskProjection_'s own re-query
+  // later in the same reconcileTaskPage_ call — and the test must exercise
+  // that, not just check the archive PATCH was sent.
+  let archived = false;
+  const routes = {
+    [TASKS_QUERY]: () => ({
+      results: [taskPage(taskId, {
+        status: 'Done',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-30T06:00:00.000Z',
+        startedAt: '2026-08-12T12:42:00.000Z',
+        type: 'Story',
+      })],
+      has_more: false,
+    }),
+    [EVENTS_QUERY]: () => ({
+      results: archived ? [] : [eventPage(eventId, {
+        actor: 'Claude',
+        startedAt: '2026-08-12T12:42:00.000Z',
+        endedAt: '2026-08-20T09:00:00.000Z',
+      })],
+      has_more: false,
+    }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    ['PATCH /v1/pages/' + eventId]: () => { archived = true; return {}; },
+    'GET *': () => ({}),
+  };
+  const { sandbox, spreadsheet } = loadCodeGsSandbox({
+    // TASK_ORIGIN_BACKFILL_COMPLETE: see "a Story's stray open Time
+    // Event..." test above for why this is needed -- this event has no
+    // Task Origin= marker.
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    fetch: notionFetchStub(routes),
+  });
+  const sheet = spreadsheet.getSheetByName('Time Events');
+  sheet.appendRow([
+    'Event ID', 'Task ID', 'Task Title', 'Actor', 'Started At', 'Ended At',
+    'Duration (h)', 'Start Status', 'End Status', 'Changed By', 'Notion URL',
+    'Source Snapshot ID', 'Recorded At',
+  ]);
+  sheet.appendRow([
+    eventId, taskId, 'T', 'Claude', '2026-08-12T12:42:00.000Z',
+    '2026-08-20T09:00:00.000Z', 185, 'In Progress', 'Done', '', '', '', new Date(),
+  ]);
+
+  sandbox.pollTaskChanges();
+
+  assert.equal(archived, true, 'expected the event to actually be archived');
+  assert.equal(sheet.getLastRow(), 1, 'expected the stale Sheet row to be purged, leaving only the header');
+});
+
+test('archiveStoryTimeEvent_ purges the Sheet row before archiving in Notion, so a failed/interrupted archive still leaves it purged', () => {
+  // Codex-reported gap on the purge fix itself: archiving in Notion and
+  // purging the Sheet row are two separate remote writes, not one
+  // transaction. If the archive happened first and then Apps Script died
+  // (or the Sheet write simply failed) before the purge ran, a retry would
+  // find nothing to do — the event is already excluded from
+  // queryNotionTimeEventsForTask_'s results the instant it's archived, so
+  // archiveStoryTimeEvent_ would never be called for it again, and the
+  // stale row would linger forever. Purging first makes an interruption
+  // between the two writes safe: this test simulates the Notion archive
+  // itself failing (HTTP 500) and asserts the Sheet row was still purged
+  // before that failure — proving the ordering, not just the outcome of a
+  // fully successful run (already covered above).
+  const eventId = 'evt-story-projected-2';
+  let patchCalled = false;
+  const fetchStub = (url, options) => {
+    const method = String((options && options.method) || 'get').toUpperCase();
+    if (method === 'PATCH') {
+      patchCalled = true;
+      return { getResponseCode: () => 500, getContentText: () => '{"message":"simulated failure"}' };
+    }
+    return { getResponseCode: () => 200, getContentText: () => '{}' };
+  };
+  const { sandbox, spreadsheet } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: fetchStub,
+  });
+  const sheet = spreadsheet.getSheetByName('Time Events');
+  sheet.appendRow([
+    'Event ID', 'Task ID', 'Task Title', 'Actor', 'Started At', 'Ended At',
+    'Duration (h)', 'Start Status', 'End Status', 'Changed By', 'Notion URL',
+    'Source Snapshot ID', 'Recorded At',
+  ]);
+  sheet.appendRow([
+    eventId, 'some-task-id', 'T', 'Claude', '2026-08-12T12:42:00.000Z',
+    '2026-08-20T09:00:00.000Z', 185, 'In Progress', 'Done', '', '', '', new Date(),
+  ]);
+
+  assert.throws(() => {
+    sandbox.archiveStoryTimeEvent_({ id: eventId, properties: { Note: { rich_text: [] } } }, 'user:1', 'snap-1');
+  }, /Notion API failed/);
+
+  assert.equal(patchCalled, true, 'expected the Notion archive PATCH to actually have been attempted');
+  assert.equal(sheet.getLastRow(), 1, 'expected the Sheet row to already be purged even though the Notion archive failed');
+});
+
+test('a Task reclassified from Story does not trust its stale Story-era Started At', () => {
+  // Codex-reported gap: a page that was Type=Story before being reclassified
+  // as Task carries no Time Event history of its own by the time this call
+  // sees it — reconcileStoryTask_ already archived every event the Story
+  // ever accumulated, and an archived page never resurfaces in
+  // queryNotionTimeEventsForTask_'s results. So the "first-ever event"
+  // branch below finds allEvents empty exactly like it would for a
+  // genuinely brand-new Task, and would otherwise unconditionally trust the
+  // Task's own Started At — but here that Started At (2026-08-12, over
+  // three weeks earlier) still reflects when this page first went In
+  // Progress AS A STORY, not when its now-executable Task life began. The
+  // fix (taskWasEverReconciledAsStory_) uses this script's own Sync Log —
+  // the durable record reconcileStoryTask_ itself wrote every time this
+  // exact page was reconciled as a Story — to detect that history and
+  // refuse to trust Started At, falling back to the observed edit time of
+  // this exact reclassification instead.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-09-04T05:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Task',
+    })],
+    // This Task's own event history is empty — its Story-era events were
+    // already archived away and no longer surface in a query, exactly as a
+    // live reclassification would look.
+    noEventsForTaskIds: [taskId],
+  });
+  // Seed the Sync Log with the same Outcome marker reconcileStoryTask_
+  // itself writes, proving this exact page was reconciled as a Story on a
+  // prior poll.
+  sandbox.logSnapshot_(
+    'snap-story-1', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-30T00:00:00.000Z'), 'story_excluded'
+  );
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /^opened:/);
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.equal(
+    created.properties['Started At'].date.start,
+    '2026-09-04T05:00:00.000Z',
+    'expected the event to start at the Story-to-Task reclassification edit, not the stale Story-era Started At'
+  );
+});
+
+test('a Task that already completed one execution after its Story conversion trusts a fresh Started At on a later reopen', () => {
+  // Codex-reported gap on the reclassification fix itself: a page that was
+  // ever Type=Story keeps its Sync Log 'story_excluded' marker on file
+  // forever (old rows are never deleted), so storyConversionHappenedWhileInProgress_
+  // must not keep reporting Story risk long after the page's own first
+  // post-conversion execution completed and closed a real Task-era event —
+  // by then, later, non-Story Sync Log rows exist from the ordinary polls
+  // that observed and closed that execution, and
+  // storyConversionHappenedWhileInProgress_ only ever looks at the SINGLE
+  // MOST RECENT row for this Task ID, which by now is one of those, not
+  // the old Story marker. Without that, a LATER reopen of this same,
+  // by-now-ordinary Task would keep being wrongly suppressed — falling
+  // back to a later observed edit (`when`) instead of trusting the
+  // reopen's own fresh Started At, exactly the "reopened Task" behavior
+  // every other Task already gets (see 'a reopened Task starts its new
+  // interval from the current Started At, not a later observed edit'
+  // above). This is the same fixture shape as that test, plus the old
+  // Story-history marker AND a later, ordinary Sync Log row from the
+  // historical event's own real execution, proving a stale Story marker no
+  // longer matters once a newer, non-Story observation is on file.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa02';
+  const historicalTaskEraEvent = eventPage('evt-post-conversion', {
+    actor: 'Claude',
+    startedAt: '2026-08-20T00:00:00.000Z',
+    endedAt: '2026-08-20T01:00:00.000Z',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:15:00.000Z', // a later edit than Started At, e.g. a reassignment moments after restart
+    startedAt: '2026-08-30T05:10:00.000Z', // the true restart time
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [historicalTaskEraEvent] });
+  sandbox.logSnapshot_(
+    'snap-story-old', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-10T00:00:00.000Z'), 'story_excluded'
+  );
+  // The ordinary poll that closed the real Task-era event above -- exactly
+  // what production would have logged at the time, and what makes this
+  // page's most recent Sync Log observation NOT a Story one by the time of
+  // the later reopen below.
+  sandbox.logSnapshot_(
+    'snap-task-era-closed', 'notion_poll', taskId, 'Review',
+    new Date('2026-08-20T01:00:00.000Z'), 'closed:evt-post-conversion'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start,
+    '2026-08-30T05:10:00.000Z',
+    'expected the reopen\'s own fresh Started At to be trusted, not suppressed by the page\'s old Story history'
+  );
+});
+
+test('a Task reclassified to Story preserves genuine Task-era Time Events instead of erasing them', () => {
+  // Codex-reported gap (P1): reconcileStoryTask_ used to archive EVERY
+  // event for a Story-typed page unconditionally, including real work
+  // recorded while this exact page genuinely was an executable Task
+  // before being reclassified. Type transitions go both ways (see
+  // storyConversionHappenedWhileInProgress_ for the Story-to-Task mirror),
+  // so this exercises Task-to-Story: a page with one still-open and one
+  // already-closed genuine Task-era event should have the open one closed
+  // at the conversion boundary (preserving its real duration) and the
+  // closed one left completely untouched — neither archived away as
+  // though it were pre-fix bogus stray data.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dbb01';
+  // Each event's own Note carries the immutable Task Origin= marker
+  // stamped at creation — eventWasTouchedDuringTaskExecution_ looks this
+  // up directly on the event, not the page (and not the ordinary, mutable
+  // Snapshot=, which reconcileStoryTask_'s own close would otherwise
+  // overwrite — see its own comment), so the fixture must tie each event
+  // to its own Sync Log row rather than merely seeding one for the Task ID.
+  const openEvent = eventPage('evt-open-task-era', {
+    actor: 'Claude',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    note: 'Task Origin=snap-task-era-open',
+  });
+  const closedEvent = eventPage('evt-closed-task-era', {
+    actor: 'Claude',
+    startedAt: '2026-08-20T00:00:00.000Z',
+    endedAt: '2026-08-20T02:00:00.000Z',
+    note: 'Task Origin=snap-task-era-closed',
+  });
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'Review',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    startedAt: '2026-08-28T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [task],
+    events: [openEvent, closedEvent],
+  });
+  // Seed proof each specific event was itself touched by the ordinary Task
+  // path, with an explicit post-upgrade Type record — the same Outcome
+  // shape (and Type column) reconcileTaskPage_ itself would have logged
+  // via logSnapshot_, keyed by the exact Snapshot ID each event's own Note
+  // carries above.
+  sandbox.logSnapshot_(
+    'snap-task-era-open', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-28T00:00:00.000Z'), 'opened:' + openEvent.id, 'Task'
+  );
+  sandbox.logSnapshot_(
+    'snap-task-era-closed', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-20T00:00:00.000Z'), 'opened:' + closedEvent.id, 'Task'
+  );
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.equal(summary.outcomes[0], 'closed_task_era_at_story_conversion:evt-open-task-era');
+  const openPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-open-task-era');
+  assert.equal(openPatches.length, 1, 'expected the open Task-era event to be closed, not archived');
+  const closePayload = JSON.parse(openPatches[0].options.payload);
+  assert.equal(closePayload.archived, undefined);
+  assert.equal(closePayload.properties['Ended At'].date.start, conversionEdit);
+  const closedEventPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-closed-task-era');
+  assert.equal(closedEventPatches.length, 0, 'expected the already-closed Task-era event to be left completely untouched');
+});
+
+test('a Story converted to Task while idle trusts the freshly recorded Started At of its later first execution', () => {
+  // Codex-reported gap (P2) on the Story-to-Task Started-At-distrust fix:
+  // restricting distrust to require the page's MOST RECENT Story
+  // observation to have been In Progress — a page reclassified while
+  // Ready/Backlog, whose actual first execution only starts in a LATER,
+  // distinct poll, has a Started At freshly (re)recorded for that
+  // execution and should be trusted normally, just like any other Task's
+  // first open.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dcc01';
+  const freshStart = '2026-08-30T05:10:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:15:00.000Z', // a later observed edit than the true restart
+    startedAt: freshStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], noEventsForTaskIds: [taskId] });
+  // The page's last-known Story observation was while Ready, not In
+  // Progress — proof the conversion happened while idle, and this
+  // In-Progress spell is a later, distinct, genuinely fresh execution.
+  sandbox.logSnapshot_(
+    'snap-story-idle', 'notion_poll', taskId, 'Ready',
+    new Date('2026-08-25T00:00:00.000Z'), 'story_excluded'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start,
+    freshStart,
+    'expected the fresh Started At to be trusted since the page was idle (Ready), not In Progress, at its last-known Story observation'
+  );
+});
+
+test('an idle Task observation after a Story\'s In-Progress spell clears the stale Story carryover', () => {
+  // Codex-reported gap (P2) on the idle-conversion fix itself: taking only
+  // the last Story-marked row's Status ignored any LATER, non-Story row in
+  // between. A Story last seen In Progress, reclassified to Task and left
+  // idle (Status = Ready) in the same edit, reconciled once while idle,
+  // and only later actually beginning In Progress must have that later
+  // fresh Started At trusted — the intervening idle observation proves
+  // Type had already changed and the page was NOT continuously In
+  // Progress across the conversion.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dff01';
+  const freshStart = '2026-08-30T05:10:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:15:00.000Z',
+    startedAt: freshStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], noEventsForTaskIds: [taskId] });
+  // Oldest: last seen as Story, still In Progress.
+  sandbox.logSnapshot_(
+    'snap-story-inprogress', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-20T00:00:00.000Z'), 'story_excluded'
+  );
+  // Newer: reclassified to Task and observed idle (Ready) — this is the
+  // row that must clear the carryover, even though it isn't itself a
+  // Story marker.
+  sandbox.logSnapshot_(
+    'snap-idle-task', 'notion_poll', taskId, 'Ready',
+    new Date('2026-08-25T00:00:00.000Z'), 'no_change:Ready', 'Task'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start,
+    freshStart,
+    'expected the fresh Started At to be trusted -- the intervening idle Task observation should have cleared the stale In-Progress Story carryover'
+  );
+});
+
+test('closing a Task-era event via the Story conversion itself does not poison its own Task Origin= provenance', () => {
+  // Codex-reported gap (P1): reconcileStoryTask_'s own close of a genuine
+  // Task-era event (see the preservation test above) used to read the
+  // ordinary, mutable Snapshot= field for provenance -- but that same
+  // close also WRITES a new Snapshot= (this exact Story-typed poll's own
+  // snapshot) into the event's Note. Any LATER re-observation of this
+  // now-closed event (e.g. an unrelated later edit to the same Story)
+  // would then misread its own most recent Snapshot= as Story-typed and
+  // archive it after all, undoing the preservation this mechanism exists
+  // for. Task Origin= is immune: stamped once at creation, never touched
+  // by the conversion close, so it must still read as Task-era on the
+  // later poll.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dhh01';
+  const openEvent = eventPage('evt-survives-story-close', {
+    actor: 'Claude',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    // The exact value createNotionTimeEvent_ itself would have stamped
+    // directly, back when this page genuinely was a Task.
+    note: 'Task Origin=Task',
+  });
+  const task = taskPage(taskId, {
+    status: 'Review',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:00:00.000Z',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [openEvent] });
+
+  // First poll: the Story conversion closes the event, preserving its
+  // duration -- and, along the way, stamps a NEW ordinary Snapshot= (this
+  // exact poll's own, Story-typed snapshot) into the event's Note.
+  const first = sandbox.pollTaskChanges();
+  assert.equal(first.outcomes[0], 'closed_task_era_at_story_conversion:evt-survives-story-close');
+  // Reflect that close back onto the in-memory fixture, exactly as Notion
+  // itself would now show it, so the second poll below sees it.
+  const firstClosePatch = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-survives-story-close')[0].options.payload
+  );
+  openEvent.properties['Ended At'] = { type: 'date', date: firstClosePatch.properties['Ended At'].date };
+  openEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: firstClosePatch.properties.Note.rich_text[0].text.content }],
+  };
+
+  // A later, unrelated edit to the same Story (still Type = Story).
+  task.properties['Assigned Agent'] = { type: 'select', select: { name: 'Claude Sonnet' } };
+  task.last_edited_time = '2026-09-01T00:00:00.000Z';
+
+  const second = sandbox.pollTaskChanges();
+
+  assert.equal(
+    second.outcomes[0],
+    'story_excluded',
+    'expected the now-closed Task-era event to be left untouched (no archive) on the later poll -- Task Origin= must survive the conversion close'
+  );
+  const laterPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-survives-story-close');
+  assert.equal(laterPatches.length, 1, 'expected only the first poll\'s close PATCH -- no archive PATCH on the later poll');
+});
+
+test('backfillTaskOriginProvenance_ flags every pre-existing event as ambiguous, regardless of its page\'s current Type', () => {
+  // Codex-reported gap (P1) across two rounds of this fix: a page's
+  // CURRENT Type at backfill time never proves anything about a
+  // pre-existing event's true history, in EITHER direction -- a page
+  // could have flipped Type any number of times before this revision was
+  // ever deployed, with no record of when. An earlier version of this
+  // backfill trusted a currently-non-Story page's Type as confirmation;
+  // this proves the corrected, unconditional behavior: every pre-existing
+  // event without a marker gets the ambiguous sentinel, whatever Type its
+  // page currently reads, and the query itself is no longer scoped by
+  // Type at all (queries every page).
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dii01';
+  const legacyEvent = eventPage('evt-legacy-task-era', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
+    // No note at all -- exactly what a genuinely pre-upgrade event looks
+    // like, since Task Origin= didn't exist yet when it was created.
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-01T00:05:00.000Z',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      type: 'Task',
+    })],
+    events: [legacyEvent],
+  });
+
+  const summary = sandbox.backfillTaskOriginProvenance_();
+
+  const query = JSON.parse(requestsTo(fetchLog, 'POST', TASKS_DS)[0].options.payload);
+  assert.equal(query.filter, undefined, 'expected no Type restriction at all on the very first (unresumed) call');
+  assert.equal(summary.scanned, 1);
+  assert.equal(summary.processed, 1);
+  assert.equal(summary.outcomes[0], 'flagged_ambiguous_provenance:evt-legacy-task-era');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-task-era');
+  assert.equal(patches.length, 1);
+  const noteContent = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.equal(noteContent, 'Task Origin=ambiguous-pre-upgrade');
+});
+
+test('backfillTaskOriginProvenance_ is a free re-scan once an event already has Task Origin=', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dii02';
+  const alreadyStamped = eventPage('evt-already-stamped', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    note: 'Task Origin=snap-existing',
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-01T00:05:00.000Z',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      type: 'Task',
+    })],
+    events: [alreadyStamped],
+  });
+
+  const summary = sandbox.backfillTaskOriginProvenance_();
+
+  assert.equal(summary.outcomes[0], 'no_backfill_needed:' + taskId);
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-already-stamped');
+  assert.equal(patches.length, 0, 'expected an event that already has Task Origin= to be left completely untouched, not re-stamped');
+});
+
+test('after backfillTaskOriginProvenance_, a pre-upgrade Task-era event survives a later reclassification to Story', () => {
+  // End-to-end proof: the backfill's own stamp is exactly what
+  // eventWasTouchedDuringTaskExecution_ needs later, when the same page
+  // is reclassified to Story.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dii03';
+  const legacyEvent = eventPage('evt-legacy-survives', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
+  });
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-01T00:05:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [legacyEvent] });
+
+  sandbox.backfillTaskOriginProvenance_();
+  // Reflect the backfill's PATCH back onto the fixture, exactly as Notion
+  // itself would now show it.
+  const backfillPatch = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-survives')[0].options.payload
+  );
+  legacyEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: backfillPatch.properties.Note.rich_text[0].text.content }],
+  };
+
+  // Now reclassify the Task to Story.
+  task.properties.Type = { type: 'select', select: { name: 'Story' } };
+  task.last_edited_time = '2026-09-01T00:00:00.000Z';
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-legacy-survives');
+  const archivePatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-survives');
+  assert.equal(
+    archivePatches.length, 1,
+    'expected only the backfill\'s own PATCH -- no archive PATCH from the reclassification'
+  );
+});
+
+test('backfillTaskOriginProvenance_ flags events on already-Story pages as ambiguous, and reconcileStoryTask_ skips them entirely', () => {
+  // Codex-reported gap (P1): the earlier backfill excluded currently-Story
+  // pages, so an event genuinely created while its page was still a Task
+  // -- but the page was already reclassified to Story before this
+  // revision was deployed -- would never get any Task Origin= marker at
+  // all, and backfillStoryExclusion_ would archive it as though it were
+  // bogus pre-fix Story stray data, permanently erasing real work. The
+  // true origin is genuinely unrecoverable for such a page (its current
+  // Type already reads Story either way), so this proves the fix: a
+  // distinct 'ambiguous-pre-upgrade:' marker instead, and
+  // reconcileStoryTask_ leaves it completely untouched rather than
+  // guessing in either direction.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43djj01';
+  const ambiguousEvent = eventPage('evt-ambiguous', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
+  });
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-01T00:05:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story', // already Story at backfill time
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousEvent] });
+
+  const backfillSummary = sandbox.backfillTaskOriginProvenance_();
+  assert.equal(backfillSummary.outcomes[0], 'flagged_ambiguous_provenance:evt-ambiguous');
+  const backfillPatch = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous')[0].options.payload
+  );
+  const noteContent = backfillPatch.properties.Note.rich_text[0].text.content;
+  assert.equal(noteContent, 'Task Origin=ambiguous-pre-upgrade');
+  ambiguousEvent.properties.Note = { type: 'rich_text', rich_text: [{ plain_text: noteContent }] };
+
+  // A later poll re-observing the (still Story-typed) page must leave the
+  // flagged event completely untouched -- no archive, no close.
+  task.last_edited_time = '2026-09-01T00:00:00.000Z';
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-ambiguous');
+  const laterPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous');
+  assert.equal(
+    laterPatches.length, 1,
+    'expected only the backfill\'s own PATCH -- no archive/close PATCH from the later poll'
+  );
+});
+
+test('a failed backfillTaskOriginForTask_ patch leaves no partial state, so a retry cleanly re-attempts the same event', () => {
+  // Codex-reported gap (P2) on an earlier, two-write version of this
+  // backfill (a Notion patch plus a separate Sync Log append): if the
+  // patch succeeded but the second write failed or was interrupted, the
+  // event would permanently carry an unresolvable marker that the
+  // backfill's own existingOrigin check would then skip forever. The
+  // current design has only ONE write per event -- the event's own Note,
+  // holding the Type value directly -- so there is nothing left to
+  // desynchronize: this proves that a failed patch leaves existingOrigin
+  // still empty, and a retry (the next backfill call) simply re-attempts
+  // the same event from scratch.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dkk01';
+  const baseStub = notionFetchStub({
+    [TASKS_QUERY]: () => ({
+      results: [taskPage(taskId, {
+        status: 'Done', agent: 'Claude Opus',
+        lastEdited: '2026-08-01T00:05:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Task',
+      })],
+      has_more: false,
+    }),
+    [EVENTS_QUERY]: () => ({
+      results: [eventPage('evt-retry-safety', {
+        actor: 'Claude', startedAt: '2026-08-01T00:00:00.000Z', endedAt: '2026-08-01T02:00:00.000Z',
+      })],
+      has_more: false,
+    }),
+    'GET *': () => ({}),
+  });
+  let patchAttempts = 0;
+  let failNextPatch = true;
+  const fetchStub = (url, options) => {
+    const method = String((options && options.method) || 'get').toUpperCase();
+    if (method === 'PATCH' && url.indexOf('/v1/pages/evt-retry-safety') >= 0) {
+      patchAttempts++;
+      if (failNextPatch) {
+        return { getResponseCode: () => 500, getContentText: () => '{"message":"simulated failure"}' };
+      }
+      return { getResponseCode: () => 200, getContentText: () => '{}' };
+    }
+    return baseStub(url, options);
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: fetchStub,
+  });
+
+  assert.throws(() => sandbox.backfillTaskOriginProvenance_(), /Notion API failed/);
+  assert.equal(patchAttempts, 1, 'expected the first attempt\'s patch to actually have been tried');
+
+  failNextPatch = false;
+  const retrySummary = sandbox.backfillTaskOriginProvenance_();
+
+  assert.equal(patchAttempts, 2, 'expected the retry to re-attempt the same event, not skip it as already handled');
+  assert.equal(retrySummary.outcomes[0], 'flagged_ambiguous_provenance:evt-retry-safety');
+});
+
+test('createNotionTimeEvent_ stamps NO_TYPE_MARKER (not a blank marker) when the Task page\'s Type is unset, so the event survives a later reclassification to Story', () => {
+  // Codex-reported gap (P1, round 17): buildNote_'s `if (fields.taskOriginType)`
+  // is a plain truthy check, so passing the Task's raw Type straight through
+  // (createNotionTimeEvent_'s prior behavior) silently omitted `Task Origin=`
+  // from the Note entirely whenever Type read blank (''), the ordinary case
+  // for ANY page that has never had its Type select set at all -- making a
+  // genuinely-new, directly-observed event indistinguishable from a
+  // pre-existing event that never got a marker (eventProvenanceIsAmbiguous_
+  // would find no marker either way), and vulnerable to being either archived
+  // outright or, worse, permanently stuck "skipped" as ambiguous by a later
+  // reclassification, despite this script having witnessed its creation on a
+  // page it knows for certain was not Story at that exact moment.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dll01';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-28T00:00:00.000Z',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    // type intentionally omitted (defaults to null / blank Type select).
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], noEventsForTaskIds: [taskId] });
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  const createdNote = creates[0].properties.Note.rich_text[0].text.content;
+  assert.match(
+    createdNote, /Task Origin=unset-type/,
+    'expected a blank-Type page\'s newly created event to carry the NO_TYPE_MARKER sentinel, not an omitted Task Origin='
+  );
+
+  // Reflect the create back onto an in-memory event fixture, exactly as
+  // Notion itself would now show it, then reclassify the page to Story.
+  const createdEvent = eventPage('evt-created-blank-type', {
+    actor: 'Claude',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    note: createdNote,
+  });
+  const { sandbox: sandbox2, fetchLog: fetchLog2 } = harness({
+    tasks: [(() => {
+      const reclassified = taskPage(taskId, {
+        status: 'Review',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-30T05:00:00.000Z',
+        startedAt: '2026-08-28T00:00:00.000Z',
+        type: 'Story',
+      });
+      return reclassified;
+    })()],
+    events: [createdEvent],
+  });
+
+  const summary = sandbox2.pollTaskChanges();
+
+  // Must be preserved (closed at the conversion boundary, real duration
+  // kept) like any other confirmed Task-era event -- NOT archived as bogus
+  // Story stray data, and NOT left "skipped" as unprovable-ambiguous either.
+  assert.equal(summary.outcomes[0], 'closed_task_era_at_story_conversion:evt-created-blank-type');
+  const patches = requestsTo(fetchLog2, 'PATCH', '/v1/pages/evt-created-blank-type');
+  assert.equal(patches.length, 1);
+  const payload = JSON.parse(patches[0].options.payload);
+  assert.equal(payload.archived, undefined, 'expected a close, not an archive');
+  assert.ok(payload.properties['Ended At'], 'expected the open event to be closed with a real Ended At');
+});
+
+test('backfillStoryExclusion_ never resolves an ambiguous-marked event -- it stays skipped exactly like every other caller', () => {
+  // Codex-reported gap (P1, round 18), reverting a round-17 attempt: that
+  // attempt made backfillStoryExclusion_ archive an ambiguous-marked event
+  // on the reasoning that this backfill only ever visits pages that ARE
+  // Story right now. Codex correctly pointed out this repeats the exact
+  // current-Type fallacy backfillTaskOriginProvenance_'s own design already
+  // root-caused twice over: current Type never proves anything about
+  // pre-revision event history, in either direction, no matter how the
+  // caller scopes its own query -- so archiving here risked erasing
+  // genuine pre-upgrade Task-era work exactly like the mistake this whole
+  // marker exists to prevent. Reverted to the single, universal behavior:
+  // no caller ever resolves this marker -- proven here directly against
+  // backfillStoryExclusion_, and by the existing pollTaskChanges-based
+  // tests above for the other callers.
+  // Already closed — an OPEN ambiguous event is a distinct case (bounded,
+  // not archived, since round 23: see the "closes ambiguous open events
+  // in place" test below). This test's own purpose is narrower and
+  // unaffected by that: an already-closed ambiguous event must never be
+  // archived, by any caller.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dmm01';
+  const ambiguousEvent = eventPage('evt-ambiguous-on-story', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-20T10:00:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [task],
+    events: [ambiguousEvent],
+  });
+
+  const summary = sandbox.backfillStoryExclusion_();
+
+  assert.equal(summary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-ambiguous-on-story');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-on-story');
+  assert.equal(patches.length, 0, 'expected no archive/patch of an already-closed ambiguous-marked event from this backfill');
+});
+
+test('reconcileStoryTask_ closes an ambiguous OPEN event in place, bounding its duration, without archiving it or touching its Task Origin= marker', () => {
+  // Codex-reported gap (P1, round 23): leaving an ambiguous-marked OPEN
+  // event exactly as found is correct while its page keeps reading
+  // Type = Story (see this branch's own comment above) -- but "exactly as
+  // found" must still mean CLOSING it if it is still open, or it keeps
+  // accruing time indefinitely for as long as its page stays Story,
+  // reintroducing the double-counting BUG-ADP-TTE-01 exists to stop.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43drr01';
+  const ambiguousOpenEvent = eventPage('evt-ambiguous-open', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const observedEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: observedEdit,
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousOpenEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'closed_ambiguous_pre_upgrade_provenance:evt-ambiguous-open');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-open');
+  assert.equal(patches.length, 1);
+  const payload = JSON.parse(patches[0].options.payload);
+  assert.equal(payload.archived, undefined, 'expected a close, not an archive');
+  assert.equal(payload.properties['Ended At'].date.start, observedEdit);
+  const noteContent = payload.properties.Note.rich_text[0].text.content;
+  assert.match(noteContent, /Reason=ambiguous_provenance_bounded/);
+  // Its own Task Origin= survives the close untouched (appendNote_ only
+  // ever adds to a Note, never rewrites an existing field) -- still
+  // available for an operator to review by hand later.
+  assert.match(noteContent, /Task Origin=ambiguous-pre-upgrade/);
+
+  // A later re-observation (page still Story, event now closed) leaves it
+  // completely untouched from here on -- no re-close, no archive.
+  ambiguousOpenEvent.properties['Ended At'] = { type: 'date', date: payload.properties['Ended At'].date };
+  ambiguousOpenEvent.properties.Note = { type: 'rich_text', rich_text: [{ plain_text: noteContent }] };
+  task.last_edited_time = '2026-09-01T00:00:00.000Z';
+  const second = sandbox.pollTaskChanges();
+  assert.equal(second.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-ambiguous-open');
+  assert.equal(requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-open').length, 1, 'expected no further writes to the already-closed event');
+});
+
+test('an ordinary poll never archives a marker-less Story event before the provenance backfill has ever fully drained', () => {
+  // Codex-reported gap (P1, round 19): on an EXISTING live deployment, the
+  // already-installed pollTaskChanges trigger keeps running independently
+  // the moment this revision's code is deployed -- it does not wait for an
+  // operator to run backfillTaskOriginProvenance_() first, and that
+  // backfill itself can take multiple wall-clock-bounded calls to drain on
+  // a large workspace. A Story reached by an ordinary poll during that
+  // window has a pre-existing event with no Task Origin= marker YET --
+  // not because its origin is confirmed non-Task, simply because the
+  // backfill hasn't reached it -- which is indistinguishable from
+  // genuinely bogus pre-fix Story stray data from the event's own data
+  // alone. Without TASK_ORIGIN_BACKFILL_COMPLETE unset (the default until
+  // an operator runs the backfill to a full drain), reconcileStoryTask_
+  // must treat a marker-less event the same as an ambiguous one: skipped,
+  // not archived.
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    // Deliberately NOT setting TASK_ORIGIN_BACKFILL_COMPLETE -- this is
+    // the default, pre-backfill state on a freshly-deployed existing
+    // installation.
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [
+      eventPage('evt-race-with-backfill', { actor: 'Claude', startedAt: '2026-08-12T12:42:00.000Z' }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'skipped_pending_provenance_backfill:evt-race-with-backfill');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-race-with-backfill');
+  assert.equal(patches.length, 0, 'expected no archive of a marker-less event before the provenance backfill has ever fully drained');
+});
+
+test('backfillTaskOriginProvenance_ persists TASK_ORIGIN_BACKFILL_COMPLETE only once it fully drains, not on a truncated or timed-out call', () => {
+  const taskId1 = '3cafbd82-6f3b-8158-9622-d795b43dnn01';
+  const taskId2 = '3cafbd82-6f3b-8158-9622-d795b43dnn02';
+
+  // First call: force truncation via QUERY_PAGE_SAFETY_LIMIT by returning
+  // has_more: true (with an advancing next_cursor) forever, same pattern
+  // the other resumable-backfill truncation tests in this file use.
+  let pageCount = 0;
+  const truncatedStub = notionFetchStub({
+    [TASKS_QUERY]: () => {
+      pageCount += 1;
+      return {
+        results: [taskPage(
+          '3cafbd82-6f3b-8158-9622-d795b43dnn' + String(pageCount).padStart(2, '0'),
+          { status: 'Done', agent: 'Claude Opus', lastEdited: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Task' }
+        )],
+        has_more: true,
+        next_cursor: 'c' + pageCount,
+      };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET *': () => ({}),
+  });
+  const { sandbox: truncatedSandbox, scriptProps: truncatedProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: truncatedStub,
+  });
+  truncatedSandbox.backfillTaskOriginProvenance_();
+  assert.equal(
+    truncatedProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), undefined,
+    'expected no completion flag from a truncated call'
+  );
+
+  // Second, independent sandbox: a small, fully-drained call.
+  const { sandbox: fullSandbox, scriptProps: fullProps } = harness({
+    tasks: [
+      taskPage(taskId1, { status: 'Done', agent: 'Claude Opus', lastEdited: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Task' }),
+      taskPage(taskId2, { status: 'Done', agent: 'Claude Opus', lastEdited: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Task' }),
+    ],
+    events: [],
+  });
+  const summary = fullSandbox.backfillTaskOriginProvenance_();
+  assert.equal(summary.truncated, false);
+  assert.equal(summary.timedOut, false);
+  assert.equal(fullProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), 'true');
+});
+
+test('backfillTaskOriginProvenance_ still reaches a tied cohort member whose sibling was edited out of the tie before the resumed call', () => {
+  // Codex-reported gap (P1, round 28): the persisted resume state for a
+  // tied cohort split across two calls used to be a raw COUNT
+  // (the old TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET) of how many pages
+  // shared the resume cursor's timestamp last time -- not which specific
+  // pages. If an already-processed page in that tie is edited before the
+  // next call (its own last_edited_time moving later, out of the tie), the
+  // resumed on_or_after query returns a smaller tied cohort, and skipping
+  // the old (now too-large) count from it silently drops whichever page
+  // was never actually visited -- permanently, once this backfill fully
+  // drains and TASK_ORIGIN_BACKFILL_COMPLETE lets reconcileStoryTask_'s
+  // archive path treat its still-marker-less event as pre-fix Story stray
+  // data, even though it may be genuine pre-upgrade Task-era history.
+  const taskIdA = '3cafbd82-6f3b-8158-9622-d795b43dzz01';
+  const taskIdB = '3cafbd82-6f3b-8158-9622-d795b43dzz02';
+  const tiedTimestamp = '2026-08-01T02:00:00.000Z';
+  const movedTimestamp = '2026-08-01T03:00:00.000Z'; // taskA edited after call 1, before call 2
+
+  const taskA = taskPage(taskIdA, { status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp, type: 'Task' });
+  const taskB = taskPage(taskIdB, { status: 'Done', agent: 'Claude Opus', lastEdited: tiedTimestamp, startedAt: tiedTimestamp, type: 'Task' });
+  const eventA = eventPage('evt-tie-a', { actor: 'Claude', startedAt: '2026-07-01T00:00:00.000Z', endedAt: '2026-07-01T01:00:00.000Z' });
+  const eventB = eventPage('evt-tie-b', { actor: 'Claude', startedAt: '2026-07-01T00:00:00.000Z', endedAt: '2026-07-01T01:00:00.000Z' });
+
+  const eventsQueriedFor = [];
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      const onOrAfter = body.filter && body.filter.timestamp === 'last_edited_time' && body.filter.last_edited_time.on_or_after;
+      const all = [taskA, taskB];
+      const filtered = onOrAfter ? all.filter((t) => t.last_edited_time >= onOrAfter) : all;
+      return { results: filtered.slice().sort((x, y) => (x.last_edited_time < y.last_edited_time ? -1 : 1)), has_more: false };
+    },
+    [EVENTS_QUERY]: (body) => {
+      const requestedTaskId = body && body.filter && body.filter.relation && body.filter.relation.contains;
+      eventsQueriedFor.push(requestedTaskId);
+      if (requestedTaskId === taskIdA) return { results: [eventA], has_more: false };
+      if (requestedTaskId === taskIdB) return { results: [eventB], has_more: false };
+      return { results: [], has_more: false };
+    },
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+
+  // Seeds exactly the state a real first call would have persisted after
+  // processing ONLY taskA out of the {taskA, taskB} tie sharing
+  // tiedTimestamp -- i.e. this test starts at the resumed second call.
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      TASK_ORIGIN_BACKFILL_RESUME_CURSOR: tiedTimestamp,
+      TASK_ORIGIN_BACKFILL_RESUME_TIE_IDS: taskIdA,
+    },
+    fetch: notionFetchStub(routes),
+  });
+
+  // Between the two calls, taskA is edited for an unrelated reason -- its
+  // own last_edited_time moves later, out of the tied cohort the resume
+  // point remembers.
+  taskA.last_edited_time = movedTimestamp;
+
+  const summary = sandbox.backfillTaskOriginProvenance_();
+
+  assert.ok(
+    eventsQueriedFor.indexOf(taskIdB) !== -1,
+    'expected taskB, the tie member never actually processed by the first call, to still be visited on resume'
+  );
+  assert.equal(summary.truncated, false);
+  assert.equal(summary.timedOut, false);
+  assert.equal(scriptProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), 'true');
+});
+
+test('an ambiguous open event does not silently keep accruing time once its Story page is reclassified to an executable Type with the same assignee', () => {
+  // Codex-reported gap (P2, round 20): reconcileStoryTask_ leaves an
+  // ambiguous-marked open event exactly as found -- correct while the page
+  // stays Type = Story (see its own comment). But reconcileStoryTask_ never
+  // runs again once the page is reclassified to an executable Type -- the
+  // generic reconcileAuthoritativeTimeEvents_ path takes over, and its
+  // ordinary "sameActor already open, just keep going" logic has no idea
+  // this particular open event's provenance is unverifiable. Left alone,
+  // its eventual Ended At would span from whenever it originally opened
+  // (possibly long before this deploy) all the way through the new
+  // execution -- reintroducing the exact double-counting this file exists
+  // to stop, for precisely the population (ambiguous, not confirmed either
+  // way) the generic path was never taught to recognize.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43doo01';
+  const staleStart = '2026-07-01T00:00:00.000Z';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const ambiguousEvent = eventPage('evt-ambiguous-restart', {
+    actor: 'Claude',
+    startedAt: staleStart,
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    // The Task's own Started At is unchanged from the same original moment
+    // the ambiguous event itself opened -- the realistic case for a page
+    // that never left In Progress across the Type change.
+    startedAt: staleStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /^closed_ambiguous_provenance_restart:evt-ambiguous-restart,opened:/);
+
+  // The old ambiguous event is closed AT THE CONVERSION BOUNDARY, not left
+  // open -- its duration is now fixed instead of ever-growing.
+  const closePatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-restart');
+  assert.equal(closePatches.length, 1);
+  const closePayload = JSON.parse(closePatches[0].options.payload);
+  assert.equal(closePayload.properties['Ended At'].date.start, conversionEdit);
+  assert.match(closePayload.properties.Note.rich_text[0].text.content, /Reason=ambiguous_provenance_restart/);
+  // Its own Task Origin= survives the close untouched (appendNote_ only
+  // ever adds to a Note, never rewrites an existing field) -- still
+  // available for an operator to review by hand later, exactly as
+  // backfillTaskOriginProvenance_ left it.
+  assert.match(closePayload.properties.Note.rich_text[0].text.content, /Task Origin=ambiguous-pre-upgrade/);
+
+  // A genuinely new, confirmed event opens starting at the conversion
+  // boundary (`when`) -- NOT at the stale original Started At, which would
+  // silently re-create the exact interval the close above exists to stop
+  // extending. This is the regression this test specifically guards: the
+  // in-memory `allEvents` this call started with still shows the ambiguous
+  // event as open (it was only just closed via PATCH, same call), so
+  // latestEventTimestamp_ alone would see only its stale Started At --
+  // matching the Task's own unchanged Started At and wrongly looking
+  // "trusted" without the effectiveLatestHistoricalTimestamp fix.
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, conversionEdit,
+    'expected the new event to start at the conversion boundary, not the stale pre-deploy Started At'
+  );
+});
+
+test('an ambiguous open event under a DIFFERENT actor is restarted, not reassigned -- its Execution= is never inherited by the new actor\'s event', () => {
+  // Codex-reported gap (P2, round 29): the ambiguity check above only ever
+  // examined sameActor[0], so an ambiguous open event belonging to a
+  // DIFFERENT actor than the newly desired one fell into the ordinary
+  // otherActor reassignment-close path instead of being restarted -- and,
+  // worse, its own Execution= marker (genuinely present when an event
+  // predates Task Origin= tracking but postdates Execution= tracking --
+  // appendNote_ preserves it untouched across the later ambiguous backfill)
+  // would then be inherited by the brand-new event opened for the new
+  // actor, via the ordinary reassignment executionId logic just below.
+  // That silently tags current, genuinely valid work with an unverifiable
+  // Story-era identity that will not match the Task's own freshly-recorded
+  // Started At -- permanently excluding it from enforceDoneGate_'s Done
+  // evidence the moment Started At is (correctly) refreshed.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dpp01';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const ambiguousEvent = eventPage('evt-ambiguous-other-actor', {
+    actor: 'Claude', // different from the Task's desiredActor below ('Human')
+    startedAt: '2026-01-01T00:00:00.000Z',
+    note: 'Execution=2026-01-01T00:00:00.000Z|Task Origin=ambiguous-pre-upgrade',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Human',
+    lastEdited: conversionEdit,
+    startedAt: conversionEdit,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(
+    summary.outcomes[0], /^closed_ambiguous_provenance_restart:evt-ambiguous-other-actor,opened:/,
+    'expected the ambiguous event to be restarted, not treated as an ordinary reassignment'
+  );
+
+  const closePatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-other-actor');
+  assert.equal(closePatches.length, 1);
+  assert.match(
+    JSON.parse(closePatches[0].options.payload).properties.Note.rich_text[0].text.content,
+    /Reason=ambiguous_provenance_restart/
+  );
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  const createdNote = creates[0].properties.Note.rich_text[0].text.content;
+  assert.doesNotMatch(
+    createdNote, /Execution=2026-01-01/,
+    'expected the new event to NOT inherit the ambiguous outgoing event\'s Story-era Execution= identity'
+  );
+});
+
+test('a page with older, unrelated Task-era history still distrusts a stale Story-era Started At on a later Story-to-Task conversion', () => {
+  // Codex-reported gap (P2, round 21): cameFromArchivedStoryHistory used to
+  // gate the Sync Log lookup on allEvents.length === 0 -- correct for a
+  // page's first-ever event, or one whose entire history was just archived
+  // away, but wrong here: this page already has a genuinely older, unrelated
+  // closed Task-era event from a completely separate, much earlier
+  // execution, so allEvents is never empty, and the old gate skipped the
+  // Sync Log check entirely regardless of what happened since. If this same
+  // page is LATER used as a Story (In Progress) and then converted back to
+  // an executable Type without ever leaving In Progress, the Story spell's
+  // own freshly-recorded Started At can easily read newer than that old,
+  // unrelated history -- wrongly looking "trusted" by the ordinary
+  // freshness check alone, opening the new Task event at the Story's own
+  // start instead of the actual conversion boundary and double-counting
+  // the intervening Story period.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dpp01';
+  const oldUnrelatedEvent = eventPage('evt-old-unrelated', {
+    actor: 'Claude',
+    startedAt: '2026-07-01T00:00:00.000Z',
+    endedAt: '2026-07-01T01:00:00.000Z',
+  });
+  const storyStart = '2026-08-25T00:05:00.000Z';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    // The Story spell's own Started At -- freshly recorded when the page
+    // most recently went In Progress AS A STORY, well after the old
+    // unrelated event closed, so it looks "fresh" by the ordinary check.
+    startedAt: storyStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [oldUnrelatedEvent] });
+  // The page's single most recent Sync Log observation: Story, In Progress.
+  sandbox.logSnapshot_(
+    'snap-story-recent', 'notion_poll', taskId, 'In Progress',
+    new Date(storyStart), 'story_excluded'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, conversionEdit,
+    'expected the conversion boundary to be trusted, not the Story spell\'s own stale Started At, despite older unrelated Task-era history existing'
+  );
+});
+
+test('isFreeOutcome_ exempts Story outcomes that are entirely no-write skips, but still charges any outcome that also made a real write', () => {
+  // Codex-reported gap (P2, round 21): after the mandatory provenance
+  // backfill, skipped_ambiguous_pre_upgrade_provenance: and
+  // skipped_pending_provenance_backfill: are now the common outcome for a
+  // changed Story with pre-existing events -- neither makes a Notion
+  // write, but neither was recognized as free, so 25 such Stories inside
+  // one poll's overlap window could exhaust MAX_TASKS_PER_RUN on pure
+  // re-skips and defer genuinely write-needing Tasks sorted behind them.
+  const { sandbox } = harness();
+
+  // Single no-write skip actions: free.
+  assert.equal(sandbox.isFreeOutcome_('skipped_ambiguous_pre_upgrade_provenance:evt-1'), true);
+  assert.equal(sandbox.isFreeOutcome_('skipped_pending_provenance_backfill:evt-1'), true);
+  // A Story with multiple events, ALL no-write skips (comma-joined): free.
+  assert.equal(
+    sandbox.isFreeOutcome_('skipped_ambiguous_pre_upgrade_provenance:evt-1,skipped_pending_provenance_backfill:evt-2'),
+    true
+  );
+  // A Story whose events are a MIX of a no-write skip and a real write
+  // (archived or closed): still charged, exactly like a pure write would be.
+  assert.equal(
+    sandbox.isFreeOutcome_('skipped_ambiguous_pre_upgrade_provenance:evt-1,archived_story_event:evt-2'),
+    false
+  );
+  assert.equal(
+    sandbox.isFreeOutcome_('closed_task_era_at_story_conversion:evt-1,skipped_pending_provenance_backfill:evt-2'),
+    false
+  );
+  // A pure write outcome: still charged, unaffected by this change.
+  assert.equal(sandbox.isFreeOutcome_('archived_story_event:evt-1'), false);
+  // Existing free outcomes: unaffected.
+  assert.equal(sandbox.isFreeOutcome_('story_excluded'), true);
+  assert.equal(sandbox.isFreeOutcome_('duplicate:page-1'), true);
+  assert.equal(sandbox.isFreeOutcome_('done_gate_passed'), true);
+});
+
+test('storyConversionHappenedWhileInProgress_ recognizes a skipped-ambiguous or skipped-pending-backfill Sync Log row as a Story observation, not only story_excluded/archived_story_event:', () => {
+  // Codex-reported gap (P2, round 22): the round-21 fix widened WHEN
+  // storyConversionHappenedWhileInProgress_ gets called (whenever Started
+  // At would otherwise look fresh, not only when allEvents is empty) --
+  // but the function itself only ever recognized 'story_excluded' and
+  // 'archived_story_event:' as proof a Sync Log row was logged while Type
+  // read Story. Since round 19/20, a changed Story with pre-existing
+  // events commonly logs skipped_ambiguous_pre_upgrade_provenance:/
+  // skipped_pending_provenance_backfill: instead -- neither was
+  // recognized, so a Story whose most recent row happened to be one of
+  // those two was invisible to this check. Combined with the round-21 fix
+  // (a page with older, unrelated Task-era history reused as Story and
+  // converted back), this reintroduced the same double-counting the
+  // round-21 fix was meant to close, just reached via a different Sync
+  // Log outcome.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dqq01';
+  const oldUnrelatedEvent = eventPage('evt-old-unrelated-2', {
+    actor: 'Claude',
+    startedAt: '2026-07-01T00:00:00.000Z',
+    endedAt: '2026-07-01T01:00:00.000Z',
+  });
+  const storyStart = '2026-08-25T00:05:00.000Z';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    startedAt: storyStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [oldUnrelatedEvent] });
+  // The page's single most recent Sync Log observation: Story, In
+  // Progress, but with the now-common skipped_ambiguous_pre_upgrade_provenance:
+  // outcome rather than story_excluded/archived_story_event:.
+  sandbox.logSnapshot_(
+    'snap-story-ambiguous-recent', 'notion_poll', taskId, 'In Progress',
+    new Date(storyStart), 'skipped_ambiguous_pre_upgrade_provenance:evt-some-legacy'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, conversionEdit,
+    'expected the conversion boundary to be trusted, not the Story spell\'s own stale Started At, even though the most recent Sync Log row was a skipped_ambiguous_pre_upgrade_provenance: outcome rather than story_excluded'
+  );
+});
+
+test('backfillStoryExclusion_ bypasses reconcileTaskPage_\'s ordinary snapshot dedup, so it still reaches a Time Event added directly to an already-reconciled Story', () => {
+  // Codex-reported gap (P1, round 23): a Time Event added directly in
+  // Notion (not through this script) attaches to the Story via its own
+  // Task relation, not by editing the Story page itself -- so the Story
+  // page's own snapshot (id | last_edited_time | Status | Assigned Agent |
+  // Type) is completely unchanged. An ordinary reconcileTaskPage_ call
+  // (no bypass) therefore reports `duplicate:` and never even calls
+  // reconcileStoryTask_ again -- the new event would stay live until some
+  // unrelated edit to the Story page happened to bump its snapshot, which
+  // might never come. backfillStoryExclusion_ is the one caller that must
+  // not depend on that: it bypasses dedup so its own advertised archive
+  // path (see the E2E step above) is actually reachable on a repeated run.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dss01';
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-20T10:00:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story',
+  });
+  let strayEventAdded = false;
+  const strayEvent = eventPage('evt-added-after-reconcile', {
+    actor: 'Claude',
+    startedAt: '2026-08-25T00:00:00.000Z',
+    endedAt: '2026-08-25T01:00:00.000Z',
+  });
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [task], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: strayEventAdded ? [strayEvent] : [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    fetch: notionFetchStub(routes),
+  });
+
+  // Reconcile once with nothing to do -- records this exact snapshot as
+  // already processed.
+  const first = sandbox.reconcileTaskPage_(task);
+  assert.equal(first, 'story_excluded');
+
+  // A stray Time Event now exists, added directly (the Story page itself
+  // never changed).
+  strayEventAdded = true;
+
+  // An ordinary re-reconcile (no bypass) still reports duplicate: -- it
+  // never even sees the new event.
+  const ordinary = sandbox.reconcileTaskPage_(task);
+  assert.match(ordinary, /^duplicate:/);
+  assert.equal(requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-added-after-reconcile').length, 0);
+
+  // backfillStoryExclusion_ bypasses dedup and actually archives it.
+  const summary = sandbox.backfillStoryExclusion_();
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-added-after-reconcile');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-added-after-reconcile');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
+});
+
+test('closing an ambiguous open event is clamped to never precede the event\'s own Started At', () => {
+  // Codex-reported gap (P2, round 24): `when` passed into reconcileStoryTask_
+  // is the STORY PAGE's own observed edit time (authoritativeEditTime_),
+  // not this event's. A Time Event added directly in Notion (attached via
+  // its own Task relation) never touches the Story page itself, so it can
+  // easily have a Started At AFTER the page's own last real edit. Closing
+  // at the unclamped `when` in that case would set Ended At before
+  // Started At -- a negative duration in both Notion and the Sheet
+  // projection.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dtt01';
+  const pageLastEdited = '2026-08-20T10:00:00.000Z';
+  const eventAddedAfter = '2026-08-25T00:00:00.000Z'; // after pageLastEdited
+  const ambiguousOpenEvent = eventPage('evt-added-after-page-edit', {
+    actor: 'Claude',
+    startedAt: eventAddedAfter,
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: pageLastEdited,
+    startedAt: pageLastEdited,
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousOpenEvent] });
+
+  sandbox.pollTaskChanges();
+
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-added-after-page-edit');
+  assert.equal(patches.length, 1);
+  const payload = JSON.parse(patches[0].options.payload);
+  assert.equal(
+    payload.properties['Ended At'].date.start, eventAddedAfter,
+    'expected Ended At clamped to the event\'s own Started At, not the earlier Story page edit time'
+  );
+});
+
+test('storyConversionHappenedWhileInProgress_ still finds a Task\'s Sync Log row when many unrelated rows sit closer to the end', () => {
+  // Originally written for round 24's bounded-tail-chunk implementation
+  // (fixing the round-23 attempt, which materialized the ENTIRE Sync Log via
+  // one getRange(...).getValues() call regardless of where the match sat).
+  // Round 26 replaced tail-chunking with a Range#createTextFinder search
+  // (see that function's own comment) -- this test still matters under the
+  // new implementation too: it proves the match is found correctly however
+  // far it sits from the log's end, not only when it happens to be near it.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43duu01';
+  const oldUnrelatedEvent = eventPage('evt-old-unrelated-3', {
+    actor: 'Claude',
+    startedAt: '2026-07-01T00:00:00.000Z',
+    endedAt: '2026-07-01T01:00:00.000Z',
+  });
+  const storyStart = '2026-08-25T00:05:00.000Z';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    startedAt: storyStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [oldUnrelatedEvent] });
+
+  // The target task's own Story observation, logged first (near the top of
+  // the Sync Log).
+  sandbox.logSnapshot_(
+    'snap-story-old-position', 'notion_poll', taskId, 'In Progress',
+    new Date(storyStart), 'story_excluded'
+  );
+  // More than one tail chunk's worth of unrelated rows for OTHER Task IDs,
+  // pushing the target row well beyond the first chunk.
+  for (let i = 0; i < 250; i++) {
+    sandbox.logSnapshot_(
+      'snap-filler-' + i, 'notion_poll', 'unrelated-task-' + i, 'Ready',
+      new Date('2026-08-26T00:00:00.000Z'), 'no_change:Ready'
+    );
+  }
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, conversionEdit,
+    'expected the conversion boundary to be trusted, proving the Story observation beyond the first tail chunk was still found'
+  );
+});
+
+test('storyConversionHappenedWhileInProgress_ makes no Sync Log row-data transfer for a Task that has never appeared in it', () => {
+  // Codex-reported gap (P2, round 26), fixing the round-24 tail-chunk
+  // implementation itself: the single most common caller of this function
+  // is an ordinary Task's very first Time Event -- by definition a Task ID
+  // with NO Sync Log row of its own yet. Bounded tail chunking only ever
+  // paid off once a page already had a Story-marked row on file; for the
+  // never-observed case, every chunk still had to be read, oldest included,
+  // before concluding "no match" -- every first-ever Task open in the whole
+  // deployment paid a cost proportional to the ENTIRE append-only log,
+  // unboundedly growing over the deployment's life, with the runtime
+  // deadline checked only outside this reconciliation (see poll's own
+  // MAX_RUN_DURATION_MS comment). Round 26's fix (Range#createTextFinder's
+  // findAll(), see the function's own comment) answers "does this Task ID
+  // appear anywhere" via a server-side search returning match positions
+  // only, so it transfers no row data at all when there is nothing to find.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dww01';
+  const startedAt = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: startedAt,
+    startedAt,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog, spreadsheet } = harness({ tasks: [task], events: [] });
+
+  // A large, entirely unrelated Sync Log history -- large enough that the
+  // old tail-chunk implementation would have needed several chunk reads
+  // (SYNC_LOG_TAIL_CHUNK_ROWS was 200) to walk all of it before giving up.
+  for (let i = 0; i < 500; i++) {
+    sandbox.logSnapshot_(
+      'snap-filler-' + i, 'notion_poll', 'unrelated-task-' + i, 'Ready',
+      new Date('2026-08-26T00:00:00.000Z'), 'no_change:Ready'
+    );
+  }
+
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  syncLogSheet.getValuesCallCount = 0; // reset the setup-time appendRow calls above
+
+  sandbox.pollTaskChanges();
+
+  assert.equal(
+    syncLogSheet.getValuesCallCount, 0,
+    'expected no Sync Log row-data transfer for a Task ID that has never appeared in the log, however large the log has grown'
+  );
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, startedAt,
+    'expected the Task\'s own fresh Started At to still be trusted with no Story history on file at all'
+  );
+});
+
+test('closing a confirmed Task-era event at a Story conversion is clamped to never precede the event\'s own Started At', () => {
+  // Codex-reported gap (P2, round 25), the same class of gap as the
+  // round-24 ambiguous-close clamp: `when` comes from the Task page's own
+  // minute-granular last_edited_time, so an event whose Started At carries
+  // seconds can, within that same observed minute, read as later than
+  // `when` -- closing at the unclamped `when` would set Ended At before
+  // Started At, a negative duration.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dvv01';
+  const eventStartWithSeconds = '2026-08-30T05:00:30.000Z';
+  const pageLastEdited = '2026-08-30T05:00:00.000Z'; // same minute, but "earlier" once truncated
+  const openTaskEraEvent = eventPage('evt-task-era-seconds', {
+    actor: 'Claude',
+    startedAt: eventStartWithSeconds,
+    note: 'Task Origin=Task',
+  });
+  const task = taskPage(taskId, {
+    status: 'Review',
+    agent: 'Claude Opus',
+    lastEdited: pageLastEdited,
+    startedAt: eventStartWithSeconds,
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [openTaskEraEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'closed_task_era_at_story_conversion:evt-task-era-seconds');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-task-era-seconds');
+  assert.equal(patches.length, 1);
+  assert.equal(
+    JSON.parse(patches[0].options.payload).properties['Ended At'].date.start, eventStartWithSeconds,
+    'expected Ended At clamped to the event\'s own Started At, not the earlier (truncated) page edit time'
+  );
+});
+
+test('restarting an ambiguous open event across a Story-to-Task conversion is clamped to never precede the event\'s own Started At', () => {
+  // Codex-reported gap (P2, round 25): the same class of gap as above,
+  // for the round-20 ambiguous-provenance-restart close in
+  // reconcileAuthoritativeTimeEvents_.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dww01';
+  const eventStartWithSeconds = '2026-08-30T05:00:30.000Z';
+  const pageLastEdited = '2026-08-30T05:00:00.000Z';
+  const ambiguousOpenEvent = eventPage('evt-ambiguous-restart-seconds', {
+    actor: 'Claude',
+    startedAt: eventStartWithSeconds,
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: pageLastEdited,
+    startedAt: eventStartWithSeconds,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousOpenEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /^closed_ambiguous_provenance_restart:evt-ambiguous-restart-seconds,opened:/);
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-restart-seconds');
+  assert.equal(patches.length, 1);
+  assert.equal(
+    JSON.parse(patches[0].options.payload).properties['Ended At'].date.start, eventStartWithSeconds,
+    'expected Ended At clamped to the event\'s own Started At, not the earlier (truncated) page edit time'
+  );
+});
+
+test('running backfillTaskOriginProvenance_ once on a fresh deployment (nothing to scan) still unlocks backfillStoryExclusion_\'s archive path for a Time Event added later', () => {
+  // Codex-reported gap (P2, round 25): the README used to say a fresh
+  // deployment needs no backfillTaskOriginProvenance_ run at all, since
+  // every event this script itself creates always gets a confirmed
+  // Task Origin= marker. True as far as it goes, but backfillStoryExclusion_
+  // also supports a marker-less Time Event added directly in Notion at any
+  // later point -- and that archive path is gated on
+  // TASK_ORIGIN_BACKFILL_COMPLETE, which stays permanently false if the
+  // backfill is skipped as "not needed". Proves the fix: a zero-result run
+  // (the genuine fresh-deployment case) still sets the completion flag, so
+  // a stray event added afterward is archivable.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dxx01';
+  let strayEventAdded = false;
+  const strayEvent = eventPage('evt-added-on-fresh-deploy', {
+    actor: 'Claude',
+    startedAt: '2026-08-25T00:00:00.000Z',
+    endedAt: '2026-08-25T01:00:00.000Z',
+  });
+  const routes = {
+    [TASKS_QUERY]: () => ({
+      results: [taskPage(taskId, {
+        status: 'Done', agent: 'Claude Opus',
+        lastEdited: '2026-08-20T10:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Story',
+      })],
+      has_more: false,
+    }),
+    [EVENTS_QUERY]: () => ({ results: strayEventAdded ? [strayEvent] : [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  // "Fresh deployment" step 6: run the backfill even though there is
+  // nothing to flag yet (the Story page's own event doesn't exist until
+  // later).
+  const backfillSummary = sandbox.backfillTaskOriginProvenance_();
+  assert.equal(backfillSummary.truncated, false);
+  assert.equal(backfillSummary.timedOut, false);
+  assert.equal(scriptProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), 'true');
+
+  // Later, a stray Time Event is added directly in Notion.
+  strayEventAdded = true;
+
+  const summary = sandbox.backfillStoryExclusion_();
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-added-on-fresh-deploy');
+  const patches2 = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-added-on-fresh-deploy');
+  assert.equal(patches2.length, 1);
+  assert.equal(JSON.parse(patches2[0].options.payload).archived, true);
 });
