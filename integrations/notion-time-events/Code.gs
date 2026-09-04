@@ -593,7 +593,25 @@ function reconcileTaskPage_(task, options) {
   // A Story is exempt regardless of Status — see isStory above, and
   // reconcileStoryTask_ never enforces the Done gate at all.
   const mustReverify = currentStatus === DEFAULTS.DONE_STATUS && !isStory;
-  if (!mustReverify && !bypassDedup && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
+  // hasProcessedSnapshot_ checks this page's single MOST RECENT Sync Log
+  // observation, not "was this exact snapshot ever logged, at any point in
+  // this page's history" (an earlier version of this check) — Codex-reported
+  // gap (round 27): with Type now part of the hash (see
+  // authoritativeSnapshotId_), a page observed as Task/In Progress,
+  // reconciled once as Story (closing its open event), and then changed
+  // back to that identical Task/In Progress state within the same
+  // last_edited_time minute produces a snapshot byte-identical to the
+  // FIRST Task observation already on file. Matching against "ever seen
+  // anywhere in history" found that old row and skipped this final
+  // transition as `duplicate:` — even though the Story pass in between had
+  // genuinely closed the event, leaving the page stuck `In Progress` with
+  // no open Time Event until some unrelated later edit changed the hash.
+  // Matching only the page's own most recent row is both the more correct
+  // definition of "duplicate" (nothing changed since we last looked at
+  // THIS page) and strictly more permissive than before — it can only
+  // decide to re-reconcile a page the old check would have skipped, never
+  // the reverse, so it carries no risk of skipping a genuinely new state.
+  if (!mustReverify && !bypassDedup && hasProcessedSnapshot_(snapshotId, pageId)) return 'duplicate:' + pageId;
 
   const outcome = isStory
     ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId, when)
@@ -2500,12 +2518,26 @@ function editorLabel_(user) {
   return (user.object || user.type || 'user') + ':' + user.id;
 }
 
-function hasProcessedSnapshot_(snapshotId) {
-  if (!snapshotId) return false;
+// True only if `snapshotId` matches this Task ID's single MOST RECENT Sync
+// Log row — not merely "was this exact snapshot ever logged, at any point
+// in this page's history" (an earlier version of this check; see the one
+// call site's own comment for the round-27 gap that distinction closes).
+// logSnapshot_ only ever appends, never inserts out of order, so a page's
+// last matching row for its own Task ID is, by construction, its most
+// recent observation.
+function hasProcessedSnapshot_(snapshotId, taskId) {
+  if (!snapshotId || !taskId) return false;
   const sheet = ensureSyncLogSheet_();
-  if (sheet.getLastRow() < 2) return false;
-  return Boolean(sheet.getRange(2, 1, sheet.getLastRow() - 1, 1)
-    .createTextFinder(snapshotId).matchEntireCell(true).findNext());
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  const matches = sheet.getRange(2, 3, lastRow - 1, 1)
+    .createTextFinder(String(taskId))
+    .matchEntireCell(true)
+    .findAll();
+  if (!matches.length) return false;
+  const mostRecentMatchRow = matches[matches.length - 1].getRow();
+  const mostRecentSnapshotId = sheet.getRange(mostRecentMatchRow, 1, 1, 1).getValues()[0][0];
+  return String(mostRecentSnapshotId) === String(snapshotId);
 }
 
 // `source` is what triggered this reconciliation (e.g. 'notion_poll'), not

@@ -2358,6 +2358,61 @@ test('Type is part of the reconciliation snapshot, so becoming a Story is never 
   assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });
 
+test('reconciling back to an identical earlier snapshot within one minute is not masked as a duplicate re-read', () => {
+  // Codex-reported gap (round 27): hasProcessedSnapshot_ originally matched
+  // "was this exact snapshot ever logged, at any point in this page's
+  // history" -- not only its most recent one. With Type now part of the
+  // snapshot hash (see the previous test), a page observed as Task/In
+  // Progress, reconciled once as Story (closing/archiving its open event
+  // via reconcileStoryTask_), and then changed back to that identical
+  // Task/In Progress state within the same last_edited_time minute
+  // produces a snapshot byte-identical to the FIRST Task observation
+  // already on file. Matching against "ever seen anywhere in history"
+  // found that old row and skipped this final transition as `duplicate:`
+  // before any reconciliation ran at all -- even though the Story pass in
+  // between had genuinely archived the event, leaving the page stuck In
+  // Progress with no open Time Event until some unrelated later edit
+  // changed the hash.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dff01';
+  const sameMinute = '2026-08-30T05:10:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: sameMinute,
+    startedAt: sameMinute,
+    type: 'Task',
+  });
+  const openEvent = eventPage('evt-round27', { actor: 'Claude', startedAt: sameMinute });
+  const { sandbox, fetchLog } = harness({
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
+    tasks: [task],
+    events: [openEvent],
+  });
+
+  // First poll: an ordinary Task with an already-open event -- nothing to
+  // do, but this is the exact observation the buggy dedup would later
+  // collide with.
+  const first = sandbox.pollTaskChanges();
+  assert.match(first.outcomes[0], /^already_open:/);
+
+  // Type becomes Story, last_edited_time/Status/Assigned Agent unchanged --
+  // exactly as a same-minute edit looks through Notion's API.
+  task.properties.Type = { type: 'select', select: { name: 'Story' } };
+  const second = sandbox.pollTaskChanges();
+  assert.equal(second.outcomes[0], 'archived_story_event:evt-round27');
+
+  // Reverted back to Task, still the same minute -- Notion now reports the
+  // exact same (id, last_edited_time, Status, Assigned Agent, Type) tuple
+  // as the very first observation above.
+  task.properties.Type = { type: 'select', select: { name: 'Task' } };
+  const third = sandbox.pollTaskChanges();
+
+  assert.doesNotMatch(
+    third.outcomes[0], /^duplicate:/,
+    'expected the Story detour in between to prevent this from being masked as a duplicate of the original Task observation'
+  );
+});
+
 test('backfillStoryExclusion_ queries every Type=Story page regardless of Status, and archives stray open events', () => {
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee03';
   const { sandbox, fetchLog } = harness({
