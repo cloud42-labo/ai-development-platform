@@ -3070,3 +3070,117 @@ test('closing a Task-era event via the Story conversion itself does not poison i
   const laterPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-survives-story-close');
   assert.equal(laterPatches.length, 1, 'expected only the first poll\'s close PATCH -- no archive PATCH on the later poll');
 });
+
+test('backfillTaskOriginProvenance_ stamps Task Origin= onto pre-existing Task-era events that predate this revision', () => {
+  // Codex-reported gap (P1): absence of Task Origin= must not default to
+  // "treat as unproven, possibly-Story-origin data" for an event that
+  // simply predates this revision -- a genuinely pre-upgrade Task-era
+  // event has the identical no-marker signature as bogus legacy Story
+  // stray data, with the opposite correct outcome. This operator backfill
+  // captures "this page's Type genuinely read non-Story at the moment
+  // this distinction was introduced" as a permanent anchor.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dii01';
+  const legacyEvent = eventPage('evt-legacy-task-era', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
+    // No note at all -- exactly what a genuinely pre-upgrade event looks
+    // like, since Task Origin= didn't exist yet when it was created.
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-01T00:05:00.000Z',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      type: 'Task',
+    })],
+    events: [legacyEvent],
+  });
+
+  const summary = sandbox.backfillTaskOriginProvenance_();
+
+  const query = JSON.parse(requestsTo(fetchLog, 'POST', TASKS_DS)[0].options.payload);
+  assert.deepEqual(query.filter, {
+    and: [
+      { property: 'Type', select: { is_not_empty: true } },
+      { property: 'Type', select: { does_not_equal: 'Story' } },
+    ],
+  });
+  assert.equal(summary.scanned, 1);
+  assert.equal(summary.processed, 1);
+  assert.equal(summary.outcomes[0], 'backfilled_task_origin:evt-legacy-task-era');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-task-era');
+  assert.equal(patches.length, 1);
+  const noteContent = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.match(noteContent, /Task Origin=backfill:evt-legacy-task-era/);
+});
+
+test('backfillTaskOriginProvenance_ is a free re-scan once an event already has Task Origin=', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dii02';
+  const alreadyStamped = eventPage('evt-already-stamped', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    note: 'Task Origin=snap-existing',
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-01T00:05:00.000Z',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      type: 'Task',
+    })],
+    events: [alreadyStamped],
+  });
+
+  const summary = sandbox.backfillTaskOriginProvenance_();
+
+  assert.equal(summary.outcomes[0], 'no_backfill_needed:' + taskId);
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-already-stamped');
+  assert.equal(patches.length, 0, 'expected an event that already has Task Origin= to be left completely untouched, not re-stamped');
+});
+
+test('after backfillTaskOriginProvenance_, a pre-upgrade Task-era event survives a later reclassification to Story', () => {
+  // End-to-end proof: the backfill's own stamp is exactly what
+  // eventWasTouchedDuringTaskExecution_ needs later, when the same page
+  // is reclassified to Story.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dii03';
+  const legacyEvent = eventPage('evt-legacy-survives', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T02:00:00.000Z',
+  });
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-01T00:05:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [legacyEvent] });
+
+  sandbox.backfillTaskOriginProvenance_();
+  // Reflect the backfill's PATCH back onto the fixture, exactly as Notion
+  // itself would now show it.
+  const backfillPatch = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-survives')[0].options.payload
+  );
+  legacyEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: backfillPatch.properties.Note.rich_text[0].text.content }],
+  };
+
+  // Now reclassify the Task to Story.
+  task.properties.Type = { type: 'select', select: { name: 'Story' } };
+  task.last_edited_time = '2026-09-01T00:00:00.000Z';
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'story_excluded');
+  const archivePatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-survives');
+  assert.equal(
+    archivePatches.length, 1,
+    'expected only the backfill\'s own PATCH -- no archive PATCH from the reclassification'
+  );
+});

@@ -890,6 +890,167 @@ function backfillStoryExclusion_() {
   });
 }
 
+// Operator escape hatch for an EXISTING LIVE DEPLOYMENT being upgraded to
+// add the `Task Origin=` provenance marker (see
+// eventWasTouchedDuringTaskExecution_): retroactively stamps `Task Origin=`
+// onto every pre-existing Time Event attached to a currently non-Story
+// Task/Subtask page that doesn't have one yet, paired with a matching Sync
+// Log row — so eventWasTouchedDuringTaskExecution_ can validate them
+// exactly like any event created after this deploy, the moment a later
+// reclassification to Story needs to tell them apart from bogus pre-fix
+// Story stray data.
+//
+// Codex-reported gap: absence of `Task Origin=` must not default to "treat
+// as unproven, possibly-Story-origin data" for an event that simply
+// predates this revision — eventWasTouchedDuringTaskExecution_'s own
+// conservative default (archive when unprovable) is correct for genuinely
+// bogus legacy Story stray data, but a genuinely pre-upgrade Task-era
+// event has the IDENTICAL signature (no marker at all, since the field
+// itself is new) with the OPPOSITE correct outcome (preserve). The two
+// cannot be told apart from the event's own data alone — only an
+// operator-run backfill, executed at a known point in time (immediately
+// after deploying THIS revision, before any of these Tasks are
+// reclassified to Story), can capture "this page's Type genuinely read
+// non-Story at the moment this distinction was introduced" as a permanent
+// anchor, mirroring backfillStoryExclusion_'s capture of the opposite
+// direction. A fresh deploy has no pre-existing Time Events at all and
+// needs no backfill — every event gets its `Task Origin=` at creation from
+// day one.
+//
+// Deliberately scoped to Task/Subtask pages whose Type is explicitly
+// recorded and not Story (`is_not_empty` + `does_not_equal: 'Story'`): a
+// page with no Type at all gives eventWasTouchedDuringTaskExecution_
+// nothing usable to stamp either (it requires a non-empty, non-Story
+// value), so backfilling it would be a wasted API call with no effect.
+//
+// Resumable and pagination-bounded the same way backfillStoryExclusion_
+// is, and for the identical reasons — see its own comment.
+function backfillTaskOriginProvenance_() {
+  return withPollLock_(function () {
+    const runStartedAt = new Date();
+    const props = PropertiesService.getScriptProperties();
+    const resumeCursor = props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR');
+    const tieOffset = resumeCursor ? Number(props.getProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET') || '0') : 0;
+    const baseConditions = [
+      { property: 'Type', select: { is_not_empty: true } },
+      { property: 'Type', select: { does_not_equal: 'Story' } },
+    ];
+    const filter = resumeCursor
+      ? { and: baseConditions.concat([{ timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } }]) }
+      : { and: baseConditions };
+    function tieOffsetStartIndex_(results) {
+      let index = 0;
+      if (resumeCursor && tieOffset > 0) {
+        let skipped = 0;
+        while (
+          index < results.length &&
+          skipped < tieOffset &&
+          String(results[index].last_edited_time || '') === resumeCursor
+        ) {
+          skipped++;
+          index++;
+        }
+      }
+      return index;
+    }
+    const result = paginateNotionQuery_(
+      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+      {
+        page_size: 100,
+        filter: filter,
+        sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+      },
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS - MIN_PROCESSING_RESERVE_MS,
+      function (results) { return tieOffsetStartIndex_(results) < results.length; }
+    );
+    const startIndex = tieOffsetStartIndex_(result.results);
+    const toProcess = result.results.slice(startIndex);
+
+    const outcomes = [];
+    let iterated = 0;
+    while (
+      iterated < toProcess.length &&
+      (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
+    ) {
+      outcomes.push(backfillTaskOriginForTask_(toProcess[iterated]));
+      iterated++;
+    }
+    const timedOut = iterated < toProcess.length;
+    const processed = toProcess.slice(0, iterated);
+
+    if ((result.truncated || timedOut) && processed.length) {
+      const lastSeen = String(processed[processed.length - 1].last_edited_time || '');
+      if (lastSeen) {
+        props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR', lastSeen);
+        let newTieOffset = 0;
+        for (let i = 0; i < processed.length; i++) {
+          newTieOffset = String(processed[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
+        }
+        const cumulativeTieOffset = (lastSeen === resumeCursor ? tieOffset : 0) + newTieOffset;
+        props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET', String(cumulativeTieOffset));
+      }
+      Logger.log(
+        'backfillTaskOriginProvenance_: stopped at the ' +
+        (timedOut ? 'wall-clock bound' : 'pagination safety limit') +
+        ' after processing ' + iterated + ' of ' + result.results.length +
+        ' Task page(s) this call — call again to resume' +
+        (processed.length ? ' from ' + processed[processed.length - 1].last_edited_time : '') + '.'
+      );
+    } else if (result.truncated || timedOut) {
+      // Stopped with nothing new processed this call (the whole returned
+      // batch was already covered by the tie-offset skip): leave the
+      // resume state exactly as it was rather than losing the resume
+      // point — same rule the other backfills apply for the identical
+      // scenario.
+    } else {
+      // Fully drained: clear any stale resume point so a future call
+      // starts a fresh full pass.
+      props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR', '');
+      props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET', '');
+    }
+
+    return {
+      scanned: result.results.length,
+      processed: iterated,
+      truncated: result.truncated,
+      timedOut: timedOut,
+      outcomes: outcomes,
+    };
+  });
+}
+
+// Backfills `Task Origin=` onto every Time Event of one Task page that
+// doesn't already have one — see backfillTaskOriginProvenance_ for why.
+// Events created after this revision already carry the marker from
+// createNotionTimeEvent_ and are left completely untouched (no-op, not
+// re-stamped) — this only ever fills a gap, never overwrites.
+function backfillTaskOriginForTask_(task) {
+  const taskId = task.id;
+  const taskType = propertyText_(task.properties.Type);
+  const currentStatus = propertyText_(task.properties.Status);
+  const events = queryNotionTimeEventsForTask_(taskId);
+  const actions = [];
+  events.forEach(function (eventPage) {
+    const existingOrigin = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginSnapshotId;
+    if (existingOrigin) return;
+    const backfillSnapshotId = 'backfill:' + eventPage.id;
+    const existingNote = propertyText_(eventPage.properties.Note);
+    const marker = buildNote_({ taskOriginSnapshotId: backfillSnapshotId });
+    notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
+      properties: {
+        Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
+      },
+    });
+    logSnapshot_(
+      backfillSnapshotId, 'task_origin_backfill', taskId, currentStatus,
+      new Date(), 'backfilled_task_origin:' + eventPage.id, taskType
+    );
+    actions.push('backfilled_task_origin:' + eventPage.id);
+  });
+  return actions.length ? actions.join(',') : 'no_backfill_needed:' + taskId;
+}
+
 // Tasks whose last_edited_time is at or after `since`, oldest first, so a
 // capped run leaves a contiguous unprocessed tail behind the cursor. Returns
 // { results, truncated } — see paginateNotionQuery_.
