@@ -566,8 +566,8 @@ function reconcileTaskPage_(task) {
   // Done transition also needs no Time Event evidence — only its children's —
   // so it must never reach the Done gate below either. See
   // reconcileStoryTask_ for the reduced handling this gets instead: never
-  // open a new event regardless of Status, but still close out (and log) any
-  // event a Story already accumulated under the pre-fix behavior.
+  // open a new event regardless of Status, but still archive away (and log)
+  // any event a Story already accumulated under the pre-fix behavior.
   const isStory = taskType === 'Story';
 
   // Done is a completion gate that must be re-verified on every poll that
@@ -585,7 +585,7 @@ function reconcileTaskPage_(task) {
   if (!mustReverify && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
 
   const outcome = isStory
-    ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId, when)
+    ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId)
     : reconcileAuthoritativeTimeEvents_(
         task,
         currentStatus,
@@ -604,22 +604,58 @@ function reconcileTaskPage_(task) {
 // never opens a new Time Event no matter what Status reads, and never runs
 // the Done gate — a Story is a rollup, not an execution unit, so its own
 // completion needs no Time Event evidence. Its only remaining job is
-// cleanup: close out any open event a Story accumulated before this
-// exclusion existed, so a pre-fix stray open interval does not linger
-// forever (BUG-ADP-TTE-01) — the same close path and Reason-tagging
-// (`closeNotionTimeEvent_`) executable Tasks use, so it projects to the
-// Sheet and reads in Notion identically to any other closed interval, just
-// distinguishable by `Reason=story_excluded` in its Note.
-function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when) {
+// cleanup: remove any open event a Story accumulated before this exclusion
+// existed, so a pre-fix stray open interval does not linger forever
+// (BUG-ADP-TTE-01).
+//
+// Archives the stray event rather than closing it through the normal
+// closeNotionTimeEvent_ path — Codex-reported gap in an earlier version of
+// this fix: closing it gives it a real Ended At (the observed edit time),
+// and Duration (h) then computes over however long it happened to be open
+// (routinely days), leaving one large but entirely fictitious interval
+// that would still inflate every historical Active-hour aggregation this
+// reconciler does not directly control (the Sheet's own Duration (h)
+// formula, and any downstream KPI aggregation reading Task Time Events) —
+// exactly the double-counting this whole exclusion exists to stop, just
+// moved from ongoing to a one-time final entry instead of prevented
+// outright. Nothing about this event was ever real work to time, so
+// removing it — not recording a fictitious duration for it — matches what
+// actually happened. Archiving (rather than a hard delete) also means
+// Notion's own database/data-source queries exclude it going forward by
+// default, so it naturally stops showing up as `openEvents` on any future
+// poll without this function needing to track that itself, and the row
+// remains recoverable from Notion's trash if ever needed. Known residual
+// gap: the Google Sheet projection is a derived, non-authoritative view
+// (see README) and this does not retroactively delete a Sheet row this
+// event may have already been projected into under the pre-fix open
+// state — that row goes stale (never updated again) rather than being
+// removed, a smaller and purely cosmetic issue next to the authoritative
+// double-counting this fix actually closes.
+function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId) {
   const openEvents = queryNotionTimeEventsForTask_(taskId).filter(function (eventPage) {
     return !propertyDate_(eventPage.properties['Ended At']);
   });
   const actions = [];
   openEvents.forEach(function (eventPage) {
-    closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'story_excluded');
-    actions.push('closed_story_event:' + eventPage.id);
+    archiveStoryTimeEvent_(eventPage, changedBy, snapshotId);
+    actions.push('archived_story_event:' + eventPage.id);
   });
   return actions.length ? actions.join(',') : 'story_excluded';
+}
+
+// Archives (see reconcileStoryTask_ for why) a Story's stray open Time
+// Event, stamping the same Reason=story_excluded marker used elsewhere in
+// this file in the same request, so the record still explains itself if
+// ever restored from Notion's trash.
+function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
+  const existingNote = propertyText_(eventPage.properties.Note);
+  const marker = buildNote_({ reason: 'story_excluded', snapshotId: snapshotId, changedBy: changedBy });
+  notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
+    archived: true,
+    properties: {
+      Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
+    },
+  });
 }
 
 // Operator escape hatch for an EXISTING live deployment being upgraded to
@@ -633,13 +669,13 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
 // that exact Story. Queries every currently Type = Story, Status = In
 // Progress page directly — independent of last_edited_time or the cursor —
 // and reconciles each through the ordinary reconcileTaskPage_ entry point,
-// which closes any open event via reconcileStoryTask_. A fresh deploy has
+// which archives any open event via reconcileStoryTask_. A fresh deploy has
 // no pre-existing open Story events and needs no backfill: the exclusion
 // applies to every poll from day one. Run once from the editor immediately
 // after deploying this revision.
 //
 // Resumable the same way backfillResultFingerprints_ is, and for the same
-// reason: closing a Story's Time Event does not remove the Story itself
+// reason: archiving a Story's Time Event does not remove the Story itself
 // from this query's own Type=Story/Status=In Progress result set (nothing
 // about its Status or Type changed), so a truncated call's unqualified
 // re-run would keep re-fetching the identical oldest prefix forever —
@@ -649,7 +685,13 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
 // on_or_after, plus a local STORY_EXCLUSION_RESUME_TIE_OFFSET skip so a
 // tied last_edited_time at the truncation boundary resumes correctly
 // rather than silently dropping its remainder) tracks how far a prior call
-// actually got.
+// actually got. Same accepted, extreme-scale limitation as
+// LAST_SYNC_CURSOR_TIE_OFFSET / BACKFILL_RESUME_TIE_OFFSET elsewhere in
+// this file: a single tied last_edited_time group wide enough to itself
+// exceed QUERY_PAGE_SAFETY_LIMIT (thousands of Stories sharing one exact
+// minute) cannot be fully resolved this way, since Notion's public API
+// offers no secondary sort key to page within an exact-timestamp tie — see
+// README "Known limitations".
 //
 // Also bounds its own pagination phase the same way backfillResultFingerprints_
 // does, and for the same reason: an unbounded fetch (up to
@@ -876,10 +918,11 @@ function isFreeOutcome_(outcome) {
   // made a real write (the rollback) and is exactly the case the always-
   // reverify rule exists to keep catching.
   // 'story_excluded' makes no Notion write either (a Type = Story page with
-  // nothing open to close — see reconcileStoryTask_) — free to re-scan on
-  // every poll just like a duplicate or ignored outcome. A Story that DID
-  // have a stray open event closed reports 'closed_story_event:...' instead,
-  // which is a real write and does count, the same as any other close.
+  // nothing open to archive away — see reconcileStoryTask_) — free to
+  // re-scan on every poll just like a duplicate or ignored outcome. A Story
+  // that DID have a stray open event archived reports
+  // 'archived_story_event:...' instead, which is a real write and does
+  // count, the same as any other write.
   return outcome === 'ignored:not_configured_task' ||
     outcome === 'done_gate_passed' ||
     outcome === 'story_excluded' ||

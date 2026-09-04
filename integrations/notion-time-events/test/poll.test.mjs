@@ -267,10 +267,15 @@ test('a Story\'s stray open Time Event from before the exclusion existed gets cl
 
   const summary = sandbox.pollTaskChanges();
 
-  assert.equal(summary.outcomes[0], 'closed_story_event:evt-story-stray');
-  const closes = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-story-stray');
-  assert.equal(closes.length, 1);
-  const note = JSON.parse(closes[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-story-stray');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-story-stray');
+  assert.equal(patches.length, 1);
+  const payload = JSON.parse(patches[0].options.payload);
+  // Archived, not closed: no Ended At, so no fictitious Duration (h) can
+  // ever compute for this stray interval.
+  assert.equal(payload.archived, true);
+  assert.equal(payload.properties['Ended At'], undefined);
+  const note = payload.properties.Note.rich_text[0].text.content;
   assert.match(note, /Reason=story_excluded/);
   // Never re-opened for the same still-In-Progress Story on this same call.
   assert.equal(requestsTo(fetchLog, 'POST', '/v1/pages').length, 0);
@@ -2294,12 +2299,13 @@ test('Type is part of the reconciliation snapshot, so becoming a Story is never 
 
   const second = sandbox.pollTaskChanges();
 
-  assert.equal(second.outcomes[0], 'closed_story_event:evt-pre-story');
-  const closes = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-pre-story');
-  assert.equal(closes.length, 1);
+  assert.equal(second.outcomes[0], 'archived_story_event:evt-pre-story');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-pre-story');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });
 
-test('backfillStoryExclusion_ queries Type=Story, Status=In Progress directly and closes stray open events', () => {
+test('backfillStoryExclusion_ queries Type=Story, Status=In Progress directly and archives stray open events', () => {
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee03';
   const { sandbox, fetchLog } = harness({
     tasks: [taskPage(taskId, {
@@ -2323,11 +2329,13 @@ test('backfillStoryExclusion_ queries Type=Story, Status=In Progress directly an
   });
   assert.equal(summary.scanned, 1);
   assert.equal(summary.processed, 1);
-  assert.equal(summary.outcomes[0], 'closed_story_event:evt-old-story');
-  assert.equal(requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-old-story').length, 1);
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-old-story');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-old-story');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });
 
-test('backfillStoryExclusion_ is a free re-scan once a Story has already been closed out', () => {
+test('backfillStoryExclusion_ is a free re-scan once a Story has already been archived out', () => {
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee04';
   const { sandbox, fetchLog } = harness({
     tasks: [taskPage(taskId, {
