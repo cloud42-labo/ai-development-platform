@@ -253,6 +253,13 @@ test('a Story In Progress opens no Time Event (BUG-ADP-TTE-01)', () => {
 test('a Story\'s stray open Time Event from before the exclusion existed gets archived, not left to linger', () => {
   const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
   const { sandbox, fetchLog } = harness({
+    // TASK_ORIGIN_BACKFILL_COMPLETE: this event has no Task Origin= marker
+    // (it predates that feature), and reconcileStoryTask_'s archive
+    // fallback now gates on the provenance backfill having fully drained
+    // at least once -- see its own comment (Codex-reported gap, round 19).
+    // Simulates the operator having already run backfillTaskOriginProvenance_
+    // to completion, per the documented upgrade order.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
     tasks: [taskPage(taskId, {
       status: 'In Progress',
       agent: 'Claude Opus',
@@ -290,6 +297,8 @@ test('an ordinary poll also archives a Story\'s already-closed legacy Time Event
   // itself was later edited and picked up by a normal incremental poll.
   const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
   const { sandbox, fetchLog } = harness({
+    // See the previous test's comment on TASK_ORIGIN_BACKFILL_COMPLETE.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
     tasks: [taskPage(taskId, {
       status: 'Review',
       agent: 'Claude Opus',
@@ -2318,6 +2327,9 @@ test('Type is part of the reconciliation snapshot, so becoming a Story is never 
     startedAt: sameMinute,
   });
   const { sandbox, fetchLog } = harness({
+    // See "a Story's stray open Time Event..." test above for why this is
+    // needed: evt-pre-story has no Task Origin= marker.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
     tasks: [task],
     events: [eventPage('evt-pre-story', { actor: 'Claude', startedAt: sameMinute })],
   });
@@ -2349,6 +2361,9 @@ test('Type is part of the reconciliation snapshot, so becoming a Story is never 
 test('backfillStoryExclusion_ queries every Type=Story page regardless of Status, and archives stray open events', () => {
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee03';
   const { sandbox, fetchLog } = harness({
+    // See "a Story's stray open Time Event..." test above for why this is
+    // needed.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
     tasks: [taskPage(taskId, {
       status: 'In Progress',
       agent: 'Claude Opus',
@@ -2384,6 +2399,9 @@ test('backfillStoryExclusion_ also archives an already-closed legacy Story event
   // never even see that Story again either.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee06';
   const { sandbox, fetchLog } = harness({
+    // See "a Story's stray open Time Event..." test above for why this is
+    // needed.
+    scriptProperties: { TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
     tasks: [taskPage(taskId, {
       status: 'Done',
       agent: 'Claude Opus',
@@ -2587,7 +2605,10 @@ test('archiving a Story\'s Time Event also purges its Sheet projection row, not 
     'GET *': () => ({}),
   };
   const { sandbox, spreadsheet } = loadCodeGsSandbox({
-    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    // TASK_ORIGIN_BACKFILL_COMPLETE: see "a Story's stray open Time
+    // Event..." test above for why this is needed -- this event has no
+    // Task Origin= marker.
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', TASK_ORIGIN_BACKFILL_COMPLETE: 'true' },
     fetch: notionFetchStub(routes),
   });
   const sheet = spreadsheet.getSheetByName('Time Events');
@@ -3276,4 +3297,90 @@ test('backfillStoryExclusion_ never resolves an ambiguous-marked event -- it sta
   assert.equal(summary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-ambiguous-on-story');
   const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-on-story');
   assert.equal(patches.length, 0, 'expected no archive/patch of the ambiguous-marked event from this backfill');
+});
+
+test('an ordinary poll never archives a marker-less Story event before the provenance backfill has ever fully drained', () => {
+  // Codex-reported gap (P1, round 19): on an EXISTING live deployment, the
+  // already-installed pollTaskChanges trigger keeps running independently
+  // the moment this revision's code is deployed -- it does not wait for an
+  // operator to run backfillTaskOriginProvenance_() first, and that
+  // backfill itself can take multiple wall-clock-bounded calls to drain on
+  // a large workspace. A Story reached by an ordinary poll during that
+  // window has a pre-existing event with no Task Origin= marker YET --
+  // not because its origin is confirmed non-Task, simply because the
+  // backfill hasn't reached it -- which is indistinguishable from
+  // genuinely bogus pre-fix Story stray data from the event's own data
+  // alone. Without TASK_ORIGIN_BACKFILL_COMPLETE unset (the default until
+  // an operator runs the backfill to a full drain), reconcileStoryTask_
+  // must treat a marker-less event the same as an ambiguous one: skipped,
+  // not archived.
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    // Deliberately NOT setting TASK_ORIGIN_BACKFILL_COMPLETE -- this is
+    // the default, pre-backfill state on a freshly-deployed existing
+    // installation.
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [
+      eventPage('evt-race-with-backfill', { actor: 'Claude', startedAt: '2026-08-12T12:42:00.000Z' }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'skipped_pending_provenance_backfill:evt-race-with-backfill');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-race-with-backfill');
+  assert.equal(patches.length, 0, 'expected no archive of a marker-less event before the provenance backfill has ever fully drained');
+});
+
+test('backfillTaskOriginProvenance_ persists TASK_ORIGIN_BACKFILL_COMPLETE only once it fully drains, not on a truncated or timed-out call', () => {
+  const taskId1 = '3cafbd82-6f3b-8158-9622-d795b43dnn01';
+  const taskId2 = '3cafbd82-6f3b-8158-9622-d795b43dnn02';
+
+  // First call: force truncation via QUERY_PAGE_SAFETY_LIMIT by returning
+  // has_more: true (with an advancing next_cursor) forever, same pattern
+  // the other resumable-backfill truncation tests in this file use.
+  let pageCount = 0;
+  const truncatedStub = notionFetchStub({
+    [TASKS_QUERY]: () => {
+      pageCount += 1;
+      return {
+        results: [taskPage(
+          '3cafbd82-6f3b-8158-9622-d795b43dnn' + String(pageCount).padStart(2, '0'),
+          { status: 'Done', agent: 'Claude Opus', lastEdited: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Task' }
+        )],
+        has_more: true,
+        next_cursor: 'c' + pageCount,
+      };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET *': () => ({}),
+  });
+  const { sandbox: truncatedSandbox, scriptProps: truncatedProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: truncatedStub,
+  });
+  truncatedSandbox.backfillTaskOriginProvenance_();
+  assert.equal(
+    truncatedProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), undefined,
+    'expected no completion flag from a truncated call'
+  );
+
+  // Second, independent sandbox: a small, fully-drained call.
+  const { sandbox: fullSandbox, scriptProps: fullProps } = harness({
+    tasks: [
+      taskPage(taskId1, { status: 'Done', agent: 'Claude Opus', lastEdited: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Task' }),
+      taskPage(taskId2, { status: 'Done', agent: 'Claude Opus', lastEdited: '2026-08-01T00:00:00.000Z', startedAt: '2026-08-01T00:00:00.000Z', type: 'Task' }),
+    ],
+    events: [],
+  });
+  const summary = fullSandbox.backfillTaskOriginProvenance_();
+  assert.equal(summary.truncated, false);
+  assert.equal(summary.timedOut, false);
+  assert.equal(fullProps.get('TASK_ORIGIN_BACKFILL_COMPLETE'), 'true');
 });

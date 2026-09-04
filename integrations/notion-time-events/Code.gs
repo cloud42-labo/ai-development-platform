@@ -717,6 +717,33 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
       }
       return;
     }
+    // Reached only when an event has no Task Origin= marker at all (not
+    // ambiguous, not confirmed Task-era) -- Codex-reported gap (round 19):
+    // on an EXISTING live deployment, the already-installed pollTaskChanges
+    // trigger keeps running the moment this revision's code is deployed,
+    // independent of whether backfillTaskOriginProvenance_ has been run yet
+    // or has finished draining (it can take multiple wall-clock-bounded
+    // calls on a large workspace). A Story reached by an ordinary poll
+    // during that window has a pre-existing event that genuinely has no
+    // marker YET, not because its origin is confirmed non-Task -- and
+    // that is indistinguishable, from this event's data alone, from the
+    // exact bogus-Story-stray-data case this branch exists to archive.
+    // Archiving it here, before the backfill ever gets a chance to flag it
+    // ambiguous, permanently erases the same genuine Task-era history the
+    // whole ambiguous-marker mechanism exists to protect -- just via a
+    // race instead of a caller reasoning about current Type. Gate this
+    // path behind taskOriginBackfillComplete_(): until the operator has
+    // run backfillTaskOriginProvenance_() to a full, undrained-free
+    // completion at least once, a marker-less event is treated exactly
+    // like an ambiguous one -- skipped, not archived. A fresh deployment
+    // never reaches this branch at all regardless of the flag, since
+    // createNotionTimeEvent_ always stamps every event it ever creates
+    // with a marker (a real Type or NO_TYPE_MARKER) -- only pre-existing,
+    // pre-revision data can lack one.
+    if (!taskOriginBackfillComplete_()) {
+      actions.push('skipped_pending_provenance_backfill:' + eventPage.id);
+      return;
+    }
     archiveStoryTimeEvent_(eventPage, changedBy, snapshotId);
     actions.push('archived_story_event:' + eventPage.id);
   });
@@ -767,7 +794,12 @@ function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
 // backfillTaskOriginProvenance_, which this backfill leaves untouched
 // exactly like every other caller (see reconcileStoryTask_'s own comment
 // and the README's "Known limitations" for why that is a permanent,
-// deliberate exception, not a gap).
+// deliberate exception, not a gap), AND except a marker-less event at all
+// if backfillTaskOriginProvenance_ has never yet fully drained (see
+// taskOriginBackfillComplete_) — this backfill cannot archive anything on
+// an existing deployment until that has run to completion at least once
+// (Codex-reported gap, round 19). Run backfillTaskOriginProvenance_() to
+// a full drain first.
 //
 // Deliberately not scoped to Status = In Progress, for two independent
 // reasons a narrower query would miss:
@@ -1064,6 +1096,17 @@ function backfillTaskOriginProvenance_() {
       // starts a fresh full pass.
       props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_CURSOR', '');
       props.setProperty('TASK_ORIGIN_BACKFILL_RESUME_TIE_OFFSET', '');
+      // Persist that a full, undrained-free pass has happened at least
+      // once -- see taskOriginBackfillComplete_ and reconcileStoryTask_'s
+      // own comment (Codex-reported gap, round 19) for why
+      // reconcileStoryTask_ needs this to gate archiving a marker-less
+      // event on an existing live deployment against the already-running
+      // pollTaskChanges trigger racing ahead of this backfill. Never
+      // cleared once set: a later resumed run (e.g. new pages created
+      // between two full passes) simply re-drains and re-sets it the same
+      // way, and there is no scenario where "was ever fully drained"
+      // should revert to false.
+      props.setProperty('TASK_ORIGIN_BACKFILL_COMPLETE', 'true');
     }
 
     return {
@@ -2426,6 +2469,22 @@ function eventWasTouchedDuringTaskExecution_(eventPage) {
 // preserved nor archived) rather than guessing.
 function eventProvenanceIsAmbiguous_(eventPage) {
   return parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginType === AMBIGUOUS_PROVENANCE_MARKER;
+}
+
+// True once backfillTaskOriginProvenance_ has fully drained at least once
+// (see the TASK_ORIGIN_BACKFILL_COMPLETE write in its own "fully drained"
+// branch) — see reconcileStoryTask_'s own comment (Codex-reported gap,
+// round 19) for why its archive fallback gates on this: on an existing
+// live deployment, the already-installed pollTaskChanges trigger can
+// reach a currently-Story page's still-unmarked pre-existing event before
+// the backfill has finished flagging every such event ambiguous, and a
+// marker-less event is otherwise indistinguishable from genuinely bogus
+// pre-fix Story stray data. False on a fresh deployment that never needs
+// to run the backfill at all — harmless there, since createNotionTimeEvent_
+// always stamps a marker on every event it ever creates, so a fresh
+// deployment never produces a marker-less event for this to matter for.
+function taskOriginBackfillComplete_() {
+  return PropertiesService.getScriptProperties().getProperty('TASK_ORIGIN_BACKFILL_COMPLETE') === 'true';
 }
 
 function ensureProjectionHeaders_() {
