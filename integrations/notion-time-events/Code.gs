@@ -1573,6 +1573,11 @@ function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId,
     source: 'notion_reconcile',
     execution: executionId,
     snapshotId: snapshotId,
+    // Stamped here and ONLY here — see parseNoteMeta_'s taskOriginSnapshotId
+    // for why this must be this event's one permanent, unwritable-over
+    // record of the poll that actually created it, e.g. Task-era
+    // provenance for eventWasTouchedDuringTaskExecution_.
+    taskOriginSnapshotId: snapshotId,
     changedBy: changedBy,
   });
 
@@ -1885,6 +1890,12 @@ function buildNote_(fields) {
   if (fields.boundary) parts.push('Boundary=' + fields.boundary);
   if (fields.execution) parts.push('Execution=' + fields.execution);
   if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
+  // Stamped ONLY at creation (see createNotionTimeEvent_), never again by
+  // any later write to this event (a close, a reassignment, a Story-
+  // conversion close, ...) — see parseNoteMeta_'s taskOriginSnapshotId for
+  // why this must stay immutable and separate from the ordinary, mutable
+  // `Snapshot=` above.
+  if (fields.taskOriginSnapshotId) parts.push('Task Origin=' + fields.taskOriginSnapshotId);
   if (fields.changedBy) parts.push('Changed By=' + fields.changedBy);
   if (fields.resultFingerprint) parts.push('Result Fingerprint=' + fields.resultFingerprint);
   return parts.join(' | ');
@@ -1915,7 +1926,29 @@ function parseNoteMeta_(note) {
     // legacy Reason/Boundary/tie heuristic whenever it's present (absent
     // only on data from before this field existed).
     execution: noteField_(note, 'Execution'),
+    // The MOST RECENT snapshot to touch this event at all — creation, a
+    // close, a reassignment, anything. Used where "what last happened to
+    // this event" is the actual question (e.g. the Sheet projection's own
+    // audit column). NOT usable to answer "was this event genuinely
+    // created during a Task execution": see taskOriginSnapshotId below,
+    // whose whole purpose is staying immutable where this field can't.
     snapshotId: noteField_(note, 'Snapshot'),
+    // Codex-reported gap on the per-event Task-era provenance fix: reusing
+    // the ordinary, mutable `Snapshot=` field for that check was self-
+    // defeating — reconcileStoryTask_ itself closes a genuine Task-era
+    // event through closeNotionTimeEvent_ at the Story-conversion moment,
+    // which stamps a NEW `Snapshot=` (this exact Story-typed poll's own
+    // snapshot) that overwrites what noteField_'s last-occurrence lookup
+    // would return, poisoning the very evidence that just correctly
+    // classified this event as Task-era in the first place. Any LATER
+    // re-observation of this now-closed, now-mislabeled event would then
+    // see it as Story-typed and archive it, undoing the preservation this
+    // whole mechanism exists for. `Task Origin=` is written ONLY once, at
+    // createNotionTimeEvent_, and never touched by any later write to this
+    // event — immutable proof of what Type the page genuinely was at the
+    // moment this specific event was born, unaffected by anything that
+    // happens to the event afterward.
+    taskOriginSnapshotId: noteField_(note, 'Task Origin'),
     changedBy: noteField_(note, 'Changed By'),
     // The *last* recorded value only — fine for every other field (only the
     // newest close/reassignment metadata ever matters), but NOT enough on
@@ -2044,14 +2077,26 @@ function storyConversionHappenedWhileInProgress_(taskId) {
   return wasStoryObservation && mostRecentRow[3] === DEFAULTS.START_STATUS;
 }
 
-// True if THIS SPECIFIC event's own most recent `Snapshot=` marker (see
-// parseNoteMeta_ — stamped by whichever poll most recently actually wrote
-// to this event's Note: its creation, or a later close/re-close) maps to
-// a Sync Log row with an explicit, POST-UPGRADE, non-Story `Type`
-// recorded. Used by reconcileStoryTask_ to tell genuine Task-era Time
-// Events (created or touched while this exact page really was a Task,
-// now attached to a page reclassified TO Story) apart from pre-fix
-// legacy stray data.
+// True if THIS SPECIFIC event's own immutable `Task Origin=` marker (see
+// parseNoteMeta_'s taskOriginSnapshotId — stamped ONCE, at creation, and
+// never touched again by any later write to this event) maps to a Sync
+// Log row with an explicit, POST-UPGRADE, non-Story `Type` recorded. Used
+// by reconcileStoryTask_ to tell genuine Task-era Time Events (created
+// while this exact page really was a Task, now attached to a page
+// reclassified TO Story) apart from pre-fix legacy stray data.
+//
+// Deliberately reads `Task Origin=`, NOT the ordinary, mutable `Snapshot=`
+// — Codex-reported gap on an earlier version of this exact fix: using
+// `Snapshot=` (whichever poll most recently touched the event, via
+// parseNoteMeta_'s snapshotId) was self-defeating, because
+// reconcileStoryTask_ ITSELF closes a genuine Task-era event through
+// closeNotionTimeEvent_ at the Story-conversion moment — which stamps a
+// NEW `Snapshot=` (this exact Story-typed poll's own snapshot) that
+// overwrites the very evidence that just correctly classified the event
+// as Task-era, poisoning any LATER re-observation into archiving it after
+// all. `Task Origin=` cannot be overwritten this way: createNotionTimeEvent_
+// is the only place that ever writes it, and appendNote_ protects it from
+// eviction the same as Execution=/Boundary=.
 //
 // Deliberately PER EVENT, not per Task page — Codex-reported gap on an
 // earlier, page-level version of this same fix (then named
@@ -2083,14 +2128,14 @@ function storyConversionHappenedWhileInProgress_(taskId) {
 // correctly failing the check below rather than being misread as `Story`
 // or anything else specific.
 function eventWasTouchedDuringTaskExecution_(eventPage) {
-  const snapshotId = parseNoteMeta_(propertyText_(eventPage.properties.Note)).snapshotId;
-  if (!snapshotId) return false;
+  const originSnapshotId = parseNoteMeta_(propertyText_(eventPage.properties.Note)).taskOriginSnapshotId;
+  if (!originSnapshotId) return false;
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
   const rows = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
   const match = rows.find(function (row) {
-    return row[0] === snapshotId;
+    return row[0] === originSnapshotId;
   });
   if (!match) return false;
   const recordedType = String(match[6] || '');
@@ -2186,24 +2231,29 @@ function appendNote_(existingNote, marker, maxLength) {
   const isFingerprintSegment = function (segment) {
     return segment.trim().indexOf('Result Fingerprint=') === 0;
   };
-  // Execution=/Boundary= identify which execution an event belongs to and
-  // whether it marks a genuine execution boundary — enforceDoneGate_'s
-  // current-execution classification (and thus taskStartedAtTrusted) reads
-  // them directly. Losing one is a materially worse failure than losing one
-  // old Result Fingerprint=: a fingerprint only narrows the already-bounded
-  // stale-Result detection window (see README "Known limitations"), while
-  // losing Execution=/Boundary= can flip an event's own current/prior
-  // classification outright. Protected even more than fingerprints:
-  // evicted only once every fingerprint segment is already gone.
-  const isExecutionOrBoundarySegment = function (segment) {
+  // Execution=/Boundary=/Task Origin= each identify a fact that must never
+  // silently flip: which execution an event belongs to, whether it marks a
+  // genuine execution boundary (enforceDoneGate_'s current-execution
+  // classification, and thus taskStartedAtTrusted, reads Execution=/
+  // Boundary= directly), and — Task Origin= — the one immutable record of
+  // what Type the page genuinely was when this event was created
+  // (eventWasTouchedDuringTaskExecution_). Losing any of these three is a
+  // materially worse failure than losing one old Result Fingerprint=: a
+  // fingerprint only narrows the already-bounded stale-Result detection
+  // window (see README "Known limitations"), while losing one of these can
+  // flip an event's own current/prior classification, or its Task-era
+  // provenance, outright. Protected even more than fingerprints: evicted
+  // only once every fingerprint segment is already gone.
+  const isProtectedIdentitySegment = function (segment) {
     const trimmed = segment.trim();
-    return trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0;
+    return trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0
+      || trimmed.indexOf('Task Origin=') === 0;
   };
   const segments = existingNote.split(separator);
   let combined = segments.concat([clippedMarker]).join(separator);
   while (segments.length && combined.length > maxLength) {
     let dropIndex = segments.findIndex(function (segment) {
-      return !isFingerprintSegment(segment) && !isExecutionOrBoundarySegment(segment);
+      return !isFingerprintSegment(segment) && !isProtectedIdentitySegment(segment);
     });
     if (dropIndex < 0) dropIndex = segments.findIndex(isFingerprintSegment);
     if (dropIndex < 0) dropIndex = 0;

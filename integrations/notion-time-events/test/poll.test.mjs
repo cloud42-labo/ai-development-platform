@@ -2760,21 +2760,22 @@ test('a Task reclassified to Story preserves genuine Task-era Time Events instea
   // closed one left completely untouched — neither archived away as
   // though it were pre-fix bogus stray data.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dbb01';
-  // Each event's own Note carries the Snapshot= marker from whichever poll
-  // most recently wrote to it — eventWasTouchedDuringTaskExecution_ looks
-  // this up directly on the event, not the page, so the fixture must tie
-  // each event to its own Sync Log row rather than merely seeding one for
-  // the Task ID.
+  // Each event's own Note carries the immutable Task Origin= marker
+  // stamped at creation — eventWasTouchedDuringTaskExecution_ looks this
+  // up directly on the event, not the page (and not the ordinary, mutable
+  // Snapshot=, which reconcileStoryTask_'s own close would otherwise
+  // overwrite — see its own comment), so the fixture must tie each event
+  // to its own Sync Log row rather than merely seeding one for the Task ID.
   const openEvent = eventPage('evt-open-task-era', {
     actor: 'Claude',
     startedAt: '2026-08-28T00:00:00.000Z',
-    note: 'Snapshot=snap-task-era-open',
+    note: 'Task Origin=snap-task-era-open',
   });
   const closedEvent = eventPage('evt-closed-task-era', {
     actor: 'Claude',
     startedAt: '2026-08-20T00:00:00.000Z',
     endedAt: '2026-08-20T02:00:00.000Z',
-    note: 'Snapshot=snap-task-era-closed',
+    note: 'Task Origin=snap-task-era-closed',
   });
   const conversionEdit = '2026-08-30T05:00:00.000Z';
   const task = taskPage(taskId, {
@@ -2866,11 +2867,15 @@ test('a pre-upgrade legacy Story\'s old Task-path Sync Log rows are not mistaken
   // exists to stop, on precisely the common case (an existing deployment's
   // pre-fix Stories).
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee99';
+  // Task Origin= is what eventWasTouchedDuringTaskExecution_ actually
+  // reads; this exercises the branch where the marker resolves to a real
+  // Sync Log row that simply has no Type recorded (not merely the absence
+  // of any marker at all).
   const strayEvent = eventPage('evt-legacy-story-stray', {
     actor: 'Claude',
     startedAt: '2026-08-01T00:00:00.000Z',
     endedAt: '2026-08-05T00:00:00.000Z',
-    note: 'Snapshot=snap-pre-upgrade',
+    note: 'Task Origin=snap-pre-upgrade',
   });
   const task = taskPage(taskId, {
     status: 'Done',
@@ -2967,7 +2972,7 @@ test('a page briefly observed as an idle Task does not retroactively legitimize 
     actor: 'Claude',
     startedAt: '2026-08-01T00:00:00.000Z',
     endedAt: '2026-08-01T02:00:00.000Z',
-    note: 'Snapshot=snap-pre-upgrade-close',
+    note: 'Task Origin=snap-pre-upgrade-close',
   });
   const task = taskPage(taskId, {
     status: 'Backlog',
@@ -3002,4 +3007,66 @@ test('a page briefly observed as an idle Task does not retroactively legitimize 
     true,
     'expected the untouched legacy event to still be archived -- the page-level idle Task observation never touched this event itself'
   );
+});
+
+test('closing a Task-era event via the Story conversion itself does not poison its own Task Origin= provenance', () => {
+  // Codex-reported gap (P1): reconcileStoryTask_'s own close of a genuine
+  // Task-era event (see the preservation test above) used to read the
+  // ordinary, mutable Snapshot= field for provenance -- but that same
+  // close also WRITES a new Snapshot= (this exact Story-typed poll's own
+  // snapshot) into the event's Note. Any LATER re-observation of this
+  // now-closed event (e.g. an unrelated later edit to the same Story)
+  // would then misread its own most recent Snapshot= as Story-typed and
+  // archive it after all, undoing the preservation this mechanism exists
+  // for. Task Origin= is immune: stamped once at creation, never touched
+  // by the conversion close, so it must still read as Task-era on the
+  // later poll.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dhh01';
+  const openEvent = eventPage('evt-survives-story-close', {
+    actor: 'Claude',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    note: 'Task Origin=snap-task-era-create',
+  });
+  const task = taskPage(taskId, {
+    status: 'Review',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:00:00.000Z',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [openEvent] });
+  sandbox.logSnapshot_(
+    'snap-task-era-create', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-28T00:00:00.000Z'), 'opened:' + openEvent.id, 'Task'
+  );
+
+  // First poll: the Story conversion closes the event, preserving its
+  // duration -- and, along the way, stamps a NEW ordinary Snapshot= (this
+  // exact poll's own, Story-typed snapshot) into the event's Note.
+  const first = sandbox.pollTaskChanges();
+  assert.equal(first.outcomes[0], 'closed_task_era_at_story_conversion:evt-survives-story-close');
+  // Reflect that close back onto the in-memory fixture, exactly as Notion
+  // itself would now show it, so the second poll below sees it.
+  const firstClosePatch = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-survives-story-close')[0].options.payload
+  );
+  openEvent.properties['Ended At'] = { type: 'date', date: firstClosePatch.properties['Ended At'].date };
+  openEvent.properties.Note = {
+    type: 'rich_text',
+    rich_text: [{ plain_text: firstClosePatch.properties.Note.rich_text[0].text.content }],
+  };
+
+  // A later, unrelated edit to the same Story (still Type = Story).
+  task.properties['Assigned Agent'] = { type: 'select', select: { name: 'Claude Sonnet' } };
+  task.last_edited_time = '2026-09-01T00:00:00.000Z';
+
+  const second = sandbox.pollTaskChanges();
+
+  assert.equal(
+    second.outcomes[0],
+    'story_excluded',
+    'expected the now-closed Task-era event to be left untouched (no archive) on the later poll -- Task Origin= must survive the conversion close'
+  );
+  const laterPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-survives-story-close');
+  assert.equal(laterPatches.length, 1, 'expected only the first poll\'s close PATCH -- no archive PATCH on the later poll');
 });
