@@ -1454,7 +1454,33 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       else otherActor.push(eventPage);
     });
 
+    // An ambiguous-provenance event (see eventProvenanceIsAmbiguous_) landing
+    // in otherActor — a different actor than the newly desired one, not
+    // merely a reassignment of the same execution — is closed with the same
+    // `ambiguous_provenance_restart` reason and Started-At clamp as the
+    // sameActor[0] case below, not the ordinary `reassignment` reason —
+    // Codex-reported gap (round 29): the ambiguity check further down only
+    // ever examined sameActor[0], so this otherActor case fell straight into
+    // the ordinary close below and — worse — its own Execution= marker (see
+    // outgoingExecutionId below) would otherwise be inherited by the
+    // brand-new event opened for the new actor. An event flagged ambiguous
+    // can genuinely carry a real Execution= value from a script era that
+    // stamped Execution= before Task Origin= tracking existed (appendNote_
+    // preserves it untouched when the later backfill adds the ambiguous
+    // marker) — inheriting that unverifiable, possibly-Story-era identity
+    // onto otherwise-current, genuinely valid work would make
+    // enforceDoneGate_'s Execution= pass permanently exclude it from Done
+    // evidence the moment Started At is (correctly) refreshed for the new
+    // actor's own execution, since the two would no longer match.
     otherActor.forEach(function (eventPage) {
+      if (eventProvenanceIsAmbiguous_(eventPage)) {
+        const restartBoundary = when.getTime() >= eventStartedAt_(eventPage).getTime()
+          ? when
+          : eventStartedAt_(eventPage);
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart');
+        actions.push('closed_ambiguous_provenance_restart:' + eventPage.id);
+        return;
+      }
       closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'reassignment');
       actions.push('closed_reassigned:' + eventPage.id);
     });
@@ -1646,8 +1672,20 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // `when` instead of a stale Started At, so a governance violation
       // still gets a fresh, distinguishing identity rather than reusing the
       // old one.
+      //
+      // Never inherited from an ambiguous-provenance outgoing event — see
+      // the otherActor closing loop's own comment (Codex-reported gap,
+      // round 29) for why an unverifiable, possibly-Story-era Execution=
+      // must not be handed to otherwise-current, genuinely valid work.
+      // Falling through to '' here (as if this outgoing event carried no
+      // Execution= at all) is the same, already-established safe default
+      // this file uses for a legacy outgoing event that predates the field
+      // — see the comment block above for why leaving the replacement
+      // unmarked and deferring to the legacy Reason/Boundary/tie heuristic
+      // is deliberate, not an oversight.
       const outgoingExecutionId = otherActor.length
         ? (otherActor.map(function (eventPage) {
+            if (eventProvenanceIsAmbiguous_(eventPage)) return '';
             return parseNoteMeta_(propertyText_(eventPage.properties.Note)).execution;
           }).find(Boolean) || '')
         : '';

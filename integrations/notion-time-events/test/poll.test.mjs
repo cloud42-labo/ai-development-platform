@@ -3651,6 +3651,59 @@ test('an ambiguous open event does not silently keep accruing time once its Stor
   );
 });
 
+test('an ambiguous open event under a DIFFERENT actor is restarted, not reassigned -- its Execution= is never inherited by the new actor\'s event', () => {
+  // Codex-reported gap (P2, round 29): the ambiguity check above only ever
+  // examined sameActor[0], so an ambiguous open event belonging to a
+  // DIFFERENT actor than the newly desired one fell into the ordinary
+  // otherActor reassignment-close path instead of being restarted -- and,
+  // worse, its own Execution= marker (genuinely present when an event
+  // predates Task Origin= tracking but postdates Execution= tracking --
+  // appendNote_ preserves it untouched across the later ambiguous backfill)
+  // would then be inherited by the brand-new event opened for the new
+  // actor, via the ordinary reassignment executionId logic just below.
+  // That silently tags current, genuinely valid work with an unverifiable
+  // Story-era identity that will not match the Task's own freshly-recorded
+  // Started At -- permanently excluding it from enforceDoneGate_'s Done
+  // evidence the moment Started At is (correctly) refreshed.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dpp01';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const ambiguousEvent = eventPage('evt-ambiguous-other-actor', {
+    actor: 'Claude', // different from the Task's desiredActor below ('Human')
+    startedAt: '2026-01-01T00:00:00.000Z',
+    note: 'Execution=2026-01-01T00:00:00.000Z|Task Origin=ambiguous-pre-upgrade',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Human',
+    lastEdited: conversionEdit,
+    startedAt: conversionEdit,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(
+    summary.outcomes[0], /^closed_ambiguous_provenance_restart:evt-ambiguous-other-actor,opened:/,
+    'expected the ambiguous event to be restarted, not treated as an ordinary reassignment'
+  );
+
+  const closePatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-other-actor');
+  assert.equal(closePatches.length, 1);
+  assert.match(
+    JSON.parse(closePatches[0].options.payload).properties.Note.rich_text[0].text.content,
+    /Reason=ambiguous_provenance_restart/
+  );
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  const createdNote = creates[0].properties.Note.rich_text[0].text.content;
+  assert.doesNotMatch(
+    createdNote, /Execution=2026-01-01/,
+    'expected the new event to NOT inherit the ambiguous outgoing event\'s Story-era Execution= identity'
+  );
+});
+
 test('a page with older, unrelated Task-era history still distrusts a stale Story-era Started At on a later Story-to-Task conversion', () => {
   // Codex-reported gap (P2, round 21): cameFromArchivedStoryHistory used to
   // gate the Sync Log lookup on allEvents.length === 0 -- correct for a
