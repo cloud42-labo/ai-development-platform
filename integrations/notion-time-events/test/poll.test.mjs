@@ -3172,3 +3172,132 @@ test('a failed backfillTaskOriginForTask_ patch leaves no partial state, so a re
   assert.equal(patchAttempts, 2, 'expected the retry to re-attempt the same event, not skip it as already handled');
   assert.equal(retrySummary.outcomes[0], 'flagged_ambiguous_provenance:evt-retry-safety');
 });
+
+test('createNotionTimeEvent_ stamps NO_TYPE_MARKER (not a blank marker) when the Task page\'s Type is unset, so the event survives a later reclassification to Story', () => {
+  // Codex-reported gap (P1, round 17): buildNote_'s `if (fields.taskOriginType)`
+  // is a plain truthy check, so passing the Task's raw Type straight through
+  // (createNotionTimeEvent_'s prior behavior) silently omitted `Task Origin=`
+  // from the Note entirely whenever Type read blank (''), the ordinary case
+  // for ANY page that has never had its Type select set at all -- making a
+  // genuinely-new, directly-observed event indistinguishable from a
+  // pre-existing event that never got a marker (eventProvenanceIsAmbiguous_
+  // would find no marker either way), and vulnerable to being either archived
+  // outright or, worse, permanently stuck "skipped" as ambiguous by a later
+  // reclassification, despite this script having witnessed its creation on a
+  // page it knows for certain was not Story at that exact moment.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dll01';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-28T00:00:00.000Z',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    // type intentionally omitted (defaults to null / blank Type select).
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], noEventsForTaskIds: [taskId] });
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  const createdNote = creates[0].properties.Note.rich_text[0].text.content;
+  assert.match(
+    createdNote, /Task Origin=unset-type/,
+    'expected a blank-Type page\'s newly created event to carry the NO_TYPE_MARKER sentinel, not an omitted Task Origin='
+  );
+
+  // Reflect the create back onto an in-memory event fixture, exactly as
+  // Notion itself would now show it, then reclassify the page to Story.
+  const createdEvent = eventPage('evt-created-blank-type', {
+    actor: 'Claude',
+    startedAt: '2026-08-28T00:00:00.000Z',
+    note: createdNote,
+  });
+  const { sandbox: sandbox2, fetchLog: fetchLog2 } = harness({
+    tasks: [(() => {
+      const reclassified = taskPage(taskId, {
+        status: 'Review',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-30T05:00:00.000Z',
+        startedAt: '2026-08-28T00:00:00.000Z',
+        type: 'Story',
+      });
+      return reclassified;
+    })()],
+    events: [createdEvent],
+  });
+
+  const summary = sandbox2.pollTaskChanges();
+
+  // Must be preserved (closed at the conversion boundary, real duration
+  // kept) like any other confirmed Task-era event -- NOT archived as bogus
+  // Story stray data, and NOT left "skipped" as unprovable-ambiguous either.
+  assert.equal(summary.outcomes[0], 'closed_task_era_at_story_conversion:evt-created-blank-type');
+  const patches = requestsTo(fetchLog2, 'PATCH', '/v1/pages/evt-created-blank-type');
+  assert.equal(patches.length, 1);
+  const payload = JSON.parse(patches[0].options.payload);
+  assert.equal(payload.archived, undefined, 'expected a close, not an archive');
+  assert.ok(payload.properties['Ended At'], 'expected the open event to be closed with a real Ended At');
+});
+
+test('backfillStoryExclusion_ resolves ambiguous-marked events on the Story pages it targets, archiving them under a distinct outcome label', () => {
+  // Codex-reported gap (P1, round 17): the mandated upgrade order runs
+  // backfillTaskOriginProvenance_() (flags EVERY pre-existing event
+  // ambiguous, unconditionally -- see its own tests above) BEFORE
+  // backfillStoryExclusion_() (this function). Without this fix,
+  // reconcileStoryTask_'s ambiguous-skip branch -- correct as the default
+  // for ordinary polling, which must never guess -- would then also make
+  // THIS backfill skip every single event it was specifically run to clean
+  // up, since by the time it runs, backfillTaskOriginProvenance_ has already
+  // marked all of them ambiguous. That would fully disable BUG-ADP-TTE-01's
+  // fix on any existing deployment that follows the documented upgrade
+  // order. backfillStoryExclusion_ only ever visits pages that ARE Story
+  // right now (its own query filter), so for this one caller an
+  // ambiguous-marked event is safe to resolve by archiving, same as any
+  // other stray Story event -- just labeled distinctly so an operator can
+  // tell the two populations apart in the outcome log.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dmm01';
+  const ambiguousEvent = eventPage('evt-ambiguous-on-story', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-20T10:00:00.000Z',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      type: 'Story',
+    })],
+    events: [ambiguousEvent],
+  });
+
+  const summary = sandbox.backfillStoryExclusion_();
+
+  assert.equal(summary.outcomes[0], 'archived_ambiguous_provenance:evt-ambiguous-on-story');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-on-story');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
+
+  // Contrast: an ordinary poll-triggered reconcileTaskPage_ call (no
+  // resolveAmbiguousProvenance option) on the same kind of event must still
+  // skip it, exactly as before -- this backfill's opt-in is the only path
+  // that resolves ambiguous provenance.
+  const stillAmbiguous = eventPage('evt-still-ambiguous', {
+    actor: 'Claude',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    note: 'Task Origin=ambiguous-pre-upgrade',
+  });
+  const { sandbox: ordinarySandbox } = harness({
+    tasks: [taskPage('3cafbd82-6f3b-8158-9622-d795b43dmm02', {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-20T10:00:00.000Z',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      type: 'Story',
+    })],
+    events: [stillAmbiguous],
+  });
+  const ordinarySummary = ordinarySandbox.pollTaskChanges();
+  assert.equal(ordinarySummary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-still-ambiguous');
+});
