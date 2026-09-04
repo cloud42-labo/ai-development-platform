@@ -2262,3 +2262,97 @@ test('a rejected Done rolls Status back with a select write, not a status write'
   const body = JSON.parse(patches[0].options.payload);
   assert.deepEqual(body.properties.Status, { select: { name: 'Review' } });
 });
+
+test('Type is part of the reconciliation snapshot, so becoming a Story is never masked as a duplicate re-read', () => {
+  // Codex-reported gap: authoritativeSnapshotId_ originally hashed only ID,
+  // last_edited_time, Status and Assigned Agent — not Type. A page edited to
+  // Type = Story without also changing Status/assignee in the same minute as
+  // its previously processed snapshot would then hash identically to that
+  // prior snapshot and be skipped as `duplicate:` before reconcileStoryTask_
+  // ever ran, leaving a stray open event uncleaned until some unrelated
+  // later edit happened to change the hash.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee02';
+  const sameMinute = '2026-08-30T05:10:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: sameMinute,
+    startedAt: sameMinute,
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [task],
+    events: [eventPage('evt-pre-story', { actor: 'Claude', startedAt: sameMinute })],
+  });
+
+  // First poll processes the page as an ordinary Task (Type absent).
+  const first = sandbox.pollTaskChanges();
+  assert.match(first.outcomes[0], /^already_open:/);
+
+  // Type becomes Story with last_edited_time/Status/Assigned Agent all
+  // unchanged, exactly as a same-minute edit looks through Notion's API.
+  task.properties.Type = { type: 'select', select: { name: 'Story' } };
+
+  const second = sandbox.pollTaskChanges();
+
+  assert.equal(second.outcomes[0], 'closed_story_event:evt-pre-story');
+  const closes = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-pre-story');
+  assert.equal(closes.length, 1);
+});
+
+test('backfillStoryExclusion_ queries Type=Story, Status=In Progress directly and closes stray open events', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee03';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-12T12:42:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [eventPage('evt-old-story', { actor: 'Claude', startedAt: '2026-08-12T12:42:00.000Z' })],
+  });
+
+  const summary = sandbox.backfillStoryExclusion_();
+
+  const query = JSON.parse(requestsTo(fetchLog, 'POST', TASKS_DS)[0].options.payload);
+  assert.deepEqual(query.filter, {
+    and: [
+      { property: 'Status', select: { equals: 'In Progress' } },
+      { property: 'Type', select: { equals: 'Story' } },
+    ],
+  });
+  assert.equal(summary.scanned, 1);
+  assert.equal(summary.processed, 1);
+  assert.equal(summary.outcomes[0], 'closed_story_event:evt-old-story');
+  assert.equal(requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-old-story').length, 1);
+});
+
+test('backfillStoryExclusion_ is a free re-scan once a Story has already been closed out', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee04';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-12T12:42:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [],
+  });
+
+  sandbox.backfillStoryExclusion_();
+  const mutationsAfterFirst =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+
+  const second = sandbox.backfillStoryExclusion_();
+
+  // The Task's snapshot (id | last_edited_time | Status | Assigned Agent |
+  // Type) is unchanged between calls, so the second call's own dedup check
+  // (reconcileTaskPage_'s hasProcessedSnapshot_) reports it as a duplicate
+  // re-read rather than re-running reconcileStoryTask_ at all — free either
+  // way.
+  assert.match(second.outcomes[0], /^duplicate:/);
+  const mutationsAfterSecond =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+  assert.equal(mutationsAfterSecond, mutationsAfterFirst);
+});

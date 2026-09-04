@@ -553,8 +553,8 @@ function reconcileTaskPage_(task) {
   const title = propertyText_(task.properties.Title) || pageId;
   const when = authoritativeEditTime_(task);
   const changedBy = editorLabel_(task.last_edited_by);
-  const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent);
   const taskType = propertyText_(task.properties.Type);
+  const snapshotId = authoritativeSnapshotId_(task, currentStatus, assignedAgent, taskType);
 
   // Type = Story is a rollup/container over its own child Subtasks/Tasks, not
   // an execution unit — real effort is timed on the children, never on the
@@ -620,6 +620,75 @@ function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when)
     actions.push('closed_story_event:' + eventPage.id);
   });
   return actions.length ? actions.join(',') : 'story_excluded';
+}
+
+// Operator escape hatch for an EXISTING live deployment being upgraded to
+// add the Type = Story exclusion (see reconcileStoryTask_): on such a
+// deployment BOOTSTRAP_ACTIVE_DONE is already set from before, so the
+// ordinary pollTaskChanges bootstrap — which only ever runs once, before
+// that flag is set — never revisits a Story that has already been sitting
+// In Progress since before this revision was deployed. Its pre-fix open
+// Time Event would otherwise stay Active and keep inflating Active-hour
+// totals indefinitely, until some unrelated future edit happens to touch
+// that exact Story. Queries every currently Type = Story, Status = In
+// Progress page directly — independent of last_edited_time or the cursor —
+// and reconciles each through the ordinary reconcileTaskPage_ entry point,
+// which closes any open event via reconcileStoryTask_. A fresh deploy has
+// no pre-existing open Story events and needs no backfill: the exclusion
+// applies to every poll from day one. Run once from the editor immediately
+// after deploying this revision.
+//
+// Deliberately simpler than backfillResultFingerprints_'s resumable design:
+// this has no persisted cursor/tie-offset to manage, because re-running it
+// is always safe and cheap on its own — a Story already reconciled by an
+// earlier call has no open event left to close, so a re-scan is the free
+// 'story_excluded' outcome (see isFreeOutcome_), not a repeated write. If a
+// call is capped by the pagination safety limit or the wall-clock bound
+// below, calling it again picks up the same query fresh; anything that
+// call already closed just costs a cheap free re-read, not lost progress.
+function backfillStoryExclusion_() {
+  return withPollLock_(function () {
+    const runStartedAt = new Date();
+    const result = paginateNotionQuery_(
+      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+      {
+        page_size: 100,
+        filter: {
+          and: [
+            { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } },
+            { property: 'Type', select: { equals: 'Story' } },
+          ],
+        },
+        sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+      }
+    );
+    const outcomes = [];
+    let iterated = 0;
+    while (
+      iterated < result.results.length &&
+      (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
+    ) {
+      outcomes.push(reconcileTaskPage_(result.results[iterated]));
+      iterated++;
+    }
+    const timedOut = iterated < result.results.length;
+    if (result.truncated || timedOut) {
+      Logger.log(
+        'backfillStoryExclusion_: stopped at the ' +
+        (timedOut ? 'wall-clock bound' : 'pagination safety limit') +
+        ' after reconciling ' + iterated + ' of ' + result.results.length +
+        ' Story page(s) still In Progress — call again to continue (a Story ' +
+        'this call already closed costs only a free re-scan next time).'
+      );
+    }
+    return {
+      scanned: result.results.length,
+      processed: iterated,
+      truncated: result.truncated,
+      timedOut: timedOut,
+      outcomes: outcomes,
+    };
+  });
 }
 
 // Tasks whose last_edited_time is at or after `since`, oldest first, so a
@@ -1484,12 +1553,21 @@ function authoritativeEditTime_(task) {
   return parseTimestamp_(task && task.last_edited_time);
 }
 
-function authoritativeSnapshotId_(task, status, assignedAgent) {
+function authoritativeSnapshotId_(task, status, assignedAgent, type) {
   const seed = [
     normalizeId_(task && task.id),
     String(task && task.last_edited_time || ''),
     String(status || ''),
     String(assignedAgent || ''),
+    // Type now controls reconciliation behavior (Type = Story is excluded
+    // from event generation entirely — see reconcileTaskPage_). Without it
+    // here, a page edited to Type = Story in the same last_edited_time
+    // minute as its last-processed snapshot (Status/assignee unchanged)
+    // would hash identically to that prior snapshot and be skipped as
+    // `duplicate:` before reconcileStoryTask_ ever ran — leaving a stray
+    // open event uncleaned until some unrelated later edit changed the
+    // hash.
+    String(type || ''),
   ].join('|');
   const digest = Utilities.computeDigest(
     Utilities.DigestAlgorithm.SHA_256,
