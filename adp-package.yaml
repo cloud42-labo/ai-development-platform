@@ -42,7 +42,7 @@ rules_version: 1.0.0
 # governance/postmortem-improvement-loop.md,
 # governance/monthly-risk-management-review.md,
 # docs/product-design-doc-standard.md).
-workflow_version: 0.3.0
+workflow_version: 1.0.0
 
 # Version of the Templates asset class (templates/README.md,
 # templates/monthly-risk-review.md, templates/product-vision.md,
@@ -204,3 +204,32 @@ migration_path:
       Same as the paired rules_version 1.0.0 entry above — this Workflow
       bump is the durable-destination half of the same behavior change;
       adopt both together.
+  - field: workflow_version
+    from: "0.3.0"
+    to: "1.0.0"
+    date: "2026-09-04"
+    change: >-
+      ADP-054-T10: docs/operating-guide.md's "Weekly Sprint operation"
+      numbered list changed from Sprint Review -> Backlog Refinement ->
+      Sprint Planning -> Execution -> Retrospective -> Update weekly focus
+      to Sprint Review -> Retrospective -> Backlog Refinement -> Sprint
+      Close -> Sprint Goal review -> Sprint Planning, matching the
+      cloud42-labo/skills weekly-sprint Composite's already-approved order
+      (ADP-054) and the order Notion's Job Schedule|AI自動実行スケジュール
+      has actually run since. MAJOR per docs/versioning-policy.md's
+      Workflow judgment (Codex-reported correction to an initial MINOR
+      classification on this same PR): Execution and Update weekly focus
+      are removed as named steps and Retrospective/Refinement are
+      reordered relative to each other, regardless of whether the new
+      order was already the de facto practice elsewhere -- this file
+      versions what the durable artifact itself asserts, not whether
+      reality had already moved past it.
+    action_required: >-
+      An adopter whose own Routine/Scheduler prompt, checklist, or tooling
+      still names or numbers the old six steps (Review / Refinement /
+      Planning / Execution / Retrospective / Update focus) must update it
+      to the new order and step names (Review / Retrospective / Refinement
+      / Close / Goal review / Planning) -- in particular, treating
+      "Retrospective" as the step immediately after Review rather than
+      near the end, and recognizing Sprint Close and Sprint Goal review as
+      their own steps rather than folding them into Planning or Execution.
