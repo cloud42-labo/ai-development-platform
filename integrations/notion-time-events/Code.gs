@@ -585,7 +585,7 @@ function reconcileTaskPage_(task) {
   if (!mustReverify && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
 
   const outcome = isStory
-    ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId)
+    ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId, when)
     : reconcileAuthoritativeTimeEvents_(
         task,
         currentStatus,
@@ -640,10 +640,48 @@ function reconcileTaskPage_(task) {
 // closed legacy event) would keep feeding that aggregation the identical
 // double-counting this fix exists to stop, just moved from Notion to the
 // Sheet instead of eliminated.
-function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId) {
+//
+// BUT this "archive everything" behavior must never touch an event that
+// represents genuine Task-era work — Codex-reported gap: Type transitions
+// are supported symmetrically (see storyConversionHappenedWhileInProgress_ for the
+// mirror-image Story-to-Task case), so a page can just as well go the
+// other way, FROM a real executable Task WITH legitimate Time Events TO
+// Type = Story. Every event this function sees for such a page was created
+// by the ordinary reconcileAuthoritativeTimeEvents_ path while this exact
+// page genuinely was a Task — real, completed or in-flight work — and
+// archiving it outright would erase that work the moment someone
+// reclassifies the page. taskWasEverReconciledAsTask_ distinguishes the
+// two cases using the same durable Sync Log this file already relies on
+// for the mirror case: any Outcome NOT stamped by this Story path itself
+// (`story_excluded`/`archived_story_event:`) proves at least one earlier
+// poll saw this exact page through the Task path, i.e. Type genuinely was
+// not Story then — only possible if the events attached to it now are
+// real Task-era history, not pre-fix stray data (which, by construction,
+// could ONLY have accumulated while Type already read Story on every poll
+// that touched it — a Task-typed page has never once been allowed to skip
+// straight past reconcileAuthoritativeTimeEvents_).
+function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when) {
   const events = queryNotionTimeEventsForTask_(taskId);
+  if (!events.length) return 'story_excluded';
+
+  const hasLegitimateTaskHistory = taskWasEverReconciledAsTask_(taskId);
   const actions = [];
   events.forEach(function (eventPage) {
+    if (hasLegitimateTaskHistory) {
+      // Preserve, never erase: an open Task-era interval is closed at the
+      // conversion boundary exactly like any other Task leaving `In
+      // Progress` (real work, real duration, correctly stopped from
+      // accruing further now that this page routes through the Story path
+      // going forward) — a completed one needs no action at all, since it
+      // is already a legitimate closed interval that predates the
+      // conversion and was never part of the bug this exclusion exists to
+      // fix in the first place.
+      if (!propertyDate_(eventPage.properties['Ended At'])) {
+        closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'left_in_progress');
+        actions.push('closed_task_era_at_story_conversion:' + eventPage.id);
+      }
+      return;
+    }
     archiveStoryTimeEvent_(eventPage, changedBy, snapshotId);
     actions.push('archived_story_event:' + eventPage.id);
   });
@@ -1038,38 +1076,52 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         ? (latestHistoricalTimestamp && latestHistoricalTimestamp.getTime() > when.getTime() ? latestHistoricalTimestamp : when)
         : latestHistoricalTimestamp;
       const taskStartedAt = propertyDate_(task.properties['Started At']);
-      // A page that was ever Type=Story (see taskWasEverReconciledAsStory_)
-      // must never have its Started At trusted here, however fresh it looks
-      // against allEvents — when allEvents is empty for it, that emptiness
-      // is precisely because its real history was archived away, not
-      // because Started At is reliable. Fall through to `when` (this
-      // observed edit, i.e. the Story-to-Task reclassification itself) as
-      // the execution's start instead, exactly as Codex's finding
-      // suggested: the type-change edit is what actually begins this
-      // Task's own executable life, not whatever Started At happened to
-      // read from its time as a Story.
+      // A page most recently seen as Type=Story WHILE ALREADY In Progress
+      // (see storyConversionHappenedWhileInProgress_) must never have its
+      // Started At trusted here, however fresh it looks against allEvents
+      // — when allEvents is empty for it, that emptiness is precisely
+      // because its real history was archived away, not because Started
+      // At is reliable, and a page that never left In Progress across the
+      // Type change still carries the STORY's own original Started At
+      // unchanged, not a freshly recorded one. Fall through to `when`
+      // (this observed edit, i.e. the Story-to-Task reclassification
+      // itself) as the execution's start instead, exactly as Codex's
+      // finding suggested: the type-change edit is what actually begins
+      // this Task's own executable life, not whatever Started At happened
+      // to read from its time as a Story.
       //
       // Gated on allEvents.length === 0, not called unconditionally —
       // Codex-reported gap in an earlier version of this fix, on two
       // counts. Performance: every ordinary Task open (the vast majority
       // of which were never a Story) would otherwise re-scan this script's
       // entire, unboundedly-growing Sync Log on every single poll, just to
-      // learn "no" every time. Correctness: taskWasEverReconciledAsStory_
-      // stays true forever once a page has ever been a Story, even long
-      // after its own first post-conversion execution completed and closed
-      // a real Task-era event — an unconditional call would keep
-      // discarding a perfectly legitimate fresh Started At on every later
-      // reopen of that same now-ordinary Task, silently losing whatever
-      // work happened between the reopen and the next observed edit.
-      // allEvents.length === 0 is exactly the condition that actually
-      // needs this exception: it is only true for a page's first-ever
-      // event (nothing to distrust yet) or a page whose only "history" was
-      // just archived out from under it (the Story case this exists to
-      // catch) — the moment any real Task-era event exists, on any later
-      // reopen, the ordinary effectiveLatestHistoricalTimestamp freshness
-      // check below already does the right thing on its own, with no
-      // Story-specific override needed at all.
-      const cameFromArchivedStoryHistory = allEvents.length === 0 && taskWasEverReconciledAsStory_(taskId);
+      // learn "no" every time. Correctness: a page's Story history never
+      // expires on its own, even long after its own first post-conversion
+      // execution completed and closed a real Task-era event — an
+      // unconditional call would keep discarding a perfectly legitimate
+      // fresh Started At on every later reopen of that same now-ordinary
+      // Task, silently losing whatever work happened between the reopen
+      // and the next observed edit. allEvents.length === 0 is exactly the
+      // condition that actually needs this exception: it is only true for
+      // a page's first-ever event (nothing to distrust yet) or a page
+      // whose only "history" was just archived out from under it (the
+      // Story case this exists to catch) — the moment any real Task-era
+      // event exists, on any later reopen, the ordinary
+      // effectiveLatestHistoricalTimestamp freshness check below already
+      // does the right thing on its own, with no Story-specific override
+      // needed at all.
+      //
+      // Further narrowed to "most recent Story observation was itself In
+      // Progress" rather than "was ever Story, regardless of what it was
+      // doing then" — Codex-reported gap: a page reclassified while idle
+      // (Ready/Backlog) and only later beginning its actual first
+      // execution has a Started At that was freshly (re)recorded for THAT
+      // execution, same governance as any ordinary Task's first open, and
+      // has nothing to do with old Story history. Only a page still In
+      // Progress at its last-known Story observation carries real risk:
+      // nothing about staying continuously In Progress across a Type
+      // change would ever prompt Started At to be refreshed.
+      const cameFromArchivedStoryHistory = allEvents.length === 0 && storyConversionHappenedWhileInProgress_(taskId);
       const trustedTaskStart = taskStartedAt
         && !cameFromArchivedStoryHistory
         && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime())
@@ -1922,37 +1974,68 @@ function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
   sheet.appendRow([id || '', type || '', taskId || '', status || '', receivedAt || new Date(), outcome || '']);
 }
 
-// True if this Task page was ever reconciled through reconcileStoryTask_
-// (i.e. its Type read Story on some prior poll) — Codex-reported gap on
-// BUG-ADP-TTE-01's own fix: a Story carries no Time Event history of its
-// own once reclassified as an executable Task, because reconcileStoryTask_
-// archives every event a Story ever accumulates, and an archived page never
-// resurfaces in queryNotionTimeEventsForTask_'s results (see its own
-// comment). So reconcileAuthoritativeTimeEvents_'s "first-ever event"
-// branch finds allEvents empty for a just-reclassified Task exactly as it
-// would for a genuinely brand-new one, and would otherwise unconditionally
-// trust the Task's own Started At — but for a page that sat In Progress as
-// a Story for days before conversion, that Started At still reflects the
-// STORY's start, not the Task's, so trusting it would attribute the whole
-// prior Story interval to the new Task the moment its first event opens.
+// True if this Task page's MOST RECENT Sync Log observation as Type=Story
+// (see reconcileStoryTask_) also recorded Status = In Progress at that same
+// poll — i.e. the page was still actively running as a Story right up to
+// (or past) the last time this script saw it that way, so any Started At
+// still on file almost certainly reflects the Story's own execution start,
+// never refreshed since. Called from reconcileAuthoritativeTimeEvents_'s
+// "first-ever event" branch (see its own comment for why allEvents is
+// empty either way) to decide whether to distrust the Task's Started At —
+// Codex-reported gap on BUG-ADP-TTE-01's own fix: a Story carries no Time
+// Event history of its own once reclassified as an executable Task
+// (reconcileStoryTask_ archives every event a Story ever accumulates, and
+// an archived page never resurfaces in a query), so that branch would
+// otherwise unconditionally trust the Task's own Started At the moment its
+// first event opens.
 //
-// The Sync Log is this script's own durable record of what it observed
-// every page's Type as on every prior poll: reconcileStoryTask_ is the only
-// code path that ever writes an Outcome of 'story_excluded' or
-// 'archived_story_event:<id>' for a Task ID, so finding either among this
-// Task's own Sync Log rows is authoritative proof this exact page was
-// classified Story at least once — independent of, and unaffected by,
-// Notion's own archived-page exclusion that hides the events themselves.
+// Narrower than simply "was this page ever Type=Story" — Codex-reported
+// gap on an earlier version of this same fix: a page reclassified while
+// idle (`Ready`/`Backlog`) and only later beginning its actual first
+// execution has a Started At that was freshly (re)recorded for that
+// execution, per the same governance every ordinary Task's first open
+// already relies on — it has nothing to do with old Story history, and
+// distrusting it anyway would silently lose whatever work happened before
+// the next observed edit. Only a page still In Progress at its *last*
+// Story observation carries the real risk this function exists to catch:
+// nothing about remaining continuously In Progress across a Type change
+// would ever prompt Started At to be refreshed. The Sync Log rows are
+// scanned in their natural append-only chronological order, so the last
+// matching row encountered is, by construction, the most recent one.
 //
-// Deliberately NOT called unconditionally by every Task open — see the
-// allEvents.length === 0 gate at its one call site in
-// reconcileAuthoritativeTimeEvents_. This function scans the Sync Log's
-// full, unboundedly-growing history on every call, and its answer stays
-// true forever once a page has ever been Type = Story, even long after a
-// real post-conversion Task-era event exists to make the answer moot —
-// callers must restrict it to the one situation where the distinction
-// actually changes anything.
-function taskWasEverReconciledAsStory_(taskId) {
+// Scans the Sync Log's full, unboundedly-growing history on every call —
+// callers must gate this behind allEvents.length === 0 (see the one call
+// site), never call it unconditionally on every ordinary Task open.
+function storyConversionHappenedWhileInProgress_(taskId) {
+  if (!taskId) return false;
+  const sheet = ensureSyncLogSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  const rows = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+  let lastKnownStoryStatus = null;
+  rows.forEach(function (row) {
+    if (row[2] !== taskId) return;
+    const outcome = String(row[5] || '');
+    if (outcome === 'story_excluded' || outcome.indexOf('archived_story_event:') === 0) {
+      lastKnownStoryStatus = row[3];
+    }
+  });
+  return lastKnownStoryStatus === DEFAULTS.START_STATUS;
+}
+
+// True if this Task page was ever reconciled through the ordinary Task
+// path (reconcileAuthoritativeTimeEvents_), i.e. its Type read something
+// other than Story on at least one prior poll — the mirror-image check to
+// storyConversionHappenedWhileInProgress_ above, used by
+// reconcileStoryTask_ to tell genuine Task-era Time Events (created while
+// this exact page really was a Task, now attached to a page reclassified
+// TO Story) apart from pre-fix legacy stray data (which, by construction,
+// could only ever have accumulated while every poll that touched the page
+// already saw Type = Story — a Task-typed page has never once been allowed
+// to skip past reconcileAuthoritativeTimeEvents_). Any Sync Log Outcome for
+// this Task ID that is NOT one of the Story path's own two markers proves
+// at least one such poll happened.
+function taskWasEverReconciledAsTask_(taskId) {
   if (!taskId) return false;
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
@@ -1961,7 +2044,7 @@ function taskWasEverReconciledAsStory_(taskId) {
   return rows.some(function (row) {
     if (row[2] !== taskId) return false;
     const outcome = String(row[5] || '');
-    return outcome === 'story_excluded' || outcome.indexOf('archived_story_event:') === 0;
+    return outcome !== 'story_excluded' && outcome.indexOf('archived_story_event:') !== 0;
   });
 }
 

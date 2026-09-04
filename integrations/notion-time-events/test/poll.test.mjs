@@ -2332,10 +2332,18 @@ test('Type is part of the reconciliation snapshot, so becoming a Story is never 
 
   const second = sandbox.pollTaskChanges();
 
-  assert.equal(second.outcomes[0], 'archived_story_event:evt-pre-story');
+  // The event is genuine Task-era history (this exact page was reconciled
+  // through the ordinary Task path on the first poll, per
+  // taskWasEverReconciledAsTask_) — it is CLOSED at the conversion
+  // boundary, preserving the interval, not archived away as bogus stray
+  // data (see the "preserves genuine Task-era Time Events" test below for
+  // the fix this exercises alongside the snapshot-hash regression above).
+  assert.equal(second.outcomes[0], 'closed_task_era_at_story_conversion:evt-pre-story');
   const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-pre-story');
   assert.equal(patches.length, 1);
-  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
+  const closePatch = JSON.parse(patches[0].options.payload);
+  assert.equal(closePatch.archived, undefined);
+  assert.equal(closePatch.properties['Ended At'].date.start, sameMinute);
 });
 
 test('backfillStoryExclusion_ queries every Type=Story page regardless of Status, and archives stray open events', () => {
@@ -2737,5 +2745,96 @@ test('a Task that already completed one execution after its Story conversion tru
     creates[0].properties['Started At'].date.start,
     '2026-08-30T05:10:00.000Z',
     'expected the reopen\'s own fresh Started At to be trusted, not suppressed by the page\'s old Story history'
+  );
+});
+
+test('a Task reclassified to Story preserves genuine Task-era Time Events instead of erasing them', () => {
+  // Codex-reported gap (P1): reconcileStoryTask_ used to archive EVERY
+  // event for a Story-typed page unconditionally, including real work
+  // recorded while this exact page genuinely was an executable Task
+  // before being reclassified. Type transitions go both ways (see
+  // storyConversionHappenedWhileInProgress_ for the Story-to-Task mirror),
+  // so this exercises Task-to-Story: a page with one still-open and one
+  // already-closed genuine Task-era event should have the open one closed
+  // at the conversion boundary (preserving its real duration) and the
+  // closed one left completely untouched — neither archived away as
+  // though it were pre-fix bogus stray data.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dbb01';
+  const openEvent = eventPage('evt-open-task-era', {
+    actor: 'Claude',
+    startedAt: '2026-08-28T00:00:00.000Z',
+  });
+  const closedEvent = eventPage('evt-closed-task-era', {
+    actor: 'Claude',
+    startedAt: '2026-08-20T00:00:00.000Z',
+    endedAt: '2026-08-20T02:00:00.000Z',
+  });
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'Review',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    startedAt: '2026-08-28T00:00:00.000Z',
+    type: 'Story',
+  });
+  const { sandbox, fetchLog } = harness({
+    tasks: [task],
+    events: [openEvent, closedEvent],
+  });
+  // Seed proof this exact page was reconciled through the ordinary Task
+  // path on some earlier poll — the same Outcome shape
+  // reconcileAuthoritativeTimeEvents_ itself would have logged.
+  sandbox.logSnapshot_(
+    'snap-task-era', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-28T00:00:00.000Z'), 'opened:' + openEvent.id
+  );
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.equal(summary.outcomes[0], 'closed_task_era_at_story_conversion:evt-open-task-era');
+  const openPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-open-task-era');
+  assert.equal(openPatches.length, 1, 'expected the open Task-era event to be closed, not archived');
+  const closePayload = JSON.parse(openPatches[0].options.payload);
+  assert.equal(closePayload.archived, undefined);
+  assert.equal(closePayload.properties['Ended At'].date.start, conversionEdit);
+  const closedEventPatches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-closed-task-era');
+  assert.equal(closedEventPatches.length, 0, 'expected the already-closed Task-era event to be left completely untouched');
+});
+
+test('a Story converted to Task while idle trusts the freshly recorded Started At of its later first execution', () => {
+  // Codex-reported gap (P2) on the Story-to-Task Started-At-distrust fix:
+  // restricting distrust to require the page's MOST RECENT Story
+  // observation to have been In Progress — a page reclassified while
+  // Ready/Backlog, whose actual first execution only starts in a LATER,
+  // distinct poll, has a Started At freshly (re)recorded for that
+  // execution and should be trusted normally, just like any other Task's
+  // first open.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dcc01';
+  const freshStart = '2026-08-30T05:10:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:15:00.000Z', // a later observed edit than the true restart
+    startedAt: freshStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], noEventsForTaskIds: [taskId] });
+  // The page's last-known Story observation was while Ready, not In
+  // Progress — proof the conversion happened while idle, and this
+  // In-Progress spell is a later, distinct, genuinely fresh execution.
+  sandbox.logSnapshot_(
+    'snap-story-idle', 'notion_poll', taskId, 'Ready',
+    new Date('2026-08-25T00:00:00.000Z'), 'story_excluded'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start,
+    freshStart,
+    'expected the fresh Started At to be trusted since the page was idle (Ready), not In Progress, at its last-known Story observation'
   );
 });
