@@ -250,7 +250,7 @@ test('a Story In Progress opens no Time Event (BUG-ADP-TTE-01)', () => {
   assert.equal(requestsTo(fetchLog, 'POST', '/v1/pages').length, 0);
 });
 
-test('a Story\'s stray open Time Event from before the exclusion existed gets closed, not left to linger', () => {
+test('a Story\'s stray open Time Event from before the exclusion existed gets archived, not left to linger', () => {
   const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
   const { sandbox, fetchLog } = harness({
     tasks: [taskPage(taskId, {
@@ -279,6 +279,39 @@ test('a Story\'s stray open Time Event from before the exclusion existed gets cl
   assert.match(note, /Reason=story_excluded/);
   // Never re-opened for the same still-In-Progress Story on this same call.
   assert.equal(requestsTo(fetchLog, 'POST', '/v1/pages').length, 0);
+});
+
+test('an ordinary poll also archives a Story\'s already-closed legacy Time Event, not only open ones', () => {
+  // Codex-reported gap: reconcileStoryTask_ originally filtered to
+  // openEvents only, so a Story that had already left In Progress under
+  // the pre-fix reconciler — the ordinary case for most Stories, since a
+  // Story sitting In Progress forever is the exception — kept its closed,
+  // fictitiously-durationed legacy event untouched even when the Story
+  // itself was later edited and picked up by a normal incremental poll.
+  const taskId = '3b9fbd82-6f3b-81c6-988a-f5a92f93df28';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Review',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [
+      eventPage('evt-story-legacy-closed', {
+        actor: 'Claude',
+        startedAt: '2026-08-12T12:42:00.000Z',
+        endedAt: '2026-08-20T09:00:00.000Z',
+      }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-story-legacy-closed');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-story-legacy-closed');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });
 
 test('a Story reaching Done needs no Time Event and is never rolled back by the Done gate', () => {
@@ -2305,7 +2338,7 @@ test('Type is part of the reconciliation snapshot, so becoming a Story is never 
   assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });
 
-test('backfillStoryExclusion_ queries Type=Story, Status=In Progress directly and archives stray open events', () => {
+test('backfillStoryExclusion_ queries every Type=Story page regardless of Status, and archives stray open events', () => {
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee03';
   const { sandbox, fetchLog } = harness({
     tasks: [taskPage(taskId, {
@@ -2321,16 +2354,46 @@ test('backfillStoryExclusion_ queries Type=Story, Status=In Progress directly an
   const summary = sandbox.backfillStoryExclusion_();
 
   const query = JSON.parse(requestsTo(fetchLog, 'POST', TASKS_DS)[0].options.payload);
-  assert.deepEqual(query.filter, {
-    and: [
-      { property: 'Status', select: { equals: 'In Progress' } },
-      { property: 'Type', select: { equals: 'Story' } },
-    ],
-  });
+  // Not scoped to Status = In Progress: most Stories on a live deployment
+  // have already left In Progress with a closed, fictitiously-durationed
+  // legacy event under the pre-fix reconciler, and only a Type-only filter
+  // catches those too (see the function's own comment).
+  assert.deepEqual(query.filter, { property: 'Type', select: { equals: 'Story' } });
   assert.equal(summary.scanned, 1);
   assert.equal(summary.processed, 1);
   assert.equal(summary.outcomes[0], 'archived_story_event:evt-old-story');
   const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-old-story');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
+});
+
+test('backfillStoryExclusion_ also archives an already-closed legacy Story event, not only open ones', () => {
+  // Codex-reported gap: the reconciler only ever archived openEvents,
+  // never events a Story already had closed under the pre-fix generic
+  // path (real Ended At, a fictitious multi-day Duration (h) already
+  // computed) — those would sit in the authoritative data forever,
+  // uncorrected, since a Status = In Progress-scoped backfill query would
+  // never even see that Story again either.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dee06';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Done',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-20T10:00:00.000Z',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      type: 'Story',
+    })],
+    events: [eventPage('evt-legacy-closed-story', {
+      actor: 'Claude',
+      startedAt: '2026-08-12T12:42:00.000Z',
+      endedAt: '2026-08-19T09:00:00.000Z',
+    })],
+  });
+
+  const summary = sandbox.backfillStoryExclusion_();
+
+  assert.equal(summary.outcomes[0], 'archived_story_event:evt-legacy-closed-story');
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy-closed-story');
   assert.equal(patches.length, 1);
   assert.equal(JSON.parse(patches[0].options.payload).archived, true);
 });
@@ -2366,12 +2429,12 @@ test('backfillStoryExclusion_ is a free re-scan once a Story has already been ar
 });
 
 test('backfillStoryExclusion_ resumes past a truncated prefix instead of re-fetching it forever', () => {
-  // Codex-reported gap: closing a Story's Time Event does not remove the
-  // Story itself from this query's own Type=Story/Status=In Progress result
-  // set (nothing about its Status or Type changed), so — before this fix —
-  // a truncated call's unqualified re-run kept re-fetching the identical
-  // oldest 50-page prefix forever, and a Story beyond it could never be
-  // reached despite the "call again to continue" instruction.
+  // Codex-reported gap: archiving a Story's Time Event does not remove the
+  // Story itself from this query's own Type=Story result set (nothing
+  // about its Type changed), so — before this fix — a truncated call's
+  // unqualified re-run kept re-fetching the identical oldest 50-page
+  // prefix forever, and a Story beyond it could never be reached despite
+  // the "call again to continue" instruction.
   let pageCalls = 0;
   const seenFilters = [];
   const routes = {
@@ -2404,20 +2467,15 @@ test('backfillStoryExclusion_ resumes past a truncated prefix instead of re-fetc
 
   assert.equal(firstRun.truncated, true);
   assert.equal(firstRun.scanned, 50); // QUERY_PAGE_SAFETY_LIMIT
-  assert.deepEqual(seenFilters[0], {
-    and: [
-      { property: 'Status', select: { equals: 'In Progress' } },
-      { property: 'Type', select: { equals: 'Story' } },
-    ],
-  }); // first call: no resume clause yet
+  assert.deepEqual(seenFilters[0], { property: 'Type', select: { equals: 'Story' } }); // first call: no resume clause yet
   const resumeCursor = scriptProps.get('STORY_EXCLUSION_RESUME_CURSOR');
   assert.ok(resumeCursor, 'expected a resume cursor to be persisted after a truncated backfill');
 
   sandbox.backfillStoryExclusion_();
 
   // The second call's query must be filtered to on-or-after the persisted
-  // resume cursor — not the same bare two-clause filter as the first call,
-  // which would just return the identical 50-page prefix again.
+  // resume cursor — not the same bare single-clause filter as the first
+  // call, which would just return the identical 50-page prefix again.
   const secondCallFilter = seenFilters[seenFilters.length - 50];
   assert.ok(secondCallFilter.and, 'expected the resumed call to use a compound and-filter');
   const onOrAfterClause = secondCallFilter.and.find((f) => f.timestamp === 'last_edited_time');

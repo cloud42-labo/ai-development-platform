@@ -604,49 +604,52 @@ function reconcileTaskPage_(task) {
 // never opens a new Time Event no matter what Status reads, and never runs
 // the Done gate — a Story is a rollup, not an execution unit, so its own
 // completion needs no Time Event evidence. Its only remaining job is
-// cleanup: remove any open event a Story accumulated before this exclusion
-// existed, so a pre-fix stray open interval does not linger forever
-// (BUG-ADP-TTE-01).
+// cleanup: remove every Time Event a Story accumulated before this
+// exclusion existed, so pre-fix intervals do not linger forever
+// (BUG-ADP-TTE-01) — ALL of them, not only ones still open. A closed
+// legacy event is just as invalid as an open one: a Story that already
+// left `In Progress` under the pre-fix reconciler (the ordinary case for
+// most Stories — see `backfillStoryExclusion_` below for why this matters
+// on an existing deployment) had its bogus event closed through the
+// generic path with a real `Ended At`, computing a fictitious multi-day
+// Duration (h) exactly like the still-open case archiveStoryTimeEvent_
+// exists to prevent — filtering to only `openEvents` would leave every
+// already-closed legacy interval sitting in the authoritative data
+// forever, uncorrected.
 //
-// Archives the stray event rather than closing it through the normal
-// closeNotionTimeEvent_ path — Codex-reported gap in an earlier version of
-// this fix: closing it gives it a real Ended At (the observed edit time),
-// and Duration (h) then computes over however long it happened to be open
-// (routinely days), leaving one large but entirely fictitious interval
-// that would still inflate every historical Active-hour aggregation this
-// reconciler does not directly control (the Sheet's own Duration (h)
-// formula, and any downstream KPI aggregation reading Task Time Events) —
-// exactly the double-counting this whole exclusion exists to stop, just
-// moved from ongoing to a one-time final entry instead of prevented
-// outright. Nothing about this event was ever real work to time, so
-// removing it — not recording a fictitious duration for it — matches what
-// actually happened. Archiving (rather than a hard delete) also means
-// Notion's own database/data-source queries exclude it going forward by
-// default, so it naturally stops showing up as `openEvents` on any future
-// poll without this function needing to track that itself, and the row
-// remains recoverable from Notion's trash if ever needed. Known residual
-// gap: the Google Sheet projection is a derived, non-authoritative view
-// (see README) and this does not retroactively delete a Sheet row this
-// event may have already been projected into under the pre-fix open
-// state — that row goes stale (never updated again) rather than being
-// removed, a smaller and purely cosmetic issue next to the authoritative
-// double-counting this fix actually closes.
+// Archives every one of them rather than closing/leaving them — see
+// archiveStoryTimeEvent_ for why closing was rejected: it would give an
+// event a real `Ended At` and let Duration (h) compute over however long
+// it was open, still inflating every historical Active-hour aggregation
+// this reconciler does not directly control (the Sheet's own Duration (h)
+// formula, and any downstream KPI aggregation reading Task Time Events).
+// Nothing about any of these events was ever real work to time, so
+// removing them — not recording or preserving a fictitious duration for
+// them — matches what actually happened. Archiving (rather than a hard
+// delete) also means Notion's own database/data-source queries exclude
+// them going forward by default, so none of them can ever resurface as
+// `openEvents` or in a future aggregation without this function needing to
+// track that itself, and every row remains recoverable from Notion's
+// trash if ever needed. Known residual gap: the Google Sheet projection is
+// a derived, non-authoritative view (see README) and this does not
+// retroactively delete a Sheet row one of these events may have already
+// been projected into — that row goes stale (never updated again) rather
+// than being removed, a smaller and purely cosmetic issue next to the
+// authoritative double-counting this fix actually closes.
 function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId) {
-  const openEvents = queryNotionTimeEventsForTask_(taskId).filter(function (eventPage) {
-    return !propertyDate_(eventPage.properties['Ended At']);
-  });
+  const events = queryNotionTimeEventsForTask_(taskId);
   const actions = [];
-  openEvents.forEach(function (eventPage) {
+  events.forEach(function (eventPage) {
     archiveStoryTimeEvent_(eventPage, changedBy, snapshotId);
     actions.push('archived_story_event:' + eventPage.id);
   });
   return actions.length ? actions.join(',') : 'story_excluded';
 }
 
-// Archives (see reconcileStoryTask_ for why) a Story's stray open Time
-// Event, stamping the same Reason=story_excluded marker used elsewhere in
-// this file in the same request, so the record still explains itself if
-// ever restored from Notion's trash.
+// Archives (see reconcileStoryTask_ for why) one of a Story's stray Time
+// Events, open or already closed, stamping the same Reason=story_excluded
+// marker used elsewhere in this file in the same request, so the record
+// still explains itself if ever restored from Notion's trash.
 function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
   const existingNote = propertyText_(eventPage.properties.Note);
   const marker = buildNote_({ reason: 'story_excluded', snapshotId: snapshotId, changedBy: changedBy });
@@ -659,25 +662,40 @@ function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
 }
 
 // Operator escape hatch for an EXISTING live deployment being upgraded to
-// add the Type = Story exclusion (see reconcileStoryTask_): on such a
-// deployment BOOTSTRAP_ACTIVE_DONE is already set from before, so the
-// ordinary pollTaskChanges bootstrap — which only ever runs once, before
-// that flag is set — never revisits a Story that has already been sitting
-// In Progress since before this revision was deployed. Its pre-fix open
-// Time Event would otherwise stay Active and keep inflating Active-hour
-// totals indefinitely, until some unrelated future edit happens to touch
-// that exact Story. Queries every currently Type = Story, Status = In
-// Progress page directly — independent of last_edited_time or the cursor —
-// and reconciles each through the ordinary reconcileTaskPage_ entry point,
-// which archives any open event via reconcileStoryTask_. A fresh deploy has
-// no pre-existing open Story events and needs no backfill: the exclusion
-// applies to every poll from day one. Run once from the editor immediately
-// after deploying this revision.
+// add the Type = Story exclusion (see reconcileStoryTask_): queries every
+// Type = Story page directly, regardless of Status — independent of
+// last_edited_time or the cursor — and reconciles each through the
+// ordinary reconcileTaskPage_ entry point, which archives every Time Event
+// a Story has via reconcileStoryTask_, open or already closed.
+//
+// Deliberately not scoped to Status = In Progress, for two independent
+// reasons a narrower query would miss:
+// 1. On such a deployment BOOTSTRAP_ACTIVE_DONE is already set from
+//    before, so the ordinary pollTaskChanges bootstrap — which only ever
+//    runs once, before that flag is set — never revisits a Story that has
+//    already been sitting In Progress since before this revision was
+//    deployed. Its pre-fix open Time Event would otherwise stay Active and
+//    keep inflating Active-hour totals indefinitely, until some unrelated
+//    future edit happens to touch that exact Story.
+// 2. Most Stories on a live deployment have already LEFT In Progress under
+//    the pre-fix reconciler by the time this runs — Codex-reported gap in
+//    an earlier version of this backfill, which queried only
+//    Status = In Progress: a Story that already left In Progress had its
+//    bogus event closed through the ordinary generic path, with a real
+//    Ended At and a fictitious multi-day Duration (h) computed over it —
+//    exactly the double-counting this exclusion exists to stop, just
+//    already recorded rather than still accruing, and a Status = In
+//    Progress filter would never even see that Story again to correct it.
+//    Every Type = Story page, regardless of current Status, needs a single
+//    pass through reconcileStoryTask_ to archive whatever it has.
+// A fresh deploy has no pre-existing Story Time Events at all and needs no
+// backfill: the exclusion applies to every poll from day one. Run once
+// from the editor immediately after deploying this revision.
 //
 // Resumable the same way backfillResultFingerprints_ is, and for the same
 // reason: archiving a Story's Time Event does not remove the Story itself
-// from this query's own Type=Story/Status=In Progress result set (nothing
-// about its Status or Type changed), so a truncated call's unqualified
+// from this query's own Type=Story result set (nothing about its Type
+// changed), so a truncated call's unqualified
 // re-run would keep re-fetching the identical oldest prefix forever —
 // reconciling it again is a free re-scan, but Story pages *beyond* that
 // prefix would never be reached despite the "call again to continue"
@@ -708,14 +726,10 @@ function backfillStoryExclusion_() {
     const tieOffset = resumeCursor ? Number(props.getProperty('STORY_EXCLUSION_RESUME_TIE_OFFSET') || '0') : 0;
     const filter = resumeCursor
       ? { and: [
-          { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } },
           { property: 'Type', select: { equals: 'Story' } },
           { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
         ] }
-      : { and: [
-          { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.START_STATUS } },
-          { property: 'Type', select: { equals: 'Story' } },
-        ] };
+      : { property: 'Type', select: { equals: 'Story' } };
     function tieOffsetStartIndex_(results) {
       let index = 0;
       if (resumeCursor && tieOffset > 0) {
