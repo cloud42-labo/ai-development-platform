@@ -2696,3 +2696,46 @@ test('a Task reclassified from Story does not trust its stale Story-era Started 
     'expected the event to start at the Story-to-Task reclassification edit, not the stale Story-era Started At'
   );
 });
+
+test('a Task that already completed one execution after its Story conversion trusts a fresh Started At on a later reopen', () => {
+  // Codex-reported gap on the reclassification fix itself: a page that was
+  // ever Type=Story keeps its Sync Log 'story_excluded' marker forever, so
+  // taskWasEverReconciledAsStory_ would still read true long after the
+  // page's own first post-conversion execution completed and closed a real
+  // Task-era event. Without gating that check on allEvents being genuinely
+  // empty, a LATER reopen of this same, by-now-ordinary Task would keep
+  // being wrongly suppressed — falling back to a later observed edit
+  // (`when`) instead of trusting the reopen's own fresh Started At, exactly
+  // the "reopened Task" behavior every other Task already gets (see 'a
+  // reopened Task starts its new interval from the current Started At, not
+  // a later observed edit' above). This is the same fixture shape as that
+  // test, plus the Story-history marker, proving the marker no longer
+  // matters once real Task-era history exists.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43daa02';
+  const historicalTaskEraEvent = eventPage('evt-post-conversion', {
+    actor: 'Claude',
+    startedAt: '2026-08-20T00:00:00.000Z',
+    endedAt: '2026-08-20T01:00:00.000Z',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-30T05:15:00.000Z', // a later edit than Started At, e.g. a reassignment moments after restart
+    startedAt: '2026-08-30T05:10:00.000Z', // the true restart time
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [historicalTaskEraEvent] });
+  sandbox.logSnapshot_(
+    'snap-story-old', 'notion_poll', taskId, 'In Progress',
+    new Date('2026-08-10T00:00:00.000Z'), 'story_excluded'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start,
+    '2026-08-30T05:10:00.000Z',
+    'expected the reopen\'s own fresh Started At to be trusted, not suppressed by the page\'s old Story history'
+  );
+});

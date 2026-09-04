@@ -1040,15 +1040,38 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const taskStartedAt = propertyDate_(task.properties['Started At']);
       // A page that was ever Type=Story (see taskWasEverReconciledAsStory_)
       // must never have its Started At trusted here, however fresh it looks
-      // against allEvents — allEvents is empty for it precisely because its
-      // real history was archived away, not because Started At is reliable.
-      // Fall through to `when` (this observed edit, i.e. the Story-to-Task
-      // reclassification itself) as the execution's start instead, exactly
-      // as Codex's finding suggested: the type-change edit is what actually
-      // begins this Task's own executable life, not whatever Started At
-      // happened to read from its time as a Story.
+      // against allEvents — when allEvents is empty for it, that emptiness
+      // is precisely because its real history was archived away, not
+      // because Started At is reliable. Fall through to `when` (this
+      // observed edit, i.e. the Story-to-Task reclassification itself) as
+      // the execution's start instead, exactly as Codex's finding
+      // suggested: the type-change edit is what actually begins this
+      // Task's own executable life, not whatever Started At happened to
+      // read from its time as a Story.
+      //
+      // Gated on allEvents.length === 0, not called unconditionally —
+      // Codex-reported gap in an earlier version of this fix, on two
+      // counts. Performance: every ordinary Task open (the vast majority
+      // of which were never a Story) would otherwise re-scan this script's
+      // entire, unboundedly-growing Sync Log on every single poll, just to
+      // learn "no" every time. Correctness: taskWasEverReconciledAsStory_
+      // stays true forever once a page has ever been a Story, even long
+      // after its own first post-conversion execution completed and closed
+      // a real Task-era event — an unconditional call would keep
+      // discarding a perfectly legitimate fresh Started At on every later
+      // reopen of that same now-ordinary Task, silently losing whatever
+      // work happened between the reopen and the next observed edit.
+      // allEvents.length === 0 is exactly the condition that actually
+      // needs this exception: it is only true for a page's first-ever
+      // event (nothing to distrust yet) or a page whose only "history" was
+      // just archived out from under it (the Story case this exists to
+      // catch) — the moment any real Task-era event exists, on any later
+      // reopen, the ordinary effectiveLatestHistoricalTimestamp freshness
+      // check below already does the right thing on its own, with no
+      // Story-specific override needed at all.
+      const cameFromArchivedStoryHistory = allEvents.length === 0 && taskWasEverReconciledAsStory_(taskId);
       const trustedTaskStart = taskStartedAt
-        && !taskWasEverReconciledAsStory_(taskId)
+        && !cameFromArchivedStoryHistory
         && (!effectiveLatestHistoricalTimestamp || taskStartedAt.getTime() >= effectiveLatestHistoricalTimestamp.getTime())
         ? taskStartedAt
         : null;
@@ -1920,6 +1943,15 @@ function logSnapshot_(id, type, taskId, status, receivedAt, outcome) {
 // Task's own Sync Log rows is authoritative proof this exact page was
 // classified Story at least once — independent of, and unaffected by,
 // Notion's own archived-page exclusion that hides the events themselves.
+//
+// Deliberately NOT called unconditionally by every Task open — see the
+// allEvents.length === 0 gate at its one call site in
+// reconcileAuthoritativeTimeEvents_. This function scans the Sync Log's
+// full, unboundedly-growing history on every call, and its answer stays
+// true forever once a page has ever been Type = Story, even long after a
+// real post-conversion Task-era event exists to make the answer moot —
+// callers must restrict it to the one situation where the distinction
+// actually changes anything.
 function taskWasEverReconciledAsStory_(taskId) {
   if (!taskId) return false;
   const sheet = ensureSyncLogSheet_();
