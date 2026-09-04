@@ -1852,7 +1852,7 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         // accepting a stale-Result reopen for the second — the Boundary=
         // stamp alone (still applied below) is enough for the legacy
         // heuristic to keep working for both.
-        stampExecutionBoundary_(mostRecentClosed, '', currentStatus);
+        stampExecutionBoundary_(mostRecentClosed, '', currentStatus, snapshotId);
         actions.push('boundary:' + mostRecentClosed.id);
       }
     }
@@ -2136,7 +2136,7 @@ function markResultValidated_(eventPage, result) {
 // silently break). Kept as a parameter rather than dropped so a future,
 // genuinely safe backfill path (one with enough information to tell the
 // two cases apart) has an existing, tested hook to call into.
-function stampExecutionBoundary_(eventPage, executionId, observedStatus) {
+function stampExecutionBoundary_(eventPage, executionId, observedStatus, snapshotId) {
   const existingNote = propertyText_(eventPage.properties.Note);
   // Also refreshes End Status= to the Task's status *now* (when this
   // execution is recognized as genuinely over), not left at whatever stale
@@ -2152,7 +2152,18 @@ function stampExecutionBoundary_(eventPage, executionId, observedStatus) {
   // pre-boundary End Status off this exact event once it becomes the
   // mostRecentGenuineClose_ for the Task's next execution, misclassifying a
   // genuine Review Fix as Initial Work and silently skipping Review Source.
-  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId, endStatus: observedStatus });
+  //
+  // Also refreshes Snapshot= to THIS poll's own snapshotId — Codex-reported
+  // gap (round 32): without it, the Note's last Snapshot= stayed whatever
+  // the ORIGINAL reassignment/duplicate_reconciliation close recorded, so
+  // `mostRecentStatusEvidence_`'s tie-break (`snapshotWasEverLogged_`) would
+  // check whether THAT older poll's snapshot was logged — always true if
+  // the reassignment poll itself completed normally — instead of whether
+  // THIS boundary-recognizing poll's own logSnapshot_ landed. A tie against
+  // an interrupted boundary poll would then wrongly resolve in Sync Log's
+  // favor even though the boundary's own observedStatus is the fresher
+  // evidence.
+  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId, endStatus: observedStatus, snapshotId: snapshotId });
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
     properties: {
       Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
@@ -2510,6 +2521,17 @@ function classifyWorkType_(allEvents, taskId) {
 // impossible-causation window. Optional and defaults to no upper bound so
 // existing call sites/tests that only ever cared about the lower bound keep
 // working unchanged.
+//
+// `untilFixStarted` itself is Notion's own minute-granular timestamp (see
+// `startAt` at the call site), but `review.submitted_at` carries full
+// second precision — Codex-reported gap (round 32): comparing them at face
+// value could exclude the very review that caused the fix, e.g. a review
+// submitted at :30 seconds discarded by an untilFixStarted rounded down to
+// :00 when the real reopen actually happened at :50. Rounding the upper
+// bound up to the END of its own minute keeps every review genuinely
+// within that same minute eligible, matching how this file treats
+// Notion's minute granularity everywhere else (see
+// `mostRecentStatusEvidence_`).
 function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
   try {
     const parsed = parseGithubPullRequestUrl_(propertyText_(task.properties['Pull Request']));
@@ -2519,7 +2541,7 @@ function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
     const reviews = fetchAllGithubReviews_(token, parsed);
     if (!Array.isArray(reviews)) return 'Other';
     const sinceMs = sincePriorClose ? sincePriorClose.getTime() : 0;
-    const untilMs = untilFixStarted ? untilFixStarted.getTime() : Infinity;
+    const untilMs = untilFixStarted ? untilFixStarted.getTime() + 59999 : Infinity;
     let latest = null;
     reviews.forEach(function (review) {
       if (!review || !review.submitted_at) return;

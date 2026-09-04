@@ -2434,6 +2434,76 @@ test('stampExecutionBoundary_ records the status observed when the boundary is r
   }]), 'Review Fix');
 });
 
+test('stampExecutionBoundary_ refreshes Snapshot= to THIS poll\'s own snapshot, not the original close\'s stale one', () => {
+  // Codex-reported gap (round 32): without this, mostRecentStatusEvidence_'s
+  // tie-break (snapshotWasEverLogged_) would check whether the ORIGINAL
+  // reassignment/duplicate_reconciliation close's snapshot was logged --
+  // almost always true, since that earlier poll typically completed
+  // normally -- instead of whether THIS boundary-recognizing poll's own
+  // logSnapshot_ landed, silently defeating the round-31 interrupted-tie
+  // fix for any event that went through a retroactive boundary stamp.
+  // noteField_/parseNoteMeta_ read only the LAST occurrence of a key, so
+  // appending a fresh Snapshot= must supersede the stale one already there.
+  const { sandbox, fetchLog } = harness();
+  const closedEvent = eventPage('evt-cleared', {
+    actor: 'Claude', startedAt: '2026-08-30T05:00:00.000Z', endedAt: '2026-08-30T05:30:00.000Z',
+    note: 'End Status=In Progress | Reason=reassignment | Snapshot=snap-old-reassignment',
+  });
+
+  sandbox.stampExecutionBoundary_(closedEvent, '', 'Review', 'snap-new-boundary-poll');
+
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-cleared');
+  assert.equal(patches.length, 1);
+  const note = JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content;
+  assert.equal(
+    note.split(' | ').filter((s) => s.indexOf('Snapshot=') === 0).pop(), 'Snapshot=snap-new-boundary-poll',
+    'expected the boundary poll\'s own snapshot to be the LAST (winning) Snapshot= occurrence'
+  );
+});
+
+test('classifyWorkType_ resolves a tie correctly for a boundary-stamped event, using the boundary poll\'s own snapshot', () => {
+  // End-to-end regression for the same gap, through the REAL
+  // stampExecutionBoundary_ write (not a hand-crafted Note) and then
+  // mostRecentStatusEvidence_'s tie-break: an assignee is cleared while In
+  // Progress (closing via 'reassignment', whose OWN snapshot WAS logged --
+  // that poll completed normally), and only a LATER poll -- interrupted
+  // before its own logSnapshot_ -- recognizes the boundary into Review. If
+  // stampExecutionBoundary_ didn't refresh Snapshot= (the round-32 gap),
+  // the tie-break would still find the reassignment's OLD (logged)
+  // snapshot on the event and wrongly trust Sync Log's stale row.
+  const taskId = 'task-boundary-snapshot-tie';
+  const { sandbox, fetchLog } = harness();
+  // The reassignment's own poll completed normally: its snapshot IS logged.
+  sandbox.logSnapshot_('snap-reassignment', 'notion_poll', taskId, 'In Progress', new Date('2026-08-30T05:00:00.000Z'), 'closed:evt-cleared');
+  // The Sync Log's latest row for this task is still this stale, unrelated
+  // observation -- the boundary poll's own logSnapshot_ never landed.
+  sandbox.logSnapshot_('snap-stale-unrelated', 'notion_poll', taskId, 'Backlog', new Date('2026-08-30T04:00:00.000Z'), 'no_change:Backlog');
+
+  const reassignedEvent = eventPage('evt-cleared', {
+    actor: 'Claude', startedAt: '2026-08-30T03:30:00.000Z', endedAt: '2026-08-30T04:00:00.000Z',
+    note: 'End Status=In Progress | Reason=reassignment | Snapshot=snap-reassignment',
+  });
+  // The boundary-recognizing poll's own snapshot was never logged (it was
+  // interrupted before its own logSnapshot_ call) -- that is the ordering
+  // signal this test exists to prove stampExecutionBoundary_ preserves.
+  sandbox.stampExecutionBoundary_(reassignedEvent, '', 'Review', 'snap-boundary-never-logged');
+  // Read back the REAL patched Note (through appendNote_/buildNote_, not a
+  // hand-typed guess) and feed it into classifyWorkType_ as the event's
+  // current state, the same way a subsequent poll's own query would see it.
+  const patchedNote = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-cleared')[0].options.payload
+  ).properties.Note.rich_text[0].text.content;
+  const boundaryStampedEvent = eventPage('evt-cleared', {
+    actor: 'Claude', startedAt: '2026-08-30T03:30:00.000Z', endedAt: '2026-08-30T04:00:00.000Z',
+    note: patchedNote,
+  });
+
+  assert.equal(
+    sandbox.classifyWorkType_([boundaryStampedEvent], taskId), 'Review Fix',
+    'expected the boundary\'s own (never-logged) snapshot to win the tie, not the reassignment\'s (logged) one'
+  );
+});
+
 test('classifyWorkType_ prefers Sync Log\'s complete status history over the Time-Event-only heuristic', () => {
   // Codex-reported gap: a Task closes into Review, is later observed in
   // Backlog (an ordinary re-observation — nothing opens or closes a Time
@@ -2995,6 +3065,48 @@ test('resolveReviewSource_ excludes reviews submitted after the fix itself began
     ),
     'Codex',
     'expected the review after the reopen to be excluded, leaving the earlier Codex review as the qualifying one'
+  );
+});
+
+test('resolveReviewSource_ still credits a review submitted later in the SAME rounded-down minute as untilFixStarted', () => {
+  // Codex-reported gap (round 32): untilFixStarted is Notion's own
+  // minute-granular timestamp (e.g. :00 seconds), but a review's
+  // submitted_at carries full second precision. A review submitted at :30
+  // within that same minute genuinely could have caused a reopen that
+  // Notion only timestamps to :00 -- comparing the raw millisecond values
+  // would wrongly discard it. A review in the NEXT minute must still be
+  // excluded, proving the bound is "through the end of the minute", not
+  // unbounded.
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T10:00:30.000Z' }, // same minute as untilFixStarted -- eligible
+      { user: { login: 'komaba' }, submitted_at: '2026-08-30T10:01:00.000Z' }, // next minute -- must stay excluded
+    ]),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-8', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(
+    sandbox.resolveReviewSource_(
+      task,
+      new Date('2026-08-30T00:00:00.000Z'),
+      new Date('2026-08-30T10:00:00.000Z') // rounded-down reopen minute
+    ),
+    'Codex',
+    'expected the same-minute review at :30 to still qualify, and the next-minute review to stay excluded'
   );
 });
 
