@@ -122,13 +122,13 @@ Epics should normally converge in dependency/number order. A later Epic may move
 The weekly close occurs on Monday, in this order:
 
 1. **Sprint Review** — review outcomes, incomplete work and blockers.
-2. **Backlog Refinement** — revisit Epic/Story/Task placement and priority.
-3. **Sprint Planning** — define Sprint Goal and include only Ready work.
-4. **Execution** — run the role-separated loop and record handoffs in Notion.
-5. **Retrospective** — record Keep / Problem / Try and feed improvements into the next Sprint.
-6. **Update weekly focus** — refresh the Portfolio top-page focus area.
+2. **Retrospective** — record Keep / Problem / Try and feed improvements into the next Sprint.
+3. **Backlog Refinement** — revisit Epic/Story/Task placement and priority in two passes: Product Vision → Epic → Story → Task structural review, then How review for each Task that passes it. Do not approve a Task's How while its own Story or Epic is still unreviewed or Revise.
+4. **Sprint Close** — confirm every unfinished Sprint item's disposition rather than letting it carry over implicitly.
+5. **Sprint Goal review** — re-evaluate the Sprint Goal in light of Review, Retrospective and Refinement, and revise it if the underlying structure changed.
+6. **Sprint Planning** — define the next Sprint's scope from the (possibly revised) Goal and include only Ready work.
 
-`cloud42-labo/skills` provides this loop as executable Skills: `sprint-review`, `sprint-retrospective`, `backlog-refinement` (composing `hierarchical-refinement` for Product Vision → Epic → Story → Task structural review and `task-approach-review` for How review), `sprint-close`, `sprint-goal-review` and `sprint-planning`, chained in that order by the `weekly-sprint` Composite Skill. A Routine or Scheduler trigger for the weekly close should hold only the target Sprint/Product and the firing time, and invoke `weekly-sprint` rather than duplicate this procedure inline (ADP-054). Replacing the live Routine/Scheduled-Task prompt text with this reference form is Owner UI work tracked under `HUMAN-ADP-042-E-1`; the `human-gate-preflight` Skill referenced by ADP-054-T10's Acceptance Criteria is not yet implemented (ADP-054-T03).
+`cloud42-labo/skills` provides this loop as executable Skills, chained in the order above by the `weekly-sprint` Composite: `sprint-review`, `sprint-retrospective`, `backlog-refinement` (composing `hierarchical-refinement` for the structural pass and `task-approach-review` for the How pass), `sprint-close`, `sprint-goal-review` and `sprint-planning`. A Routine or Scheduler trigger for the weekly close should hold only the target Sprint/Product and the firing time, and invoke `weekly-sprint` rather than duplicate this procedure inline. Likewise, Task-start Approach Review (section 1) should invoke `task-approach-review`, and Human Request creation (section 11) should invoke the `human-gate-preflight` Skill defined for that purpose. Updating a live Routine/Scheduled-Task prompt's text to this reference form is Owner UI work; current progress on any one of these invocations is Notion Task state, not durable policy, so it is tracked in Notion (ADP-054) rather than here.
 
 ## 9. Definition of Ready
 
