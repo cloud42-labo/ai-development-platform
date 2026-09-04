@@ -42,7 +42,7 @@ rules_version: 1.0.0
 # governance/postmortem-improvement-loop.md,
 # governance/monthly-risk-management-review.md,
 # docs/product-design-doc-standard.md).
-workflow_version: 0.3.0
+workflow_version: 0.3.1
 
 # Version of the Templates asset class (templates/README.md,
 # templates/monthly-risk-review.md, templates/product-vision.md,
@@ -204,3 +204,24 @@ migration_path:
       Same as the paired rules_version 1.0.0 entry above — this Workflow
       bump is the durable-destination half of the same behavior change;
       adopt both together.
+  - field: workflow_version
+    from: "0.3.0"
+    to: "0.3.1"
+    date: "2026-09-04"
+    change: >-
+      ADP-054-T10: docs/operating-guide.md's "Basic principles" and
+      "Weekly Sprint operation" sections gained pointers to the
+      cloud42-labo/skills Weekly Sprint management Skills (sprint-review,
+      sprint-retrospective, backlog-refinement, hierarchical-refinement,
+      task-approach-review, sprint-close, sprint-goal-review,
+      sprint-planning, and the weekly-sprint Composite; merged in
+      cloud42-labo/skills PR #8) as the executable procedure behind the
+      already-described Approach Review and weekly close steps. PATCH per
+      docs/versioning-policy.md's Workflow judgment: no Stage/Gate/step/
+      closure criterion was added, removed, or reordered, only a reference
+      to tooling that implements the existing steps. Replacing the live
+      Routine/Scheduled-Task prompt text with this reference form (the
+      part that would actually change adopter behavior) is separate,
+      not-yet-complete work gated on HUMAN-ADP-042-E-1 (Owner Routine UI
+      edit) and ADP-054-T03 (human-gate-preflight Skill implementation).
+    action_required: none

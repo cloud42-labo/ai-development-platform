@@ -12,6 +12,7 @@
 - Work is managed as **Epic → Story → Task**.
 - Immediately before starting a Task, record `Status = In Progress` and `Started At` in JST.
 - At completion, record `Result`, `Completed At` in JST and `Status = Done`.
+- Where the `task-approach-review` Skill (`cloud42-labo/skills`) is available, run it as the executable procedure behind the Approach Review referenced throughout this guide, instead of re-deriving the review steps inline (ADP-054).
 - Before implementation that depends on an external SDK, library or service, verify the latest primary documentation.
 - Do not create a Human Request for information or actions an AI agent can directly verify through Notion, GitHub or another connected source. Before asking a person for anything, run the Human Gate Pre-check in section 11.
 - Do not fill unknowns by assumption. Record the exact blocker and next action.
@@ -126,6 +127,8 @@ The weekly close occurs on Monday, in this order:
 4. **Execution** — run the role-separated loop and record handoffs in Notion.
 5. **Retrospective** — record Keep / Problem / Try and feed improvements into the next Sprint.
 6. **Update weekly focus** — refresh the Portfolio top-page focus area.
+
+`cloud42-labo/skills` provides this loop as executable Skills: `sprint-review`, `sprint-retrospective`, `backlog-refinement` (composing `hierarchical-refinement` for Product Vision → Epic → Story → Task structural review and `task-approach-review` for How review), `sprint-close`, `sprint-goal-review` and `sprint-planning`, chained in that order by the `weekly-sprint` Composite Skill. A Routine or Scheduler trigger for the weekly close should hold only the target Sprint/Product and the firing time, and invoke `weekly-sprint` rather than duplicate this procedure inline (ADP-054). Replacing the live Routine/Scheduled-Task prompt text with this reference form is Owner UI work tracked under `HUMAN-ADP-042-E-1`; the `human-gate-preflight` Skill referenced by ADP-054-T10's Acceptance Criteria is not yet implemented (ADP-054-T03).
 
 ## 9. Definition of Ready
 
