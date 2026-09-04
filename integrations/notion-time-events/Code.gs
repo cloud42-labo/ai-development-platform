@@ -1766,7 +1766,23 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // events (predating this field) inherit nothing (both find() calls
       // yield ''), so the first poll to touch such a Task after this upgrade
       // classifies it fresh instead of propagating a blank forever.
-      const churnEvents = otherActor.length ? otherActor : [mostRecentChurnEvent_(allEvents)].filter(Boolean);
+      //
+      // An `otherActor` event closed above as `ambiguous_provenance_restart`
+      // (see `eventProvenanceIsAmbiguous_`) is NOT same-execution churn —
+      // Codex-reported gap (round 34): the whole point of that close reason
+      // is that this event's own provenance is unverifiable, so the new
+      // event opening here is deliberately treated as a fresh, confirmed
+      // execution, not a continuation. Inheriting Work Type/Review Source
+      // from it anyway would carry forward attribution from work this
+      // script has already decided it cannot vouch for. Filtered out here
+      // using the same identity check the close loop above already used
+      // (not the closed event's own Note, which still holds whatever it
+      // held before this call's own patch — see `closeNotionTimeEvent_`,
+      // which never mutates its `eventPage` argument locally).
+      const legitimateChurn = otherActor.filter(function (eventPage) {
+        return !eventProvenanceIsAmbiguous_(eventPage);
+      });
+      const churnEvents = legitimateChurn.length ? legitimateChurn : [mostRecentChurnEvent_(allEvents)].filter(Boolean);
       const outgoingWorkType = churnEvents.map(function (eventPage) {
         return parseNoteMeta_(propertyText_(eventPage.properties.Note)).workType;
       }).find(Boolean) || '';
@@ -1779,9 +1795,14 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // "since" cutoff mirrors classifyWorkType_'s own Sync-Log-first
       // preference (reviewFixSinceTimestamp_) so review activity is scoped
       // to the SAME Review period that produced this fix, not a stale
-      // earlier one a passive Backlog/Ready detour left behind.
+      // earlier one a passive Backlog/Ready detour left behind. `startAt`
+      // is `trustedTaskStart` when available (see above) — genuinely exact
+      // — or the minute-granular `when` otherwise; resolveReviewSource_
+      // needs to know which, to decide whether its own upper bound may
+      // round up to the end of that minute or must use the value verbatim
+      // (round 34; see its own comment).
       const reviewSource = workType === 'Review Fix'
-        ? (outgoingReviewSource || resolveReviewSource_(task, reviewFixSinceTimestamp_(allEvents, taskId), startAt))
+        ? (outgoingReviewSource || resolveReviewSource_(task, reviewFixSinceTimestamp_(allEvents, taskId), startAt, Boolean(trustedTaskStart)))
         : '';
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, workType, reviewSource);
       actions.push('opened:' + created.id);
@@ -2227,7 +2248,15 @@ function genuineCloseEndedAt_(events) {
 // elsewhere in this file, which this deliberately does not touch. Excludes
 // anything mostRecentGenuineClose_ would already claim: a genuine boundary
 // is a PRIOR execution's ending, never same-execution churn, however
-// recently it happens to have closed.
+// recently it happens to have closed. Also excludes an
+// `ambiguous_provenance_restart` close (see `eventProvenanceIsAmbiguous_`)
+// for the identical reason the call site's own `otherActor` filtering
+// excludes it (Codex-reported gap, round 34): that reason exists
+// specifically to mark an event whose provenance this script cannot vouch
+// for, so the new event opened at that boundary is deliberately fresh,
+// never a continuation — inheriting Work Type/Review Source from it here,
+// via this function's own history scan, would silently reintroduce the
+// exact same gap through a different call path.
 function mostRecentChurnEvent_(events) {
   // A churn event only counts if it belongs to the execution AFTER the most
   // recent genuine close — otherwise a completed PRIOR execution's own
@@ -2273,6 +2302,7 @@ function mostRecentChurnEvent_(events) {
     }
     const isGenuineBoundary = meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
     if (isGenuineBoundary) return;
+    if (meta.reason === 'ambiguous_provenance_restart') return;
     if (!found || endedAt.getTime() > propertyDate_(found.properties['Ended At']).getTime()) {
       found = eventPage;
     }
@@ -2552,17 +2582,24 @@ function classifyWorkType_(allEvents, taskId) {
 //
 // `startAt` at the call site is NOT always minute-granular, though —
 // `trustedTaskStart` (the Task's own `Started At` property) can carry
-// genuine second precision when it was written that way. Codex-reported
-// gap (round 33): adding a flat 59999ms to a second-precise value doesn't
-// round up to the end of ITS OWN minute, it slides the whole window
-// forward by up to a minute — e.g. a fix starting at :00:30 would admit
-// reviews as late as :01:29, a full minute after the fix actually began,
-// which could not have caused it and can overwrite the correct reviewer.
-// Flooring to the containing minute first, THEN adding 59999ms, rounds up
-// to the end of `untilFixStarted`'s own minute regardless of whether it
-// arrived already minute-aligned (the flooring is then a no-op) or with
-// real seconds on it (the flooring discards them before rounding up).
-function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
+// genuine second precision when it was written that way, and in that case
+// rounding is actively wrong rather than merely imprecise. Codex-reported
+// gap (round 33, itself a regression against round 34's finding): flooring
+// a second-precise value to its containing minute before rounding up still
+// discards the one piece of information that makes the trusted case exact
+// in the first place — e.g. a fix trusted to have started at exactly
+// :00:30 would still admit a review at :00:45, which is AFTER the fix
+// genuinely began and could not have caused it, overwriting whichever
+// reviewer actually did. Rounding only helps when the timestamp is a
+// LOWER BOUND on the real moment (the minute-granular `when` case, where
+// the true instant could be anywhere in that minute); it actively hurts
+// when the timestamp already IS the real moment. `untilFixStartedIsExact`
+// (the call site passes `Boolean(trustedTaskStart)`) tells this function
+// which situation it's in: exact — use `untilFixStarted` verbatim, no
+// rounding at all; not exact — keep rounding up to the end of its own
+// minute exactly as before, since a genuinely minute-granular value is
+// never harmed by that (see round 32's own reasoning above).
+function resolveReviewSource_(task, sincePriorClose, untilFixStarted, untilFixStartedIsExact) {
   try {
     const parsed = parseGithubPullRequestUrl_(propertyText_(task.properties['Pull Request']));
     if (!parsed) return 'Other';
@@ -2571,9 +2608,11 @@ function resolveReviewSource_(task, sincePriorClose, untilFixStarted) {
     const reviews = fetchAllGithubReviews_(token, parsed);
     if (!Array.isArray(reviews)) return 'Other';
     const sinceMs = sincePriorClose ? sincePriorClose.getTime() : 0;
-    const untilMs = untilFixStarted
-      ? Math.floor(untilFixStarted.getTime() / 60000) * 60000 + 59999
-      : Infinity;
+    const untilMs = !untilFixStarted
+      ? Infinity
+      : untilFixStartedIsExact
+        ? untilFixStarted.getTime()
+        : Math.floor(untilFixStarted.getTime() / 60000) * 60000 + 59999;
     let latest = null;
     reviews.forEach(function (review) {
       if (!review || !review.submitted_at) return;
