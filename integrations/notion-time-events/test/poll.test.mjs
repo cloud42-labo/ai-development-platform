@@ -2510,6 +2510,55 @@ test('reviewFixSinceTimestamp_ prefers a genuine Time-Event close\'s own boundar
   );
 });
 
+test('classifyWorkType_ prefers a genuine close over a Sync Log row that TIES with it in the same minute, when the close was never logged', () => {
+  // Codex-reported gap (round 31): Notion's minute-granular timestamps let
+  // a genuinely stale Sync Log row TIE with a newer genuine close instead
+  // of merely predating it (the round-30 scenario above). If `Backlog` is
+  // logged, the task executes and closes into `Review` within that SAME
+  // minute, and `logSnapshot_` for the poll that produced the close never
+  // ran (interrupted, same as round 30), the prior `>=` tie-break still
+  // picked the stale `Backlog` row unconditionally. The close's own
+  // `Snapshot=` was never appended to the Sync Log at all here — proof its
+  // poll's `logSnapshot_` step never landed — so `snapshotWasEverLogged_`
+  // must be the deciding signal, not the tied timestamp.
+  const taskId = 'task-sync-log-tie-stale';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('snap-stale', 'notion_poll', taskId, 'Backlog', new Date('2026-08-30T04:00:00.000Z'), 'no_change:Backlog');
+
+  const closedFromReview = eventPage('evt-1', {
+    actor: 'Claude', startedAt: '2026-08-30T03:00:00.000Z', endedAt: '2026-08-30T04:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress | Snapshot=snap-interrupted',
+  });
+
+  assert.equal(
+    sandbox.classifyWorkType_([closedFromReview], taskId), 'Review Fix',
+    'expected the close to win the tie since its own snapshot was never logged (interrupted logSnapshot_)'
+  );
+});
+
+test('classifyWorkType_ keeps preferring Sync Log when a tied close\'s own snapshot WAS logged (no over-correction)', () => {
+  // Companion to the interrupted-tie regression above, in the other
+  // direction: when the close's own Snapshot= DOES appear in the Sync Log,
+  // that proves logSnapshot_ for its poll completed normally, so a tied
+  // Sync Log row reflects a real, subsequent observation (e.g. the Task
+  // was immediately moved again within the same minute) rather than a
+  // stale one — the log must still win, exactly as before this fix.
+  const taskId = 'task-sync-log-tie-fresh';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('snap-closed', 'notion_poll', taskId, 'Review', new Date('2026-08-30T04:00:00.000Z'), 'closed:evt-1');
+  sandbox.logSnapshot_('snap-newer', 'notion_poll', taskId, 'Backlog', new Date('2026-08-30T04:00:00.000Z'), 'no_change:Backlog');
+
+  const closedFromReview = eventPage('evt-1', {
+    actor: 'Claude', startedAt: '2026-08-30T03:00:00.000Z', endedAt: '2026-08-30T04:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress | Snapshot=snap-closed',
+  });
+
+  assert.equal(
+    sandbox.classifyWorkType_([closedFromReview], taskId), 'Initial Work',
+    'expected Sync Log\'s own subsequent Backlog observation to still win once the close is confirmed logged'
+  );
+});
+
 test('reviewFixSinceTimestamp_ uses the current Review period\'s own start, not a stale Time Event close from an earlier one', () => {
   // Codex-reported gap: classifyWorkType_ was fixed to use Sync Log (the
   // Task's real status history) instead of the Time-Event-only heuristic,

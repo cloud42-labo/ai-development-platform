@@ -2400,16 +2400,59 @@ function mostRecentLoggedStatus_(taskId) {
 // they can never disagree about which evidence won — the identical class
 // of gap Codex found once before between these two functions (see the
 // PR's own review history) when they each read Sync Log independently.
+//
+// Notion's own timestamps are minute-granular, so `logged.at` and
+// `priorCloseEndedAt` can genuinely TIE without being the same real-world
+// moment — Codex-reported gap (round 31): the prior version broke every
+// tie in favor of Sync Log, which is right when the tie is two distinct,
+// same-minute observations the log correctly saw in order (nothing to fix
+// there), but wrong in exactly the round-30 interruption scenario when
+// logSnapshot_'s write for the close's own poll never landed AND the
+// task's next distinct status happened to be observed in that same
+// minute: `mostRecentLoggedEntry_` then returns that unrelated, genuinely
+// OLDER status period, not anything that postdates the close. Since plain
+// timestamps can't order same-minute evidence, use `snapshotWasEverLogged_`
+// instead: if the close's own `Snapshot=` was never appended to the Sync
+// Log at all, its poll's `logSnapshot_` step never ran, so `logged` can
+// only be a stale row from some earlier, unrelated poll — prefer the
+// close. Otherwise the log itself is confirmed to have already observed
+// (at least) everything the close knows about, so keep preferring it.
 function mostRecentStatusEvidence_(allEvents, taskId) {
   const logged = mostRecentLoggedEntry_(taskId);
   const priorClose = mostRecentGenuineClose_(allEvents);
   const priorCloseEndedAt = priorClose ? propertyDate_(priorClose.properties['Ended At']) : null;
-  if (logged && (!priorCloseEndedAt || logged.at.getTime() >= priorCloseEndedAt.getTime())) {
+  const priorMeta = priorClose ? parseNoteMeta_(propertyText_(priorClose.properties.Note)) : null;
+  if (logged && priorCloseEndedAt && logged.at.getTime() === priorCloseEndedAt.getTime()) {
+    if (!snapshotWasEverLogged_(priorMeta.snapshotId)) {
+      return { status: priorMeta.endStatus, at: priorCloseEndedAt };
+    }
+    return { status: logged.status, at: logged.at };
+  }
+  if (logged && (!priorCloseEndedAt || logged.at.getTime() > priorCloseEndedAt.getTime())) {
     return { status: logged.status, at: logged.at };
   }
   if (!priorClose) return null;
-  const priorEndStatus = parseNoteMeta_(propertyText_(priorClose.properties.Note)).endStatus;
-  return { status: priorEndStatus, at: priorCloseEndedAt };
+  return { status: priorMeta.endStatus, at: priorCloseEndedAt };
+}
+
+// True only if this exact snapshotId was ever appended to the Sync Log, at
+// ANY row — unlike `hasProcessedSnapshot_` (which checks only a Task's
+// single MOST RECENT row, for dedup purposes), this answers "did
+// `logSnapshot_` ever actually run for the poll that produced this
+// snapshotId at all". `authoritativeSnapshotId_` hashes in the page's own
+// `last_edited_time`, so collisions across genuinely different polls are
+// not a practical concern; a plain, task-unscoped search is enough.
+function snapshotWasEverLogged_(snapshotId) {
+  if (!snapshotId) return false;
+  const sheet = ensureSyncLogSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  return Boolean(
+    sheet.getRange(2, 1, lastRow - 1, 1)
+      .createTextFinder(String(snapshotId))
+      .matchEntireCell(true)
+      .findNext()
+  );
 }
 
 // Review Source (ADP-051) must only count review activity from the SAME
