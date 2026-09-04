@@ -3551,3 +3551,52 @@ test('isFreeOutcome_ exempts Story outcomes that are entirely no-write skips, bu
   assert.equal(sandbox.isFreeOutcome_('duplicate:page-1'), true);
   assert.equal(sandbox.isFreeOutcome_('done_gate_passed'), true);
 });
+
+test('storyConversionHappenedWhileInProgress_ recognizes a skipped-ambiguous or skipped-pending-backfill Sync Log row as a Story observation, not only story_excluded/archived_story_event:', () => {
+  // Codex-reported gap (P2, round 22): the round-21 fix widened WHEN
+  // storyConversionHappenedWhileInProgress_ gets called (whenever Started
+  // At would otherwise look fresh, not only when allEvents is empty) --
+  // but the function itself only ever recognized 'story_excluded' and
+  // 'archived_story_event:' as proof a Sync Log row was logged while Type
+  // read Story. Since round 19/20, a changed Story with pre-existing
+  // events commonly logs skipped_ambiguous_pre_upgrade_provenance:/
+  // skipped_pending_provenance_backfill: instead -- neither was
+  // recognized, so a Story whose most recent row happened to be one of
+  // those two was invisible to this check. Combined with the round-21 fix
+  // (a page with older, unrelated Task-era history reused as Story and
+  // converted back), this reintroduced the same double-counting the
+  // round-21 fix was meant to close, just reached via a different Sync
+  // Log outcome.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dqq01';
+  const oldUnrelatedEvent = eventPage('evt-old-unrelated-2', {
+    actor: 'Claude',
+    startedAt: '2026-07-01T00:00:00.000Z',
+    endedAt: '2026-07-01T01:00:00.000Z',
+  });
+  const storyStart = '2026-08-25T00:05:00.000Z';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Claude Opus',
+    lastEdited: conversionEdit,
+    startedAt: storyStart,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [oldUnrelatedEvent] });
+  // The page's single most recent Sync Log observation: Story, In
+  // Progress, but with the now-common skipped_ambiguous_pre_upgrade_provenance:
+  // outcome rather than story_excluded/archived_story_event:.
+  sandbox.logSnapshot_(
+    'snap-story-ambiguous-recent', 'notion_poll', taskId, 'In Progress',
+    new Date(storyStart), 'skipped_ambiguous_pre_upgrade_provenance:evt-some-legacy'
+  );
+
+  sandbox.pollTaskChanges();
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  assert.equal(
+    creates[0].properties['Started At'].date.start, conversionEdit,
+    'expected the conversion boundary to be trusted, not the Story spell\'s own stale Started At, even though the most recent Sync Log row was a skipped_ambiguous_pre_upgrade_provenance: outcome rather than story_excluded'
+  );
+});

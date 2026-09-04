@@ -2473,6 +2473,29 @@ function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType)
 // Scans the Sync Log's full, unboundedly-growing history on every call —
 // callers must gate this behind allEvents.length === 0 (see the one call
 // site), never call it unconditionally on every ordinary Task open.
+// Every per-event action reconcileStoryTask_ can ever push into its
+// comma-joined outcome — used below to recognize a Sync Log row as having
+// been logged while this page's Type read Story. Codex-reported gap
+// (round 22): the original check only recognized 'story_excluded' and
+// 'archived_story_event:', both from earlier rounds — by the time
+// backfillTaskOriginProvenance_/the round-19/20 gates existed, a changed
+// Story with pre-existing events commonly logs
+// 'skipped_ambiguous_pre_upgrade_provenance:'/'skipped_pending_provenance_backfill:'
+// instead, neither of which was recognized. A Story whose most recent Sync
+// Log row happened to be one of those two was then invisible to this
+// function: if later converted to an executable Type while remaining In
+// Progress with only older, unrelated Task-era history on file (see the
+// round-21 fix just above, which widened WHEN this function gets called —
+// exactly the scenario that makes this gap reachable), the Story-era
+// Started At could look "fresh" and get wrongly trusted, opening the new
+// Task event at the Story's own start instead of the conversion boundary.
+const STORY_RECONCILIATION_ACTION_PREFIXES = [
+  'skipped_ambiguous_pre_upgrade_provenance:',
+  'closed_task_era_at_story_conversion:',
+  'skipped_pending_provenance_backfill:',
+  'archived_story_event:',
+];
+
 function storyConversionHappenedWhileInProgress_(taskId) {
   if (!taskId) return false;
   const sheet = ensureSyncLogSheet_();
@@ -2486,7 +2509,14 @@ function storyConversionHappenedWhileInProgress_(taskId) {
   });
   if (!mostRecentRow) return false;
   const outcome = String(mostRecentRow[5] || '');
-  const wasStoryObservation = outcome === 'story_excluded' || outcome.indexOf('archived_story_event:') === 0;
+  // Every action reconcileStoryTask_ can ever produce is itself proof this
+  // row was logged while Type read Story — checked as a substring anywhere
+  // in the (possibly multi-event, comma-joined) outcome, not only as its
+  // first segment, so a Story with more than one event whose FIRST action
+  // happens not to be the recognized one is still correctly identified.
+  const wasStoryObservation = outcome === 'story_excluded' || STORY_RECONCILIATION_ACTION_PREFIXES.some(function (prefix) {
+    return outcome.indexOf(prefix) !== -1;
+  });
   return wasStoryObservation && mostRecentRow[3] === DEFAULTS.START_STATUS;
 }
 
