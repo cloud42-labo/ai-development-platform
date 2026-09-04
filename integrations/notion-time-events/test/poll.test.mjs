@@ -2853,6 +2853,25 @@ test('mostRecentChurnEvent_ finds same-execution churn regardless of which poll 
   assert.equal(sandbox.mostRecentChurnEvent_([oldChurnInsideClosedExecution, priorGenuineClose]), null);
 });
 
+test('mostRecentChurnEvent_ excludes an ambiguous-provenance restart from its own history scan, not just the otherActor call site', () => {
+  // Codex-reported gap (round 34): reconcileAuthoritativeTimeEvents_'s own
+  // otherActor filtering excludes an `ambiguous_provenance_restart` close
+  // from THIS poll, but mostRecentChurnEvent_'s separate history scan (used
+  // when otherActor is empty, e.g. the reassignment happens a LATER poll
+  // after this one) had no matching exclusion — it would still find and
+  // inherit from a PAST poll's ambiguous restart, reintroducing the exact
+  // same gap through this second call path.
+  const { sandbox } = harness();
+  const ambiguousRestart = eventPage('evt-ambiguous-restart-history', {
+    actor: 'Claude', startedAt: '2026-08-30T05:00:00.000Z', endedAt: '2026-08-30T05:30:00.000Z',
+    note: 'End Status=In Progress | Reason=ambiguous_provenance_restart | Work Type=Review Fix | Review Source=Human',
+  });
+  assert.equal(
+    sandbox.mostRecentChurnEvent_([ambiguousRestart]), null,
+    'expected an ambiguous_provenance_restart close to never be treated as legitimate same-execution churn'
+  );
+});
+
 test('mostRecentChurnEvent_ still finds a churn that ties exactly with the prior genuine close\'s own Ended At', () => {
   // Codex-reported gap in the cutoff above: `Ended At` is minute-granular,
   // so a reopen whose assignee is cleared within the same Notion-reported
@@ -3164,19 +3183,20 @@ test('resolveReviewSource_ still credits a review submitted later in the SAME ro
   );
 });
 
-test('resolveReviewSource_ rounds the cutoff to the containing minute, not a fixed 59999ms addition, when startAt itself carries seconds', () => {
-  // Codex-reported gap (round 33): startAt can come from trustedTaskStart
-  // (the Task's own Started At), which -- unlike the `when` fallback used
-  // in the test above -- can itself carry seconds. Blindly adding 59999ms
-  // to a value already at :00:30 would extend eligibility to :01:29,
-  // admitting a review at :01:20 that could not have caused a fix that
-  // started a full minute earlier.
+test('resolveReviewSource_ uses a trusted, second-precise untilFixStarted VERBATIM, never rounding it up to the end of its minute', () => {
+  // Codex-reported gap (round 34, superseding round 33's rounding-based
+  // fix): when untilFixStarted is exact (trustedTaskStart, real seconds),
+  // rounding up to the end of its own minute is itself wrong, not just
+  // imprecise -- a fix genuinely known to have started at :00:30 cannot
+  // have been caused by a review submitted afterwards, even within that
+  // same displayed minute. Only a review AT OR BEFORE the exact instant
+  // may qualify; untilFixStartedIsExact=true must use the timestamp as-is.
   const routes = {
     [TASKS_QUERY]: () => ({ results: [], has_more: false }),
     [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
     'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
-      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T10:00:59.000Z' }, // same containing minute -- eligible
-      { user: { login: 'komaba' }, submitted_at: '2026-08-30T10:01:20.000Z' }, // next minute -- must stay excluded
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T10:00:20.000Z' }, // before the exact start -- eligible
+      { user: { login: 'komaba' }, submitted_at: '2026-08-30T10:00:45.000Z' }, // after the exact start, same minute -- must stay excluded
     ]),
   };
   const { sandbox } = loadCodeGsSandbox({
@@ -3197,10 +3217,49 @@ test('resolveReviewSource_ rounds the cutoff to the containing minute, not a fix
     sandbox.resolveReviewSource_(
       task,
       new Date('2026-08-30T00:00:00.000Z'),
-      new Date('2026-08-30T10:00:30.000Z') // startAt itself carries seconds
+      new Date('2026-08-30T10:00:30.000Z'), // exact, second-precise trustedTaskStart
+      true // untilFixStartedIsExact
     ),
     'Codex',
-    'expected the :59 review (same containing minute) to qualify, and the next-minute :01:20 review to stay excluded'
+    'expected the pre-start review at :00:20 to qualify, and the post-start review at :00:45 to stay excluded despite sharing the same displayed minute'
+  );
+});
+
+test('resolveReviewSource_ still rounds a NON-exact untilFixStarted up to the end of its minute, unaffected by the exact-mode fix', () => {
+  // untilFixStartedIsExact defaults to falsy (every pre-round-34 call site
+  // and test omits it) -- confirms the round-32 rounding behavior for the
+  // minute-granular `when` fallback is untouched by round 34's new exact
+  // branch, even when the raw timestamp happens to carry seconds.
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'GET https://api.github.com/repos/cloud42-labo/ai-development-platform/pulls/19/reviews?per_page=100&page=1': () => ([
+      { user: { login: 'chatgpt-codex-connector' }, submitted_at: '2026-08-30T10:00:45.000Z' }, // same minute -- still eligible when not exact
+      { user: { login: 'komaba' }, submitted_at: '2026-08-30T10:01:00.000Z' }, // next minute -- excluded
+    ]),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet', GITHUB_TOKEN: 'gh-token' },
+    fetch: (url, options) => {
+      const method = String((options && options.method) || 'get').toUpperCase();
+      const handler = routes[method + ' ' + url] || routes[method + ' *'];
+      const body = handler ? handler(options) : {};
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(body) };
+    },
+  });
+  const task = taskPage('t-10', {
+    status: 'In Progress', agent: 'Claude Sonnet', lastEdited: '2026-08-30T06:00:00.000Z',
+    pullRequest: 'https://github.com/cloud42-labo/ai-development-platform/pull/19',
+  });
+
+  assert.equal(
+    sandbox.resolveReviewSource_(
+      task,
+      new Date('2026-08-30T00:00:00.000Z'),
+      new Date('2026-08-30T10:00:30.000Z') // untilFixStartedIsExact omitted -- non-exact branch
+    ),
+    'Codex',
+    'expected the same-minute review at :00:45 to still qualify when not marked exact, and the next-minute review to stay excluded'
   );
 });
 
@@ -4779,6 +4838,53 @@ test('an ambiguous open event under a DIFFERENT actor is restarted, not reassign
   assert.doesNotMatch(
     createdNote, /Execution=2026-01-01/,
     'expected the new event to NOT inherit the ambiguous outgoing event\'s Story-era Execution= identity'
+  );
+});
+
+test('an ambiguous-provenance restart does not inherit Work Type/Review Source (ADP-051) from the event it just restarted', () => {
+  // Codex-reported gap (round 34): otherActor's churnEvents mapping used to
+  // include EVERY otherActor event, `ambiguous_provenance_restart` closes
+  // included, even though the restart already exists specifically because
+  // this event's provenance is unverifiable -- the new event opened here is
+  // deliberately a fresh, confirmed execution, never a continuation, and
+  // must classify fresh rather than carrying forward an unverifiable
+  // Story-era Work Type/Review Source.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43dpp02';
+  const conversionEdit = '2026-08-30T05:00:00.000Z';
+  const ambiguousEvent = eventPage('evt-ambiguous-worktype', {
+    actor: 'Claude', // different from the Task's desiredActor below ('Human')
+    startedAt: '2026-01-01T00:00:00.000Z',
+    note: 'Execution=2026-01-01T00:00:00.000Z | Task Origin=ambiguous-pre-upgrade | Work Type=Review Fix | Review Source=Human',
+  });
+  const task = taskPage(taskId, {
+    status: 'In Progress',
+    agent: 'Human',
+    lastEdited: conversionEdit,
+    startedAt: conversionEdit,
+    type: 'Task',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [ambiguousEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(
+    summary.outcomes[0], /^closed_ambiguous_provenance_restart:evt-ambiguous-worktype,opened:/
+  );
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
+  assert.equal(creates.length, 1);
+  const createdNote = creates[0].properties.Note.rich_text[0].text.content;
+  assert.doesNotMatch(
+    createdNote, /Review Source=Human/,
+    'expected the new event to NOT inherit the ambiguous outgoing event\'s Review Source'
+  );
+  assert.match(
+    createdNote, /Work Type=Initial Work/,
+    'expected the new event to classify fresh (no genuine close exists yet) instead of inheriting Review Fix'
+  );
+  assert.equal(
+    fetchLog.filter((e) => e.url.includes('api.github.com')).length, 0,
+    'Initial Work never resolves Review Source, so no GitHub call should happen either'
   );
 });
 
