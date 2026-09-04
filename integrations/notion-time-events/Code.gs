@@ -2374,24 +2374,61 @@ function mostRecentLoggedStatus_(taskId) {
   return entry ? entry.status : '';
 }
 
+// Resolves the Task's single most recent status observation for Work Type /
+// Review Source classification (ADP-051), preferring whichever of two
+// evidence sources is more recent on its OWN timestamp — never trusting
+// either source unconditionally. Sync Log's complete status history
+// (`mostRecentLoggedEntry_`) is normally the better answer: a Task that
+// passed through Backlog/Ready — genuinely changing what "the immediately
+// preceding status" means — after its last Time Event closed leaves no
+// trace in Time Events at all (nothing opens or closes on those
+// transitions), so a Time-Event-only view would keep seeing the stale
+// close and misclassify the eventual reopen. But a genuine Time-Event
+// close this script itself just performed (`mostRecentGenuineClose_`) can
+// be STRICTLY NEWER evidence than the Sync Log when its own `logSnapshot_`
+// write never landed — the run was interrupted between patching the event
+// and reaching `logSnapshot_` (the last step of `reconcileTaskPage_`,
+// after every Notion write), and the Task reopened before any later poll
+// had a chance to log that transition. Codex-reported gap (round 30): an
+// earlier version trusted any Sync Log answer unconditionally, so that
+// narrow window silently misclassified the reopen as Initial Work and
+// skipped Review Source resolution, despite the event's own Note already
+// proving the immediately preceding transition was into Review.
+//
+// `classifyWorkType_` and `reviewFixSinceTimestamp_` both call this SAME
+// function rather than each independently comparing the two sources, so
+// they can never disagree about which evidence won — the identical class
+// of gap Codex found once before between these two functions (see the
+// PR's own review history) when they each read Sync Log independently.
+function mostRecentStatusEvidence_(allEvents, taskId) {
+  const logged = mostRecentLoggedEntry_(taskId);
+  const priorClose = mostRecentGenuineClose_(allEvents);
+  const priorCloseEndedAt = priorClose ? propertyDate_(priorClose.properties['Ended At']) : null;
+  if (logged && (!priorCloseEndedAt || logged.at.getTime() >= priorCloseEndedAt.getTime())) {
+    return { status: logged.status, at: logged.at };
+  }
+  if (!priorClose) return null;
+  const priorEndStatus = parseNoteMeta_(propertyText_(priorClose.properties.Note)).endStatus;
+  return { status: priorEndStatus, at: priorCloseEndedAt };
+}
+
 // Review Source (ADP-051) must only count review activity from the SAME
 // Review period that produced this fix, not a stale, already-superseded
-// earlier one — mirrors classifyWorkType_'s own Sync-Log-first preference
-// exactly, and for the identical reason: a Task that passed through
-// Backlog/Ready (untouched by any Time Event) before this reopen has no
-// Time Event marking when the CURRENT Review period began, only the
-// genuine close from whichever earlier Review period a Time Event happened
-// to close from. Using that stale timestamp as the "since" cutoff would
-// let a review submitted during that earlier, unrelated Review period
-// attribute cost to a reviewer who had nothing to do with this fix. Reuses
-// the exact same Sync Log entry classifyWorkType_ itself relied on to call
-// this a Review Fix in the first place — never an independent lookup that
-// could disagree with it — and falls back to the Time-Event heuristic's
-// own cutoff only when Sync Log had no answer at all, same as
-// classifyWorkType_'s own fallback.
+// earlier one. A Task that passed through Backlog/Ready (untouched by any
+// Time Event) before this reopen has no Time Event marking when the
+// CURRENT Review period began, only the genuine close from whichever
+// earlier Review period a Time Event happened to close from — using that
+// stale timestamp as the "since" cutoff would let a review submitted
+// during that earlier, unrelated Review period attribute cost to a
+// reviewer who had nothing to do with this fix. Reuses the exact same
+// evidence `classifyWorkType_` itself relied on to call this a Review Fix
+// in the first place — never an independent lookup that could disagree
+// with it (see `mostRecentStatusEvidence_`'s own comment) — and falls back
+// to the Time-Event heuristic's own cutoff only when that evidence isn't a
+// Review status at all, same as `classifyWorkType_`'s own fallback.
 function reviewFixSinceTimestamp_(allEvents, taskId) {
-  const logged = mostRecentLoggedEntry_(taskId);
-  if (logged && logged.status === DEFAULTS.REVIEW_STATUS) return logged.at;
+  const evidence = mostRecentStatusEvidence_(allEvents, taskId);
+  if (evidence && evidence.status === DEFAULTS.REVIEW_STATUS) return evidence.at;
   return genuineCloseEndedAt_(allEvents);
 }
 
@@ -2401,28 +2438,13 @@ function reviewFixSinceTimestamp_(allEvents, taskId) {
 // Work、Review → In Progress の再着手は Review Fix") exactly. A re-open
 // following any OTHER status (Blocked, Ready, Backlog) is Initial Work by
 // the same rule — there is no third category, deliberately: see the
-// non-goals above.
-//
-// Prefers Sync Log's complete status history (mostRecentLoggedStatus_) over
-// the Time-Event-only heuristic (mostRecentGenuineClose_) whenever Sync Log
-// has an answer: a Task that passed through Backlog/Ready — genuinely
-// changing what "the immediately preceding status" means — after its last
-// Time Event closed from Review leaves no trace in Time Events at all
-// (nothing opens or closes on those transitions), so the Time-Event-only
-// view would keep seeing the stale Review close and misclassify the
-// eventual reopen as Review Fix. Sync Log has no such gap: `logSnapshot_`
-// runs for every genuinely distinct Task snapshot regardless of Status, so
-// it directly answers "what status was this Task last actually observed
-// in" rather than inferring it from unrelated Time-Event bookkeeping. Falls
-// back to the Time-Event heuristic only when Sync Log has nothing yet (a
-// brand-new Task, or bootstrap onto a fresh deploy with no prior log).
+// non-goals above. See `mostRecentStatusEvidence_` for how "the immediately
+// preceding observed status" is actually resolved between Sync Log and
+// Time-Event evidence.
 function classifyWorkType_(allEvents, taskId) {
-  const loggedStatus = mostRecentLoggedStatus_(taskId);
-  if (loggedStatus) return loggedStatus === DEFAULTS.REVIEW_STATUS ? 'Review Fix' : 'Initial Work';
-  const priorClose = mostRecentGenuineClose_(allEvents);
-  if (!priorClose) return 'Initial Work';
-  const priorEndStatus = parseNoteMeta_(propertyText_(priorClose.properties.Note)).endStatus;
-  return priorEndStatus === DEFAULTS.REVIEW_STATUS ? 'Review Fix' : 'Initial Work';
+  const evidence = mostRecentStatusEvidence_(allEvents, taskId);
+  if (!evidence) return 'Initial Work';
+  return evidence.status === DEFAULTS.REVIEW_STATUS ? 'Review Fix' : 'Initial Work';
 }
 
 // Best-effort attribution of a Review Fix to whoever most recently reviewed

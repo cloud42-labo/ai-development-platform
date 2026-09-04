@@ -2462,6 +2462,54 @@ test('classifyWorkType_ prefers Sync Log\'s complete status history over the Tim
   assert.equal(sandbox.classifyWorkType_([closedFromReview], taskId), 'Initial Work');
 });
 
+test('classifyWorkType_ prefers a genuine Time-Event close over a Sync Log row that predates it', () => {
+  // Codex-reported gap (round 30): an earlier version trusted ANY Sync Log
+  // answer unconditionally, never comparing its timestamp against a genuine
+  // Time-Event close. If reconciliation closes an event into Review but is
+  // interrupted before logSnapshot_ ever records that transition (the last
+  // step of reconcileTaskPage_, after every Notion write), and the Task
+  // reopens before a later poll gets a chance to log it, the Sync Log's
+  // most recent row for this Task is now STALE (predates the close) — yet
+  // it was still trusted outright, silently misclassifying the reopen as
+  // Initial Work and skipping Review Source resolution despite the event's
+  // own Note already proving otherwise.
+  const taskId = 'task-sync-log-stale';
+  const { sandbox } = harness();
+  // The Sync Log's only row for this task predates the genuine close below
+  // — exactly what an interrupted logSnapshot_ write for the Review
+  // transition itself would leave behind (the log never caught up).
+  sandbox.logSnapshot_('snap-1', 'notion_poll', taskId, 'Ready', new Date('2026-08-30T04:00:00.000Z'), 'no_change:Ready');
+
+  const closedFromReview = eventPage('evt-1', {
+    actor: 'Claude', startedAt: '2026-08-30T04:30:00.000Z', endedAt: '2026-08-30T06:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress',
+  });
+
+  assert.equal(
+    sandbox.classifyWorkType_([closedFromReview], taskId), 'Review Fix',
+    'expected the newer genuine close to win over the stale Sync Log row'
+  );
+});
+
+test('reviewFixSinceTimestamp_ prefers a genuine Time-Event close\'s own boundary over a stale Sync Log row', () => {
+  // Companion to the classifyWorkType_ regression above: both functions
+  // must resolve the SAME evidence (mostRecentStatusEvidence_) so they can
+  // never disagree about which source won.
+  const taskId = 'task-sync-log-stale-2';
+  const { sandbox } = harness();
+  sandbox.logSnapshot_('snap-1', 'notion_poll', taskId, 'Ready', new Date('2026-08-30T04:00:00.000Z'), 'no_change:Ready');
+
+  const closedFromReview = eventPage('evt-1', {
+    actor: 'Claude', startedAt: '2026-08-30T04:30:00.000Z', endedAt: '2026-08-30T06:00:00.000Z',
+    note: 'End Status=Review | Reason=left_in_progress',
+  });
+
+  assert.equal(
+    sandbox.reviewFixSinceTimestamp_([closedFromReview], taskId).toISOString(), '2026-08-30T06:00:00.000Z',
+    'expected the genuine close\'s own Ended At, not something derived from the stale Sync Log row'
+  );
+});
+
 test('reviewFixSinceTimestamp_ uses the current Review period\'s own start, not a stale Time Event close from an earlier one', () => {
   // Codex-reported gap: classifyWorkType_ was fixed to use Sync Log (the
   // Task's real status history) instead of the Time-Event-only heuristic,
