@@ -543,15 +543,8 @@ function backfillResultFingerprints_() {
 // timing and completion evidence are read from the page Notion returned; the
 // reconciler only ever moves Task Time Events toward the state Notion already
 // holds, so a repeated pass over the same page is a no-op.
-function reconcileTaskPage_(task, options) {
+function reconcileTaskPage_(task) {
   if (!isConfiguredTask_(task)) return 'ignored:not_configured_task';
-
-  // resolveAmbiguousProvenance: false (protective default) everywhere except
-  // backfillStoryExclusion_'s own call site below — see reconcileStoryTask_
-  // for why that one caller, and only that one, is allowed to actually
-  // resolve (by archiving) an ambiguous-marked event rather than leaving it
-  // untouched.
-  const resolveAmbiguousProvenance = Boolean(options && options.resolveAmbiguousProvenance);
 
   const pageId = task.id;
   const currentStatus = propertyText_(task.properties.Status);
@@ -592,7 +585,7 @@ function reconcileTaskPage_(task, options) {
   if (!mustReverify && hasProcessedSnapshot_(snapshotId)) return 'duplicate:' + pageId;
 
   const outcome = isStory
-    ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId, when, resolveAmbiguousProvenance)
+    ? reconcileStoryTask_(task.id, currentStatus, changedBy, snapshotId, when)
     : reconcileAuthoritativeTimeEvents_(
         task,
         currentStatus,
@@ -668,46 +661,36 @@ function reconcileTaskPage_(task, options) {
 // happens to still be attached to a page that later, briefly, looked
 // like a Task.
 //
-// resolveAmbiguousProvenance (Codex-reported gap, round 17): defaults to
-// false, preserving the "leave it exactly as found" behavior above for
-// every ordinary caller (pollTaskChanges, reconcileTaskById,
-// backfillResultFingerprints_) — none of those ever gets to choose which
-// Story pages it visits, so an ambiguous-marked event reached through one
-// of them might belong to a Story this operator never intended to sweep
-// yet, and skipping stays the safe default. backfillStoryExclusion_ is
-// different: it is an explicit, operator-run, one-time cleanup pass that
-// deliberately visits every Type = Story page in the workspace specifically
-// to remove exactly the stray events this whole exclusion exists to fix
-// (see its own comment) — for THAT caller, and only that caller, an
-// ambiguous-marked event on a page it is visiting is, by construction,
-// sitting on a page that is Story right now, which is exactly the
-// population backfillTaskOriginProvenance_'s blanket ambiguous-flagging
-// was never able to rule in or out on its own. Passing true here lets this
-// backfill actually finish the job instead of the mandated
-// backfillTaskOriginProvenance_ → backfillStoryExclusion_ ordering silently
-// flagging everything ambiguous and then this function skipping every
-// single one of them — which would fully disable the fix this whole file
-// exists to ship.
-function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when, resolveAmbiguousProvenance) {
+// Codex-reported gap (round 18, reviewing this exact round-17 attempt): an
+// earlier version of this function accepted a resolveAmbiguousProvenance
+// flag that backfillStoryExclusion_ passed to actually ARCHIVE an
+// ambiguous-marked event instead of skipping it, reasoning that the
+// backfill only ever visits pages that ARE Type = Story right now. That
+// reasoning repeats the exact mistake backfillTaskOriginProvenance_'s own
+// comment already root-caused twice over (rounds 15/16): a page's CURRENT
+// Type never proves anything about its pre-revision event history, in
+// EITHER direction — a page reading Story right now may have been
+// Task → Story → ... any number of times before this revision was ever
+// deployed, so an event on it can just as easily be genuine pre-upgrade
+// Task-era work as bogus Story stray data, and archiving "because the page
+// is Story now" is indistinguishable from the exact guess-in-the-dangerous-
+// direction failure mode AMBIGUOUS_PROVENANCE_MARKER exists to prevent.
+// There is no caller — not even a backfill scoped to Story pages — for
+// which "currently Story" adds any information about a marker that was
+// deliberately stamped ambiguous specifically because current Type
+// couldn't answer this question. Reverted to the single behavior: every
+// caller, no exceptions, leaves an ambiguous-marked event exactly as
+// found. This is a deliberate, permanent accepted limitation, not a bug to
+// eventually close automatically — see backfillStoryExclusion_'s own
+// comment and the README's "Known limitations" for why full automatic
+// resolution of pre-upgrade ambiguous data is intentionally out of scope.
+function reconcileStoryTask_(taskId, currentStatus, changedBy, snapshotId, when) {
   const events = queryNotionTimeEventsForTask_(taskId);
   if (!events.length) return 'story_excluded';
 
   const actions = [];
   events.forEach(function (eventPage) {
     if (eventProvenanceIsAmbiguous_(eventPage)) {
-      if (resolveAmbiguousProvenance) {
-        // Only backfillStoryExclusion_ passes true — see the function
-        // comment above for why archiving here, on a page this backfill
-        // deliberately targeted BECAUSE it is Story right now, is safe
-        // where the ordinary skip-and-flag-for-review default is not.
-        // Distinct outcome label from the ordinary archived_story_event:
-        // below so an operator reviewing this backfill's own output can
-        // tell "always known to be Story stray data" apart from "resolved
-        // from an ambiguous pre-upgrade marker" at a glance.
-        archiveStoryTimeEvent_(eventPage, changedBy, snapshotId);
-        actions.push('archived_ambiguous_provenance:' + eventPage.id);
-        return;
-      }
       // Neither preserve nor archive — see backfillTaskOriginProvenance_'s
       // comment for why: a page already Story before this revision's
       // deploy has events whose true origin (genuine pre-upgrade Task-era
@@ -779,7 +762,12 @@ function archiveStoryTimeEvent_(eventPage, changedBy, snapshotId) {
 // Type = Story page directly, regardless of Status — independent of
 // last_edited_time or the cursor — and reconciles each through the
 // ordinary reconcileTaskPage_ entry point, which archives every Time Event
-// a Story has via reconcileStoryTask_, open or already closed.
+// a Story has via reconcileStoryTask_, open or already closed — except an
+// event already flagged Task Origin=ambiguous-pre-upgrade by
+// backfillTaskOriginProvenance_, which this backfill leaves untouched
+// exactly like every other caller (see reconcileStoryTask_'s own comment
+// and the README's "Known limitations" for why that is a permanent,
+// deliberate exception, not a gap).
 //
 // Deliberately not scoped to Status = In Progress, for two independent
 // reasons a narrower query would miss:
@@ -888,13 +876,7 @@ function backfillStoryExclusion_() {
       iterated < toProcess.length &&
       (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
     ) {
-      // resolveAmbiguousProvenance: true — see reconcileStoryTask_'s
-      // comment for why only this call site passes it, and why it must:
-      // without it, the mandated backfillTaskOriginProvenance_ →
-      // backfillStoryExclusion_ ordering would leave every ambiguous-marked
-      // event on every Story page permanently skipped instead of cleaned up
-      // (Codex-reported gap, round 17).
-      outcomes.push(reconcileTaskPage_(toProcess[iterated], { resolveAmbiguousProvenance: true }));
+      outcomes.push(reconcileTaskPage_(toProcess[iterated]));
       iterated++;
     }
     const timedOut = iterated < toProcess.length;
@@ -2026,11 +2008,10 @@ const AMBIGUOUS_PROVENANCE_MARKER = 'ambiguous-pre-upgrade';
 // runs), so treating a blank Type the same as a wholly unprovable pre-
 // upgrade legacy event would be needlessly pessimistic — it would make
 // eventProvenanceIsAmbiguous_ true and leave the event stuck "left exactly
-// as found" (reconcileStoryTask_) forever, and, worse, make it invisible to
-// backfillStoryExclusion_'s resolveAmbiguousProvenance cleanup pass (see
-// reconcileStoryTask_), which must never archive genuine Task-era work.
-// This sentinel keeps that distinction: "confirmed non-Story, Type just
-// wasn't set" rather than "unprovable either way".
+// as found" (reconcileStoryTask_) forever despite this script having
+// directly witnessed a confirmed non-Story creation. This sentinel keeps
+// that distinction: "confirmed non-Story, Type just wasn't set" rather
+// than "unprovable either way".
 const NO_TYPE_MARKER = 'unset-type';
 
 function paginateNotionQuery_(path, baseBody, deadlineMs, extendedDeadlineMs, hasProgress) {

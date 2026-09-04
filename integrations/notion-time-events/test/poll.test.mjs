@@ -3239,65 +3239,41 @@ test('createNotionTimeEvent_ stamps NO_TYPE_MARKER (not a blank marker) when the
   assert.ok(payload.properties['Ended At'], 'expected the open event to be closed with a real Ended At');
 });
 
-test('backfillStoryExclusion_ resolves ambiguous-marked events on the Story pages it targets, archiving them under a distinct outcome label', () => {
-  // Codex-reported gap (P1, round 17): the mandated upgrade order runs
-  // backfillTaskOriginProvenance_() (flags EVERY pre-existing event
-  // ambiguous, unconditionally -- see its own tests above) BEFORE
-  // backfillStoryExclusion_() (this function). Without this fix,
-  // reconcileStoryTask_'s ambiguous-skip branch -- correct as the default
-  // for ordinary polling, which must never guess -- would then also make
-  // THIS backfill skip every single event it was specifically run to clean
-  // up, since by the time it runs, backfillTaskOriginProvenance_ has already
-  // marked all of them ambiguous. That would fully disable BUG-ADP-TTE-01's
-  // fix on any existing deployment that follows the documented upgrade
-  // order. backfillStoryExclusion_ only ever visits pages that ARE Story
-  // right now (its own query filter), so for this one caller an
-  // ambiguous-marked event is safe to resolve by archiving, same as any
-  // other stray Story event -- just labeled distinctly so an operator can
-  // tell the two populations apart in the outcome log.
+test('backfillStoryExclusion_ never resolves an ambiguous-marked event -- it stays skipped exactly like every other caller', () => {
+  // Codex-reported gap (P1, round 18), reverting a round-17 attempt: that
+  // attempt made backfillStoryExclusion_ archive an ambiguous-marked event
+  // on the reasoning that this backfill only ever visits pages that ARE
+  // Story right now. Codex correctly pointed out this repeats the exact
+  // current-Type fallacy backfillTaskOriginProvenance_'s own design already
+  // root-caused twice over: current Type never proves anything about
+  // pre-revision event history, in either direction, no matter how the
+  // caller scopes its own query -- so archiving here risked erasing
+  // genuine pre-upgrade Task-era work exactly like the mistake this whole
+  // marker exists to prevent. Reverted to the single, universal behavior:
+  // no caller ever resolves this marker -- proven here directly against
+  // backfillStoryExclusion_, and by the existing pollTaskChanges-based
+  // tests above for the other callers.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dmm01';
   const ambiguousEvent = eventPage('evt-ambiguous-on-story', {
     actor: 'Claude',
     startedAt: '2026-08-01T00:00:00.000Z',
     note: 'Task Origin=ambiguous-pre-upgrade',
   });
+  const task = taskPage(taskId, {
+    status: 'Done',
+    agent: 'Claude Opus',
+    lastEdited: '2026-08-20T10:00:00.000Z',
+    startedAt: '2026-08-01T00:00:00.000Z',
+    type: 'Story',
+  });
   const { sandbox, fetchLog } = harness({
-    tasks: [taskPage(taskId, {
-      status: 'Done',
-      agent: 'Claude Opus',
-      lastEdited: '2026-08-20T10:00:00.000Z',
-      startedAt: '2026-08-01T00:00:00.000Z',
-      type: 'Story',
-    })],
+    tasks: [task],
     events: [ambiguousEvent],
   });
 
   const summary = sandbox.backfillStoryExclusion_();
 
-  assert.equal(summary.outcomes[0], 'archived_ambiguous_provenance:evt-ambiguous-on-story');
+  assert.equal(summary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-ambiguous-on-story');
   const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-ambiguous-on-story');
-  assert.equal(patches.length, 1);
-  assert.equal(JSON.parse(patches[0].options.payload).archived, true);
-
-  // Contrast: an ordinary poll-triggered reconcileTaskPage_ call (no
-  // resolveAmbiguousProvenance option) on the same kind of event must still
-  // skip it, exactly as before -- this backfill's opt-in is the only path
-  // that resolves ambiguous provenance.
-  const stillAmbiguous = eventPage('evt-still-ambiguous', {
-    actor: 'Claude',
-    startedAt: '2026-08-01T00:00:00.000Z',
-    note: 'Task Origin=ambiguous-pre-upgrade',
-  });
-  const { sandbox: ordinarySandbox } = harness({
-    tasks: [taskPage('3cafbd82-6f3b-8158-9622-d795b43dmm02', {
-      status: 'Done',
-      agent: 'Claude Opus',
-      lastEdited: '2026-08-20T10:00:00.000Z',
-      startedAt: '2026-08-01T00:00:00.000Z',
-      type: 'Story',
-    })],
-    events: [stillAmbiguous],
-  });
-  const ordinarySummary = ordinarySandbox.pollTaskChanges();
-  assert.equal(ordinarySummary.outcomes[0], 'skipped_ambiguous_pre_upgrade_provenance:evt-still-ambiguous');
+  assert.equal(patches.length, 0, 'expected no archive/patch of the ambiguous-marked event from this backfill');
 });
