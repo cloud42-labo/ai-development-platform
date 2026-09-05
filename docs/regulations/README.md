@@ -42,9 +42,9 @@ ADP-059では、既存Operating Guideを次の規程へ分解する。
 
 | ID | 規程 | 主な対象 | 移行Task |
 |---|---|---|---|
-| R01 | **組織規程** | 組織構成、役割、責任、Owner / Chris / Claude / Codex / Gemini の位置付け | ADP-059-B |
-| R02 | **職務権限規程** | 各実行主体が自律実行できる範囲、merge・変更・外部操作等の権限 | ADP-059-B |
-| R03 | **決裁規程** | Human承認が必要な事項、例外承認、不可逆操作、権限変更の決裁 | ADP-059-B |
+| R01 | [**組織規程**](R01-organization-regulation.md) | 組織構成、役割、責任、Owner / Chris / Claude / Codex / Gemini の位置付け | ADP-059-B |
+| R02 | [**職務権限規程**](R02-authority-regulation.md) | 各実行主体が自律実行できる範囲、merge・変更・外部操作等の権限 | ADP-059-B |
+| R03 | [**決裁規程**](R03-approval-regulation.md) | Human承認が必要な事項、例外承認、不可逆操作、権限変更の決裁 | ADP-059-B |
 | R04 | **文書管理規程** | SoT、文書区分、Decision、記録、Memory、変更履歴、参照優先順位 | ADP-059-C |
 | R05 | **システム開発管理規程** | Idea→ProductのStage/Gate、開発・Review・Releaseの管理原則 | ADP-059-D |
 | R06 | **プロジェクト管理規程** | Product/Epic/Story/Task/Sprint、優先順位、進捗、Refinement、完了管理 | ADP-059-D |
