@@ -431,6 +431,32 @@ best-effort, not authoritative.
      reopen at `12:00:10`, review at `12:00:40` — not causal, yet an
      end-of-minute `12:00:59` bound admits it).
 
+     **This upper bound is subject to the same backlog-wide widening as
+     the lower bound (failure #50), not just "the recorded minute."**
+     `reconcileAuthoritativeTimeEvents_` falls back to
+     `startAt = trustedTaskStart || when`, where `when =
+     authoritativeEditTime_(task)` (`Code.gs` ~565, ~1657), whenever the
+     Task's own `Started At` isn't independently trusted — the exact same
+     `last_edited_time`-derived value README documents as inflatable
+     across multiple deferred poll cycles under a sustained write-backlog
+     (`ceil(backlog / MAX_TASKS_PER_RUN)` cycles). When this fallback
+     value is what supplies the upper bound, treating the ambiguity as
+     confined to its recorded minute understates it the same way it did
+     for the lower bound: e.g. work actually resumes at `12:00`, an
+     unrelated edit inflates the recorded reopen to `12:15`, and a review
+     at `12:05` — genuinely non-causal, since it predates the real reopen
+     — gets treated as definitely inside the window and wrongly credited,
+     because it falls outside the narrow `12:15`-minute check entirely
+     (failure #52, found during this document's own review — the
+     backlog-wide widening principle from failure #50 was never carried
+     over to this bound). The uncertain span here runs from the last
+     independently corroborated evidence point *before* this reopen was
+     recorded through the recorded value itself, exactly mirroring
+     failure #50's construction — everything below about "the ambiguous
+     minute" applies identically across that full span, not literally one
+     clock-minute, whenever the upper bound comes from this untrusted
+     fallback rather than a directly-observed, narrowly-bounded value.
+
      **Unlike the lower bound, "prefer a reviewer clearly outside the
      ambiguous window" is not automatically safe here**, because this is
      the *newer* edge of the window — an ambiguous-minute review can be
@@ -493,30 +519,39 @@ best-effort, not authoritative.
      found during this document's own review).
 3. Classify the most recent reviewer login inside the window into
    `Codex` / `Claude` / `Human` / `Other`, applying step 2's two
-   ambiguous-minute degradation rules **exactly as specified there — they
-   are not symmetric, and restating them as one shared rule loses the
-   upper bound's stricter condition** (failure #43, found during this
+   ambiguity-degradation rules **exactly as specified there — they are
+   not symmetric, and restating them as one shared rule loses the upper
+   bound's stricter condition** (failure #43, found during this
    document's own review — an earlier draft of this summary line
    collapsed both into "prefer a reviewer outside the ambiguous
    window(s); degrade to `Other` if none exists," which is only the
    lower bound's rule and silently drops the upper bound's requirement
    to also degrade when an outside candidate *does* exist but an
-   ambiguous-minute review could still outrank it):
+   ambiguous review could still outrank it). **"Ambiguous" here means
+   the full uncertain span established in §5 step 2 — the recorded
+   minute in the ordinary case, but widened back to the last
+   independently corroborated evidence point whenever the bound comes
+   from an uncorroborated, backlog-inflatable timestamp (failures #50,
+   #52) — never only the literal clock-minute regardless of which case
+   applies** (failure #53, found during this document's own review —
+   an earlier draft of this summary line kept saying "minute" even
+   after step 2's own text was widened, so a reader implementing only
+   this summary would silently miss the wider span):
    - **Lower bound**: prefer a reviewer clearly outside the ambiguous
-     minute; degrade to `Other` only if none exists.
+     span; degrade to `Other` only if none exists.
    - **Upper bound**: if no review is clearly outside the ambiguous
-     minute at all, there is no definite candidate to begin with —
+     span at all, there is no definite candidate to begin with —
      degrade to `Other` outright (failure #47). Otherwise, after picking
-     the best candidate clearly outside the ambiguous minute, check
-     **every** review *inside* the ambiguous minute with a timestamp
+     the best candidate clearly outside the ambiguous span, check
+     **every** review *inside* the ambiguous span with a timestamp
      later than that candidate's — not only the single latest one, since
      each is potentially the latest eligible reviewer under some
-     sub-minute reopen time (failure #49) — even though an outside-window
-     candidate exists (failure #37). Degrade to `Other` if **any** of
-     them classifies into a **different** source category than the
-     definite candidate; only if all of them classify into the same
-     category do both possible orderings agree and no degradation is
-     needed (failure #44).
+     ordering within that span (failure #49) — even though an
+     outside-window candidate exists (failure #37). Degrade to `Other`
+     if **any** of them classifies into a **different** source category
+     than the definite candidate; only if all of them classify into the
+     same category do both possible orderings agree and no degradation
+     is needed (failure #44).
 4. **Degrade to `Other`, never throw**, on: missing `Pull Request` URL,
    missing `GITHUB_TOKEN`, any GitHub API failure, or an unexpected
    response shape. Reconciliation availability must never depend on
@@ -628,6 +663,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 49 | A definite `Human` review, then in the ambiguous upper-bound minute a `Codex` review, then another `Human` review | The failure #44 fix inspects only the single overall-latest ambiguous-minute review (`Human`, matching the definite candidate) and calls the result safe — but a reopen between the two ambiguous reviews makes `Codex` the latest *eligible* one instead, an outcome the single-review check never considers | §5 step 2/3 |
 | 50 | A genuine close's `Ended At` is inflated across multiple deferred poll cycles under a sustained write-backlog (per README's `ceil(backlog / MAX_TASKS_PER_RUN)` bound): true transition at `12:00`, a causal review at `12:05`, an unrelated edit finally observed at `12:15` recording `Ended At=12:15` | Treating the ambiguity as confined to "the recorded minute" (`12:15`) wrongly excludes the genuinely causal `12:05` review, which falls well outside that one-minute window but well inside the real, backlog-dependent uncertainty span | §5 step 2 |
 | 51 | An `ambiguous_provenance_restart` close exists, followed by an unrelated executable-Task `In Progress` reopen; an older, pre-restart `Review` row also exists in Sync Log | §6 correctly stops churn *inheritance* at the restart, but §3 step 2's boundary/Sync-Log scan has no awareness of the restart marker and can still reach the older `Review` row, classifying the explicitly fresh, unclassified replacement as `Review Fix` and reusing a stale Review Source | §3 step 2 |
+| 52 | Work actually resumes at `12:00`; `Started At` isn't trusted so the reopen falls back to `when = authoritativeEditTime_(task)`; an unrelated edit inflates the recorded value to `12:15`; a review lands at `12:05` | Treating the upper-bound ambiguity as confined to the recorded `12:15` minute wrongly credits the `12:05` review as inside the window, even though it's genuinely non-causal (it predates the real `12:00` reopen) — the same backlog-wide widening failure #50 gave the lower bound was never applied to this bound | §5 step 2 |
+| 53 | The lower-bound widening from failure #50 changes step 2's actual boundary, but §5 step 3's summary and degradation wording still say "minute" | A reader implementing only the step 3 summary (or checklist) would apply degrade-if-ambiguous logic only within the literal recorded clock-minute, silently missing the wider backlog-dependent span step 2 itself now specifies | §5 step 3 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -681,7 +718,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 51 rows in §7 exist as named regression tests before requesting
+- [ ] All 53 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] The retroactive-boundary-vs-Sync-Log staleness check (§3 step 3,
       failure #32) compares `Write=` directly against `Write=` on both
@@ -724,7 +761,14 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       an earlier confirming Sync Log row) — never as confined to "the
       recorded minute," since README's documented backlog-dependent
       imprecision can span multiple poll cycles, not just one
-      (failure #50).
+      (failure #50). The Review Source **upper** bound gets the identical
+      widening whenever it comes from the same untrusted
+      `authoritativeEditTime_`-derived fallback (`startAt = trustedTaskStart
+      || when`), not just when it comes from a directly-observed value
+      (failure #52). Every place that restates or summarizes these rules
+      (§5 step 3, this checklist) says "the ambiguous span," never just
+      "the minute," so the widened case isn't silently dropped by a
+      reader implementing only the summary (failure #53).
 - [ ] §3 step 2's Sync Log candidate construction interprets a
       `done_gate_rejected:...:rollback=<Status>` row by its parsed
       rollback status, never by the row's raw logged `Status` column,
