@@ -34,19 +34,29 @@ against the model below, not a resurrection of PR #21's code as-is — PR
 - `In Progress` — the only status that keeps a Time Event open. Everything
   about "when did work happen" comes from these intervals.
 - Everything else (`Review`, `Blocked`, `Ready`, `Backlog`) — closes every
-  open Time Event with `reason='left_in_progress'` and **does not
-  distinguish which of the four it was** at the Time Event layer. That
-  distinction only survives in the Sync Log's `Status` column.
+  open Time Event with `reason='left_in_progress'` and records *which* of
+  the four it left for in that close's own `End Status=` field
+  (`closeNotionTimeEvent_` writes it; `parseNoteMeta_` exposes it as
+  `endStatus`). A close does retain this — see §3 step 1 — so it is not
+  true that the distinction only survives in the Sync Log.
+
+What a close's `End Status=` cannot tell you is anything about the *time
+in between*: a Task can pass through several non-`In Progress` states with
+no Time Event open at all (e.g. `Backlog → Ready → Review`, none of which
+open one), and only Sync Log's continuous polling observes those. A close
+can also succeed while its paired Sync Log append fails (crash recovery) —
+the reverse gap.
 
 `Done` is a separate terminal gate (`enforceDoneGate_`), unaffected by this
 model. `Type=Story` is an orthogonal axis, fully excluded upstream of
 everything below.
 
 **Consequence for this model:** classifying a freshly-opened `In Progress`
-execution as `Initial Work` vs. `Review Fix` requires reconstructing "was
-the immediately preceding non-executing status `Review`?" from a source
-*other than* the Time Event itself, because the Time Event layer has
-already discarded that distinction. This reconstruction is the entire
+execution as `Initial Work` vs. `Review Fix` needs whichever of the two
+independent evidence sources — the most recent genuine Time Event close's
+`End Status=`, or the most recent Sync Log row — is actually the more
+recent one for this Task, per §3–§5. Neither source alone is sufficient:
+each has gaps the other one covers. This reconciliation is the entire
 source of PR #21's 34 rounds, and is what §3–§5 specify precisely so it
 isn't rediscovered by trial and error again.
 
@@ -57,7 +67,7 @@ and they disagree about precision and coverage in different ways:
 
 | Source | Covers | Precision | Notes |
 |---|---|---|---|
-| **Time Event** (`Task Time Events` page) | Only `In Progress` intervals | Notion timestamp (minute) | Authoritative for Actor start/end per README; carries `Execution=`/`Boundary=` identity tags in its `Note`. |
+| **Time Event** (`Task Time Events` page) | Only `In Progress` intervals — but its own close records the destination status via `End Status=` | Notion timestamp (minute) | Authoritative for Actor start/end per README; carries `Execution=`/`Boundary=`/`End Status=` tags in its `Note`. |
 | **Sync Log** (`logSnapshot_` row) | *Every* observed status, every poll | Notion timestamp (minute) + **must carry an Apps-Script write-time in ms** (see §4) | Append-only; the only place `Review`/`Blocked`/`Ready`/`Backlog` transitions are visible at all. |
 | **GitHub Reviews API** | PR review events | Second | External; only consulted for Review Source, never for Work Type. |
 
@@ -78,11 +88,16 @@ to classify it as `Initial Work` or `Review Fix`:
    `Boundary=left_in_progress` (or the untagged legacy equivalent) —
    excluding any close that is itself churn (reassignment /
    duplicate-reconciliation / `ambiguous_provenance_restart`; see §6).
-2. **Find the candidate boundary from the Sync Log side**: the most recent
-   Sync Log row for this Task whose `Status` is **not** `In Progress`
-   (in-progress rows are mid-execution actor observations, never the
-   boundary itself — skip them explicitly rather than treating the
-   nearest row as authoritative).
+   Read its `End Status=` field for the status it transitioned to — the
+   close itself is the evidence of what status this candidate represents.
+2. **Find the candidate boundary from the Sync Log side**: identify the
+   most recent *contiguous run* of non-`In Progress` Sync Log rows for
+   this Task (`In Progress` rows are mid-execution actor observations,
+   never the boundary itself — skip them), then take the **start** of
+   that run — its earliest row, not its most recently re-observed one.
+   The same status can be logged repeatedly with no real transition
+   in between (failure #14); only the run's first row is the actual
+   boundary timestamp and the evidence for §4's comparison.
 3. **Resolve which candidate is actually more recent** using the priority
    order in §4. This must be a single shared resolver — never let Work
    Type and Review Source each re-derive "the most recent relevant
