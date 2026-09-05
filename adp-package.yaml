@@ -36,7 +36,7 @@ schema_version: 0.1.0-experimental
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 1.0.0
+rules_version: 2.0.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -233,3 +233,34 @@ migration_path:
       "Retrospective" as the step immediately after Review rather than
       near the end, and recognizing Sprint Close and Sprint Goal review as
       their own steps rather than folding them into Planning or Execution.
+  - field: rules_version
+    from: "1.0.0"
+    to: "2.0.0"
+    date: "2026-09-05"
+    change: >-
+      ADP-053: removed the "AI Work Session opened" / "AI Work Session
+      closed" steps and the "AI Work Session recording" subsection from
+      governance/ai-execution-constraints.md's managed-work execution
+      pre-flight and completion post-flight (added by the rules_version
+      0.2.0 entry above, ADP-046). The `AI Work Sessions` Notion database
+      had stopped being populated since 2026-08-30 and duplicated
+      information already carried by Stories & Tasks (`Result`, `Pull
+      Request`), Task Time Events (elapsed-time measurement), and GitHub
+      (PR/commit history). MAJOR per docs/versioning-policy.md's Rules
+      judgment ("removes ... a gate an adopter may be relying on for
+      safety"): agent behavior that was required to stay compliant under
+      1.0.0 (opening/closing an `AI Work Sessions` row per Task) is no
+      longer part of this file at all.
+    action_required: >-
+      An adopter who built compliance checks, dashboards, or tooling
+      against the `AI Work Sessions` fields this Rule used to require
+      (`Status = Running`/`Success`/`Failed`/`Needs Human`, `Started
+      At`/`Completed At`, the `⚠ Session Missing Started At` / `⚠ Success
+      Missing Completed At` views) should retire them: per-execution audit
+      evidence now comes from the Task's own `Result`, `Pull Request`/Git
+      commit identifiers, and Task Time Events only. Do not create a
+      replacement session-log database or field to fill the gap — that is
+      the packaged non-goal this bump encodes, not an oversight to correct
+      locally. An adopter with an existing `AI Work Sessions`-equivalent
+      database may keep its historical rows for audit purposes; this bump
+      only removes the requirement to keep writing new ones.

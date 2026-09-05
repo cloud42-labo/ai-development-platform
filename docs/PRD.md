@@ -36,9 +36,12 @@ session doesn't reach the next one running a different Product.
 - Provide an executable (not merely descriptive) pre-flight/post-flight gate
   for managed work: placement, execution start, AI-to-AI stop, Human gate,
   Human Queue WIP, completion (`governance/ai-execution-constraints.md`).
-- Provide an AI Work Session audit log (who ran, on what Task, with what
-  result) separate from Time Events (pure elapsed-time measurement)
-  (`ADP-046`, this file's own governance section).
+- Provide a per-execution audit trail (who ran, on what Task, with what
+  result) using the Task's own `Result`, PR/commit identifiers, and Task
+  Time Events (pure elapsed-time measurement) — not a separate session
+  database (`ADP-053` deprecated the standalone `AI Work Sessions` log per
+  `ADP-046` after 2026-08-30 showed it had stopped being populated and
+  duplicated Stories & Tasks / Time Events / PR data).
 - Provide a Postmortem → preventive-task → retest loop for governance
   defects (`governance/postmortem-improvement-loop.md`).
 - Provide a monthly risk review cadence
@@ -72,13 +75,13 @@ session doesn't reach the next one running a different Product.
 - No un-cited AI-to-AI stop gate reaches a Postmortem (i.e., the gate's own
   precedence rules resolve conflicts before they stall work).
 - Autonomous daily/hourly execution completes a Task end-to-end (Task
-  exists → In Progress → Time Event → AI Work Session → Done or correctly
-  routed) without a Human being asked something the AI could have verified
-  itself (`governance/ai-execution-constraints.md`'s Human gate pre-flight).
-- AI Work Sessions and Task Time Events are populated by every managed-work
-  execution, not just some (`ADP-046`'s completion criterion, now checkable
-  via the `⚠ Session Missing Started At` / `⚠ Success Missing Completed At`
-  views).
+  exists → In Progress → Time Event → Done or correctly routed) without a
+  Human being asked something the AI could have verified itself
+  (`governance/ai-execution-constraints.md`'s Human gate pre-flight).
+- Task Time Events are populated by every managed-work execution, not just
+  some (`ADP-046`'s original completion criterion, carried forward by
+  `ADP-053` onto Time Events alone after the separate `AI Work Sessions`
+  log was deprecated).
 - A Postmortem's preventive task is retested against a representative
   regression case before closure, not merely documented
   (`governance/postmortem-improvement-loop.md`).
