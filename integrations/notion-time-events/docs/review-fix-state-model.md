@@ -97,10 +97,21 @@ to classify it as `Initial Work` or `Review Fix`:
      polling model, not something this evidence model can fix by being
      more careful. Treat a genuine close's `Ended At` as minute-granular
      evidence like everything else, never as an implicitly-trusted
-     second-precision value, unless it independently carries one (e.g. a
-     `Write=`-style capture at the moment of closing, if a future
-     implementation adds one) (failure #38, found during this document's
-     own review).
+     second-precision value (failure #38, found during this document's
+     own review). **`Write=` does not rescue this**: it is the Apps
+     Script's own write time (useful only for §4's tie-breaking between
+     two *competing* candidates), not a capture of the real-world
+     transition moment — a delayed reconciliation cycle (e.g. a backlog
+     that defers processing a 12:00 transition until 12:15) produces a
+     precise `Write=12:15`, which is precise about *when the script ran*,
+     not about when the Task actually changed status. Nothing in the
+     mechanisms this document specifies can currently produce a trusted,
+     second-precision transition-boundary timestamp — that would require
+     a different capture (e.g. a webhook, or a field written by whatever
+     changed the status itself), which is out of scope for `ADP-051-B`/
+     `C`/`D` as specified here (failure #41, found during this document's
+     own review — corrects an implication in the failure #38 fix above
+     that a future `Write=`-style capture could supply this).
    - **Retroactively stamped** (`Reason=reassignment` or
      `duplicate_reconciliation`, with `Boundary=left_in_progress` added
      *later* by `stampExecutionBoundary_` because no open Time Event
@@ -137,37 +148,51 @@ to classify it as `Initial Work` or `Review Fix`:
    evidence" independently (PR #21 round 7/13: doing so let them disagree
    about the same instant). **If the Time Event candidate is *genuine*
    (step 1) and it reports the same status as the Sync Log candidate
-   (step 2) but the two disagree on timestamp, this is not resolvable
-   from the evidence available and must be surfaced as ambiguous, not
-   silently coalesced or compared.** An earlier draft of this document
-   tried to discriminate the two possible readings — "same transition
-   observed twice" (genuine close at t1, Sync Log merely re-observing the
-   Task still sitting in that status at a later t2; take t1) versus
-   "genuinely different periods of the same status label" (e.g. `Review`
-   → unmapped `In Progress` → `Review` again; take the newer Sync Log
-   run per §4) — by checking whether any Sync Log row with a *different*
-   status exists between t1 and t2, treating "no such row found" as proof
-   of the first case. **That discriminator does not work**: per README's
-   documented polling model, a Task can pass through several states
-   inside one poll interval and only its *final* observed state is ever
-   logged — an intervening transition can be entirely **unobserved**, not
-   merely under-logged, so "no intervening row found" is equally
-   consistent with "no intervening transition happened" and "one
-   happened but no poll ever landed inside it to see it." No amount of
-   additional row-scanning distinguishes these from Notion-side evidence
-   alone (failure #39, found during this document's own review — this
-   is what failures #35/#36's fix actually got wrong, not one more case
-   it missed). Treat this case exactly like failure #28's "no reliable
-   status source": surface it as an explicit unresolved/ambiguous case
-   for review, never silently default to either candidate's timestamp.
-   (The genuine close's `End Status=` remains readable on its own — this
-   ambiguity is only about *which timestamp* is the true transition
-   boundary when a Sync Log run reports the same status later, not about
-   whether the status itself is known.) §4's "more recent wins"
-   comparison still applies as before to genuinely *different* candidate
-   transitions (e.g. a later Sync Log run reporting a *different* status
-   than a stale Time Event close); this ambiguity rule applies only when
-   both candidates agree on the status. **If the winning candidate is a
+   (step 2) but the two disagree on timestamp**, first check whether any
+   Sync Log row with a *different* status (including `In Progress`, e.g.
+   an unmapped-actor spell that opens no Time Event) exists between the
+   genuine close's timestamp and the Sync Log run's own start:
+   - **If such a row *exists***, it is positive, actually-observed
+     evidence of a real intervening transition — a poll captured it, so
+     polling collapse cannot have hidden it. The two candidates are
+     therefore genuinely different periods of the same status label
+     (e.g. `Review` → unmapped `In Progress` → `Review` again before the
+     current reopen); apply §4's ordinary "more recent wins" comparison,
+     which correctly prefers the newer Sync Log run in this case
+     (failure #36, found during this document's own review).
+   - **If no such row exists**, this is *not* proof the two candidates
+     are the same transition observed twice — an earlier draft of this
+     document treated "no intervening row found" as exactly that proof
+     and coalesced to the genuine close's earlier timestamp, but that
+     discriminator does not work: per README's documented polling model,
+     a Task can pass through several states inside one poll interval and
+     only its *final* observed state is ever logged, so an intervening
+     transition can be entirely **unobserved**, not merely under-logged.
+     "No intervening row found" is therefore equally consistent with "no
+     intervening transition happened" and "one happened but no poll ever
+     landed inside it to see it," and no amount of additional row-scanning
+     distinguishes these from Notion-side evidence alone (failure #39,
+     found during this document's own review — this is what failures
+     #35/#36's original fix got wrong for this specific sub-case, not a
+     new case it missed; the *other* sub-case, above, where an
+     intervening row does exist, remains correctly resolved by §4 and is
+     not affected — failure #40, found during this document's own
+     review, corrects failure #39's fix from over-generalizing "no row
+     found is ambiguous" into "same status, different timestamp is
+     always ambiguous regardless of what evidence exists"). Only this
+     no-intervening-row sub-case is genuinely unresolvable: treat it
+     exactly like failure #28's "no reliable status source" and surface
+     it as an explicit unresolved/ambiguous case for review, never
+     silently default to either candidate's timestamp. (The genuine
+     close's `End Status=` remains readable on its own in this sub-case
+     too — the ambiguity is only about *which timestamp* is the true
+     transition boundary, not about whether the status itself is known.)
+
+   §4's "more recent wins" comparison also applies, as before, to
+   genuinely *different* candidate transitions (e.g. a later Sync Log
+   run reporting a *different* status than a stale Time Event close);
+   the two sub-cases above are specifically about same-status,
+   different-timestamp candidates. **If the winning candidate is a
    retroactively-stamped Time Event boundary** (step 1), its own
    `End Status=`/`Ended At` cannot supply the classification — fall back
    to the Sync Log candidate from step 2 for the actual status and
@@ -417,6 +442,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 37 | Bob reviews at a time definitely inside the Review Source window; Alice reviews later, inside the ambiguous upper-bound minute | Unconditionally preferring the outside-window candidate (Bob) asserts an answer that depends on an unknowable sub-minute ordering — if the true reopen followed Alice's review, she is the correct (more recent) answer | §5 |
 | 38 | A genuine close (`Reason=left_in_progress`) records `End Status=Review`, but an unrelated edit lands on the Task page after the real transition and before the next poll | Treating the close's `Ended At` as accurate to the second (because it's the "genuine" case) understates the documented backlog-dependent imprecision that applies to *all* Notion-timestamp evidence, genuine or not | §3 step 1 |
 | 39 | A genuine close to `Review` at t1 succeeds and is logged; a later Sync Log row also reports `Review` at t2, with no differently-labeled row observed in between — but the polling model can silently skip an intervening transition inside one interval, so the *absence* of an intervening row cannot distinguish "t1/t2 are the same transition re-observed" from "a real, unobserved `Review`→other→`Review` round-trip happened between them" | The round-7 fix (failures #35/#36) treated "no intervening row found" as proof of the first case and confidently picked t1 — but that inference is unsound given documented polling collapse, so it can silently pick the wrong lower bound in either direction | §3 step 3 |
+| 40 | Same as failure #36's scenario: a genuine close to `Review` (t1), an unmapped-actor `In Progress` spell (opens no Time Event) that *is* logged, then `Review` again (t2) | The failure #39 fix over-corrected: it made *every* same-status/different-timestamp pair ambiguous, including this one, where an actually-observed intervening row positively proves two distinct periods and §4's ordinary comparison resolves it cleanly — blanket ambiguity here wrongly discards a resolvable case | §3 step 3 |
+| 41 | A real transition happens at `12:00`, but a backlogged reconciliation cycle doesn't process it until `12:15`, writing `Write=12:15` on the close | Treating that `Write=` as a trusted, second-precision transition-boundary timestamp (as the failure #38 fix implied a future implementation might) reports `12:15` as when the Task changed status, when it actually changed at `12:00` — `Write=` timestamps the script's write, not the real-world transition, and is only valid for §4's tie-breaking between competing *candidates*, never as a substitute transition-boundary capture | §3 step 1 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -470,7 +497,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 39 rows in §7 exist as named regression tests before requesting
+- [ ] All 41 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] A minute-granular Review Source **upper** bound degrades to `Other`
       whenever an ambiguous-minute review could outrank the best
@@ -478,17 +505,27 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       window" (that rule is only unconditionally safe for the *lower*
       bound; failure #37).
 - [ ] When a genuine Time Event close and a Sync Log candidate report the
-      *same* status at *different* timestamps, this is surfaced as an
-      explicit unresolved/ambiguous case (same treatment as failure #28),
-      never resolved by inferring transition identity from the presence
-      or absence of an intervening Sync Log row — the polling model can
-      silently skip an intervening transition entirely, so that inference
-      is unsound in either direction (failure #39; supersedes the
-      row-scanning discriminator originally proposed for failures #35/#36).
+      *same* status at *different* timestamps, check for an intervening
+      Sync Log row with a *different* status between them: if one
+      **exists**, it is positive evidence of a real intervening
+      transition and §4's ordinary "more recent wins" comparison resolves
+      it (failure #36); if **none exists**, the two readings ("same
+      transition re-observed" vs. "an unobserved round-trip that polling
+      collapsed") are indistinguishable from Notion-side evidence alone,
+      and this sub-case only is surfaced as an explicit
+      unresolved/ambiguous case (same treatment as failure #28) — never
+      resolved by inferring transition identity from the mere absence of
+      a row (failure #39), and never generalized into treating *every*
+      same-status/different-timestamp pair as ambiguous regardless of
+      whether an intervening row exists (failure #40).
 - [ ] A genuine Time Event close's `Ended At` is treated as
       minute-granular, best-effort evidence — never as an implicitly
-      trusted second-precision value — unless it independently carries a
-      `Write=`-style capture (failure #38).
+      trusted second-precision value (failure #38). This holds even when
+      the close also carries a `Write=`: `Write=` is the script's own
+      write time, valid only for §4's tie-breaking between competing
+      candidates, and must never be promoted to a trusted transition-
+      boundary capture — a backlogged reconciliation cycle can write a
+      precise `Write=` long after the real transition (failure #41).
 - [ ] The legacy-inheritance stopping condition (§6) checks for *either*
       `Reason=left_in_progress` or a retroactively-stamped
       `Boundary=left_in_progress`, matching `Code.gs`'s own
