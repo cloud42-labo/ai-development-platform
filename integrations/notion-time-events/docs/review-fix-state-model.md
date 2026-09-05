@@ -127,14 +127,26 @@ to classify it as `Initial Work` or `Review Fix`:
    evidence" independently (PR #21 round 7/13: doing so let them disagree
    about the same instant). **If the winning candidate is a
    retroactively-stamped Time Event boundary** (step 1), its own
-   `End Status=`/`Ended At` cannot supply the classification — use the
-   Sync Log candidate from step 2 for the actual status and timestamp
-   instead, even though the Time Event boundary is what proved a
-   boundary exists at all. If Sync Log has no row covering that gap
-   either (a genuine crash-before-log race), there is no reliable status
-   source at all: implementations must surface this as an explicit
-   unresolved/ambiguous case for review, never silently default to
-   `Initial Work` or `Review Fix` as if it were an ordinary confident
+   `End Status=`/`Ended At` cannot supply the classification — fall back
+   to the Sync Log candidate from step 2 for the actual status and
+   timestamp, even though the Time Event boundary is what proved a
+   boundary exists at all. **But first verify that Sync Log candidate is
+   not itself stale relative to this boundary**: apply §4's comparison
+   between the Sync Log candidate's timestamp and the boundary's own
+   discovery time (its fresh `Write=` from step 1) exactly as if they
+   were competing candidates. A Sync Log run that predates the boundary's
+   discovery is evidence from a *different, earlier* cycle — e.g. an old
+   logged `Review` run left over from before a run of logged
+   `In Progress` rows, with the current reopen's own transition never
+   logged (crash) — and must be rejected the same as having no Sync Log
+   row at all, not trusted merely because a same-status run technically
+   exists somewhere in the log (failure #32, found during this document's
+   own review). Only once the Sync Log candidate is confirmed to
+   postdate the boundary's discovery may its status be used. If no such
+   Sync Log row exists — none at all, or only stale ones — there is no
+   reliable status source: implementations must surface this as an
+   explicit unresolved/ambiguous case for review, never silently default
+   to `Initial Work` or `Review Fix` as if it were an ordinary confident
    result (failure #28, found during this document's own review — not
    one of PR #21's original 27).
 4. **Classify**: if the winning status is `Review` → `Review Fix`;
@@ -245,6 +257,22 @@ best-effort, not authoritative.
   identity, regardless of which poll observed the close/reopen — not "same
   poll" and not "same actor", PR #21 round 6) inherits Work Type and
   Review Source from the outgoing sub-interval.
+- **When the outgoing event has no `Execution=` at all** (legacy: it
+  predates the field, and `Code.gs` deliberately never backfills one for
+  a legacy reassignment replacement — see `reconcileAuthoritativeTimeEvents_`'s
+  own comment on why manufacturing an identity here is worse than none),
+  identity matching cannot apply. Fall back to the **same Reason/Boundary
+  legacy heuristic `Code.gs` already trusts for Done-gate current-execution
+  membership**, not a new rule: the outgoing event is treated as part of
+  the current execution if its `Reason` is `reassignment` or
+  `duplicate_reconciliation` and no genuine `Reason=left_in_progress`
+  close (§3 step 1) exists between it and now — a genuine boundary is
+  "already unambiguous prior-execution evidence by Reason alone" per
+  `Code.gs`'s own reasoning, and stops legacy inheritance the same way it
+  stops Done-gate membership. This is required for failures #6 and #7 to
+  have an implementable outcome, since both involve exactly this
+  legacy-matching gap (failure #33, found during this document's own
+  review).
 - Only *genuine* churn inherits. A close caused by
   `ambiguous_provenance_restart` (a deliberate "treat as new execution"
   restart for unknown-provenance pages) must **not** inherit — it starts a
@@ -306,6 +334,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 29 | A closed Time Event's `Write=` field survives long enough to matter, but a later note compaction (`appendNote_`) runs on it | Silently evicted like an ordinary low-priority field, downgrading that event to the legacy `snapshotWasEverLogged_` fallback (known to guess wrong per §4) | §4 |
 | 30 | A GitHub review lands at `12:00:20`; the Task's actual transition to `Review` (minute-granular in Sync Log) is at `12:00:50` — or the reverse, transition at `12:00:10` and review at `12:00:40` | Treating the minute-granular lower bound as exact admits the non-causal `:20` review; rounding it up to end-of-minute instead wrongly excludes the genuinely causal `:40` review — neither fixed rounding direction is correct | §5 |
 | 31 | `stampExecutionBoundary_` retroactively tags an old reassignment close as the boundary; a Sync Log row exists from around the same real time | Comparing the stale original close's `Write=` (timestamped at the reassignment, not at the retroactive stamp) against the Sync Log row's `Write=` has no principled answer — the retroactive candidate's only valid comparison timestamp doesn't exist yet | §3 step 1/3 |
+| 32 | Sync Log logs `Review`, then several `In Progress` rows (all logged normally); a *later* execution's assignee is cleared and it leaves for `Backlog`, but crashes before that transition is logged. The Time Event side retroactively stamps the reassignment close as the boundary | Step 2 still returns the old, unrelated `Review` run as "the" Sync Log candidate merely because it exists and is non-`In Progress`; using it reports `Review Fix` for a transition that was actually to `Backlog` | §3 step 3 |
+| 33 | An outgoing reassignment replacement's Time Event predates `Execution=` (mid-upgrade legacy event), which `Code.gs` deliberately never backfills | Identity-only matching (§6's first bullet) cannot recognize the two sub-intervals as one execution, silently losing Work Type/Review Source across the reassignment | §6 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -359,7 +389,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 31 rows in §7 exist as named regression tests before requesting
+- [ ] All 33 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] Failure #27 (churn-history fallback past an `ambiguous_provenance_restart`)
       implements the hard-cutoff rule decided in §6 — no scanning past the
@@ -369,6 +399,16 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       original close's `Write=` — verified by a regression test comparing
       a retroactive stamp against a Sync Log row written around the same
       time (failure #31).
+- [ ] The step-3 fallback to a Sync Log candidate (for a retroactively-
+      stamped Time Event boundary) verifies that candidate postdates the
+      boundary's own discovery `Write=` before trusting its status — a
+      stale Sync Log run from an earlier cycle is rejected the same as no
+      Sync Log data at all (failure #32).
+- [ ] Legacy (no-`Execution=`) reassignment replacements use the same
+      Reason/Boundary legacy heuristic already trusted for Done-gate
+      membership to inherit Work Type/Review Source, not identity
+      matching alone (failure #33; required for failures #6/#7 to have an
+      implementable outcome).
 
 ## References
 
