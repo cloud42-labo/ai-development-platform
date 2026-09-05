@@ -125,7 +125,25 @@ to classify it as `Initial Work` or `Review Fix`:
    order in §4. This must be a single shared resolver — never let Work
    Type and Review Source each re-derive "the most recent relevant
    evidence" independently (PR #21 round 7/13: doing so let them disagree
-   about the same instant). **If the winning candidate is a
+   about the same instant). **If the Time Event candidate is *genuine*
+   (step 1) and it reports the same status as the Sync Log candidate
+   (step 2), take the Time Event's timestamp, not whichever is
+   chronologically later.** They are not two competing transitions —
+   they are the *same* transition observed twice: the genuine close
+   recorded it accurately, and the Sync Log run merely re-observed the
+   Task still sitting in that status later (its own first row can itself
+   be lost the same way — e.g. a genuine close to `Review` at t1 whose
+   paired `logSnapshot_` call fails, followed by an unrelated edit at t2
+   that *does* get logged while still `Review`; step 2 then returns t2 as
+   the run's earliest available row, chronologically after the true t1).
+   Comparing "which is more recent" here and picking t2 reproduces
+   failure #14's exact defect through a different mechanism: it moves
+   the lower bound past t1, wrongly excluding a review submitted between
+   t1 and t2 (failure #35, found during this document's own review). §4's
+   "more recent wins" comparison is for genuinely *different* candidate
+   transitions (e.g. a later Sync Log run reporting a *different* status
+   than a stale Time Event close); it does not apply when both candidates
+   agree on the status. **If the winning candidate is a
    retroactively-stamped Time Event boundary** (step 1), its own
    `End Status=`/`Ended At` cannot supply the classification — fall back
    to the Sync Log candidate from step 2 for the actual status and
@@ -276,13 +294,16 @@ best-effort, not authoritative.
   own comment on why manufacturing an identity here is worse than none),
   identity matching cannot apply. Fall back to the **same Reason/Boundary
   legacy heuristic `Code.gs` already trusts for Done-gate current-execution
-  membership**, not a new rule: the outgoing event is treated as part of
-  the current execution if its `Reason` is `reassignment` or
-  `duplicate_reconciliation` and no genuine `Reason=left_in_progress`
-  close (§3 step 1) exists between it and now — a genuine boundary is
-  "already unambiguous prior-execution evidence by Reason alone" per
-  `Code.gs`'s own reasoning, and stops legacy inheritance the same way it
-  stops Done-gate membership. This is required for failures #6 and #7 to
+  membership** (`isExecutionBoundary = Reason=left_in_progress OR
+  Boundary=left_in_progress`, `Code.gs` ~1913), not a new rule: the
+  outgoing event is treated as part of the current execution only if
+  `!isExecutionBoundary` AND its `Reason` is `reassignment` or
+  `duplicate_reconciliation`. **Both forms of boundary stop this
+  inheritance — a plain `Reason=left_in_progress` close, and a
+  retroactively-stamped `Boundary=left_in_progress` on an otherwise
+  `reassignment`/`duplicate_reconciliation` close** (checking `Reason`
+  alone misses the retroactive case entirely, since its `Reason` still
+  reads `reassignment`). This is required for failures #6 and #7 to
   have an implementable outcome, since both involve exactly this
   legacy-matching gap (failure #33, found during this document's own
   review).
@@ -350,6 +371,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 32 | Sync Log logs `Review`, then several `In Progress` rows (all logged normally); a *later* execution's assignee is cleared and it leaves for `Backlog`, but crashes before that transition is logged. The Time Event side retroactively stamps the reassignment close as the boundary | Step 2 still returns the old, unrelated `Review` run as "the" Sync Log candidate merely because it exists and is non-`In Progress`; using it reports `Review Fix` for a transition that was actually to `Backlog` | §3 step 3 |
 | 33 | An outgoing reassignment replacement's Time Event predates `Execution=` (mid-upgrade legacy event), which `Code.gs` deliberately never backfills | Identity-only matching (§6's first bullet) cannot recognize the two sub-intervals as one execution, silently losing Work Type/Review Source across the reassignment | §6 |
 | 34 | Reopen actually happens at `12:00:10` (minute-granular in Sync Log); a review lands at `12:00:40`, after work resumed | Rounding the upper bound up to `12:00:59` admits the `:40` review as if it caused the reopen it postdates — the same rounding mistake the lower-bound fix (failure #30) already corrected, repeated on the other bound | §5 |
+| 35 | A genuine close to `Review` at t1 succeeds but its paired `logSnapshot_` fails; the Task is edited again while still `Review` at t2 (this edit *does* get logged) before the next reopen | Step 2 returns t2 as the run's earliest available row; comparing "more recent" against the genuine t1 close picks t2, excluding causal reviews submitted between t1 and t2 — failure #14's defect through a different mechanism | §3 step 3 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -403,11 +425,20 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 34 rows in §7 exist as named regression tests before requesting
+- [ ] All 35 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] A minute-granular Review Source **upper** bound gets the identical
       degraded-evidence treatment as the lower bound — no end-of-minute
       rounding on either bound (failure #34).
+- [ ] When a genuine Time Event close and a Sync Log candidate report the
+      *same* status, the genuine close's (earlier) timestamp is used, not
+      whichever is chronologically later — "more recent wins" applies
+      only across candidates reporting *different* statuses (failure #35).
+- [ ] The legacy-inheritance stopping condition (§6) checks for *either*
+      `Reason=left_in_progress` or a retroactively-stamped
+      `Boundary=left_in_progress`, matching `Code.gs`'s own
+      `isExecutionBoundary` — not `Reason` alone (failure #33 update,
+      round 6).
 - [ ] Failure #27 (churn-history fallback past an `ambiguous_provenance_restart`)
       implements the hard-cutoff rule decided in §6 — no scanning past the
       restart under any circumstances.
