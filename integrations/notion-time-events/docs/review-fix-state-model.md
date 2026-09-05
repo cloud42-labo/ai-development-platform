@@ -87,10 +87,20 @@ to classify it as `Initial Work` or `Review Fix`:
    recent close tagged `Boundary=left_in_progress` (or the untagged
    legacy equivalent). Two different situations write this tag, and they
    do **not** carry equally trustworthy status/timestamp evidence:
-   - **Genuine** (`Reason=left_in_progress`): written at the exact moment
-     the Task actually left `In Progress`. Its `End Status=` and
-     `Ended At` are accurate — read them directly as this candidate's
-     status and timestamp.
+   - **Genuine** (`Reason=left_in_progress`): its `End Status=` is
+     accurate — read it directly. Its `Ended At` is **not** guaranteed
+     accurate to the second, even though it's the "genuine" case: per
+     README's "Recorded boundary timestamps carry a backlog-dependent
+     imprecision", `Ended At` is set from the *page's* `last_edited_time`,
+     which an unrelated edit after the real transition (but before the
+     next poll) inflates — a documented, structural gap in the underlying
+     polling model, not something this evidence model can fix by being
+     more careful. Treat a genuine close's `Ended At` as minute-granular
+     evidence like everything else, never as an implicitly-trusted
+     second-precision value, unless it independently carries one (e.g. a
+     `Write=`-style capture at the moment of closing, if a future
+     implementation adds one) (failure #38, found during this document's
+     own review).
    - **Retroactively stamped** (`Reason=reassignment` or
      `duplicate_reconciliation`, with `Boundary=left_in_progress` added
      *later* by `stampExecutionBoundary_` because no open Time Event
@@ -127,35 +137,37 @@ to classify it as `Initial Work` or `Review Fix`:
    evidence" independently (PR #21 round 7/13: doing so let them disagree
    about the same instant). **If the Time Event candidate is *genuine*
    (step 1) and it reports the same status as the Sync Log candidate
-   (step 2), first verify they are actually the same transition before
-   coalescing them**: check whether any Sync Log row with a *different*
-   status (including `In Progress`, e.g. an unmapped-actor spell that
-   opens no Time Event) exists between the genuine close's timestamp and
-   the Sync Log run's own start. If **no** such row exists — the gap is
-   unexplained missing data, not an observed intervening transition —
-   they are the same transition observed twice: take the Time Event's
-   (earlier) timestamp, not whichever is chronologically later. The
-   genuine close recorded it accurately, and the Sync Log run merely
-   re-observed the Task still sitting in that status later (its own
-   first row can itself be lost the same way — e.g. a genuine close to
-   `Review` at t1 whose paired `logSnapshot_` call fails, followed by an
-   unrelated edit at t2 that *does* get logged while still `Review`;
-   step 2 then returns t2 as the run's earliest available row,
-   chronologically after the true t1). Comparing "which is more recent"
-   here and picking t2 reproduces failure #14's exact defect through a
-   different mechanism: it moves the lower bound past t1, wrongly
-   excluding a review submitted between t1 and t2 (failure #35, found
-   during this document's own review). **If such an intervening row
-   *does* exist**, they are genuinely different periods of the same
-   status label (e.g. `Review` → unmapped `In Progress` → `Review` again
-   before the current reopen) — coalescing them would wrongly move the
-   lower bound back to the *older* period. Apply §4's ordinary
-   comparison instead, which correctly prefers the newer Sync Log run in
-   this case (failure #36, found during this document's own review). §4's
-   "more recent wins" comparison is for genuinely *different* candidate
+   (step 2) but the two disagree on timestamp, this is not resolvable
+   from the evidence available and must be surfaced as ambiguous, not
+   silently coalesced or compared.** An earlier draft of this document
+   tried to discriminate the two possible readings — "same transition
+   observed twice" (genuine close at t1, Sync Log merely re-observing the
+   Task still sitting in that status at a later t2; take t1) versus
+   "genuinely different periods of the same status label" (e.g. `Review`
+   → unmapped `In Progress` → `Review` again; take the newer Sync Log
+   run per §4) — by checking whether any Sync Log row with a *different*
+   status exists between t1 and t2, treating "no such row found" as proof
+   of the first case. **That discriminator does not work**: per README's
+   documented polling model, a Task can pass through several states
+   inside one poll interval and only its *final* observed state is ever
+   logged — an intervening transition can be entirely **unobserved**, not
+   merely under-logged, so "no intervening row found" is equally
+   consistent with "no intervening transition happened" and "one
+   happened but no poll ever landed inside it to see it." No amount of
+   additional row-scanning distinguishes these from Notion-side evidence
+   alone (failure #39, found during this document's own review — this
+   is what failures #35/#36's fix actually got wrong, not one more case
+   it missed). Treat this case exactly like failure #28's "no reliable
+   status source": surface it as an explicit unresolved/ambiguous case
+   for review, never silently default to either candidate's timestamp.
+   (The genuine close's `End Status=` remains readable on its own — this
+   ambiguity is only about *which timestamp* is the true transition
+   boundary when a Sync Log run reports the same status later, not about
+   whether the status itself is known.) §4's "more recent wins"
+   comparison still applies as before to genuinely *different* candidate
    transitions (e.g. a later Sync Log run reporting a *different* status
-   than a stale Time Event close); it does not apply when both candidates
-   agree on the status. **If the winning candidate is a
+   than a stale Time Event close); this ambiguity rule applies only when
+   both candidates agree on the status. **If the winning candidate is a
    retroactively-stamped Time Event boundary** (step 1), its own
    `End Status=`/`Ended At` cannot supply the classification — fall back
    to the Sync Log candidate from step 2 for the actual status and
@@ -403,6 +415,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 35 | A genuine close to `Review` at t1 succeeds but its paired `logSnapshot_` fails; the Task is edited again while still `Review` at t2 (this edit *does* get logged) before the next reopen | Step 2 returns t2 as the run's earliest available row; comparing "more recent" against the genuine t1 close picks t2, excluding causal reviews submitted between t1 and t2 — failure #14's defect through a different mechanism | §3 step 3 |
 | 36 | A mapped execution closes to `Review` (genuine, t1); an unmapped-actor `In Progress` spell follows (opens no Time Event) and returns to `Review` again before the current mapped reopen | The unconditional same-status coalescing rule (failure #35's fix) treats t1 and the new `Review` run as one transition and uses the older t1, moving the lower bound back into the *wrong, earlier* review period | §3 step 3 |
 | 37 | Bob reviews at a time definitely inside the Review Source window; Alice reviews later, inside the ambiguous upper-bound minute | Unconditionally preferring the outside-window candidate (Bob) asserts an answer that depends on an unknowable sub-minute ordering — if the true reopen followed Alice's review, she is the correct (more recent) answer | §5 |
+| 38 | A genuine close (`Reason=left_in_progress`) records `End Status=Review`, but an unrelated edit lands on the Task page after the real transition and before the next poll | Treating the close's `Ended At` as accurate to the second (because it's the "genuine" case) understates the documented backlog-dependent imprecision that applies to *all* Notion-timestamp evidence, genuine or not | §3 step 1 |
+| 39 | A genuine close to `Review` at t1 succeeds and is logged; a later Sync Log row also reports `Review` at t2, with no differently-labeled row observed in between — but the polling model can silently skip an intervening transition inside one interval, so the *absence* of an intervening row cannot distinguish "t1/t2 are the same transition re-observed" from "a real, unobserved `Review`→other→`Review` round-trip happened between them" | The round-7 fix (failures #35/#36) treated "no intervening row found" as proof of the first case and confidently picked t1 — but that inference is unsound given documented polling collapse, so it can silently pick the wrong lower bound in either direction | §3 step 3 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -456,7 +470,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 37 rows in §7 exist as named regression tests before requesting
+- [ ] All 39 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] A minute-granular Review Source **upper** bound degrades to `Other`
       whenever an ambiguous-minute review could outrank the best
@@ -464,11 +478,17 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       window" (that rule is only unconditionally safe for the *lower*
       bound; failure #37).
 - [ ] When a genuine Time Event close and a Sync Log candidate report the
-      *same* status, first verify no intervening different-status Sync
-      Log row (including unmapped-actor `In Progress`) exists between
-      them before coalescing to the genuine close's earlier timestamp —
-      otherwise they are different periods and §4's ordinary comparison
-      applies instead (failures #35, #36).
+      *same* status at *different* timestamps, this is surfaced as an
+      explicit unresolved/ambiguous case (same treatment as failure #28),
+      never resolved by inferring transition identity from the presence
+      or absence of an intervening Sync Log row — the polling model can
+      silently skip an intervening transition entirely, so that inference
+      is unsound in either direction (failure #39; supersedes the
+      row-scanning discriminator originally proposed for failures #35/#36).
+- [ ] A genuine Time Event close's `Ended At` is treated as
+      minute-granular, best-effort evidence — never as an implicitly
+      trusted second-precision value — unless it independently carries a
+      `Write=`-style capture (failure #38).
 - [ ] The legacy-inheritance stopping condition (§6) checks for *either*
       `Reason=left_in_progress` or a retroactively-stamped
       `Boundary=left_in_progress`, matching `Code.gs`'s own
