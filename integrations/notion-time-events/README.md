@@ -16,6 +16,17 @@ Flow:
 
 There is **no webhook, no public endpoint, and no receiver credential** anywhere in this integration. The reconciler is driven by a time-based trigger inside the bound Apps Script project and reads Notion over the authenticated API. See **Why there is no webhook receiver** below for the reasoning and the constraint it comes from.
 
+Work Type (Initial Work / Review Fix) and Review Source (Codex / Claude /
+Human / Other) classification is planned but not yet implemented in this
+file — see [`docs/review-fix-state-model.md`](docs/review-fix-state-model.md)
+for the state-transition and evidence model that `ADP-051-B`/`C`/`D` build
+against before adding that code here. **Review Source resolution requires
+a `GITHUB_TOKEN`, a second secret this file does not yet mention** — when
+`ADP-051-C` implements it, the "one secret, one place" claim in
+**Security model** and **Success criteria** below stops being true and
+both sections need updating in the same change, not left stale (this
+integration made the identical README update once already, in PR #21).
+
 ## Behavior
 
 - Each run asks Notion for `Stories & Tasks` pages whose `last_edited_time` is at or after the stored cursor (minus a fixed overlap), oldest first, and reconciles each one. The very first run (no cursor yet) additionally bootstraps every currently `Status = In Progress` Task directly, regardless of `last_edited_time` — see **Behavior of the cursor** below.
