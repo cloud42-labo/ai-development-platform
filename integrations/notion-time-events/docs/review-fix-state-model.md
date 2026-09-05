@@ -127,19 +127,31 @@ to classify it as `Initial Work` or `Review Fix`:
    evidence" independently (PR #21 round 7/13: doing so let them disagree
    about the same instant). **If the Time Event candidate is *genuine*
    (step 1) and it reports the same status as the Sync Log candidate
-   (step 2), take the Time Event's timestamp, not whichever is
-   chronologically later.** They are not two competing transitions —
-   they are the *same* transition observed twice: the genuine close
-   recorded it accurately, and the Sync Log run merely re-observed the
-   Task still sitting in that status later (its own first row can itself
-   be lost the same way — e.g. a genuine close to `Review` at t1 whose
-   paired `logSnapshot_` call fails, followed by an unrelated edit at t2
-   that *does* get logged while still `Review`; step 2 then returns t2 as
-   the run's earliest available row, chronologically after the true t1).
-   Comparing "which is more recent" here and picking t2 reproduces
-   failure #14's exact defect through a different mechanism: it moves
-   the lower bound past t1, wrongly excluding a review submitted between
-   t1 and t2 (failure #35, found during this document's own review). §4's
+   (step 2), first verify they are actually the same transition before
+   coalescing them**: check whether any Sync Log row with a *different*
+   status (including `In Progress`, e.g. an unmapped-actor spell that
+   opens no Time Event) exists between the genuine close's timestamp and
+   the Sync Log run's own start. If **no** such row exists — the gap is
+   unexplained missing data, not an observed intervening transition —
+   they are the same transition observed twice: take the Time Event's
+   (earlier) timestamp, not whichever is chronologically later. The
+   genuine close recorded it accurately, and the Sync Log run merely
+   re-observed the Task still sitting in that status later (its own
+   first row can itself be lost the same way — e.g. a genuine close to
+   `Review` at t1 whose paired `logSnapshot_` call fails, followed by an
+   unrelated edit at t2 that *does* get logged while still `Review`;
+   step 2 then returns t2 as the run's earliest available row,
+   chronologically after the true t1). Comparing "which is more recent"
+   here and picking t2 reproduces failure #14's exact defect through a
+   different mechanism: it moves the lower bound past t1, wrongly
+   excluding a review submitted between t1 and t2 (failure #35, found
+   during this document's own review). **If such an intervening row
+   *does* exist**, they are genuinely different periods of the same
+   status label (e.g. `Review` → unmapped `In Progress` → `Review` again
+   before the current reopen) — coalescing them would wrongly move the
+   lower bound back to the *older* period. Apply §4's ordinary
+   comparison instead, which correctly prefers the newer Sync Log run in
+   this case (failure #36, found during this document's own review). §4's
    "more recent wins" comparison is for genuinely *different* candidate
    transitions (e.g. a later Sync Log run reporting a *different* status
    than a stale Time Event close); it does not apply when both candidates
@@ -242,12 +254,14 @@ best-effort, not authoritative.
        in it (e.g. transition at `12:00:10`, review at `12:00:40` —
        genuinely causal; this was this document's own first, wrong
        attempt at this fix).
-     Do not pick either rounding as "the" answer. Instead, treat any
-     review that falls inside that same ambiguous minute as **degraded
-     evidence**: prefer a reviewer clearly outside the ambiguous window
-     when one exists; if the only candidate reviewer falls inside it,
-     degrade to `Other` rather than assert a specific reviewer without
-     the precision to justify it. Use the lower bound exactly, with no
+     Because this is the *older* edge of the window, a reviewer clearly
+     outside (after) the ambiguous minute is always safe to prefer when
+     one exists: an ambiguous-minute review can only ever be *older than
+     or equal to* one that's definitely inside the window, so it can
+     never become "the most recent reviewer" except when it is the
+     *only* candidate at all — that is the one case to degrade to
+     `Other` rather than assert a specific reviewer without the
+     precision to justify it. Use the lower bound exactly, with no
      ambiguity window, only when a trusted, second-precision timestamp is
      available (failure #30, found during this document's own review —
      not one of PR #21's original 27).
@@ -260,12 +274,27 @@ best-effort, not authoritative.
      before the rounded-up minute boundary gets wrongly credited as
      causal, even though it postdates the actual resumption of work (e.g.
      reopen at `12:00:10`, review at `12:00:40` — not causal, yet an
-     end-of-minute `12:00:59` bound admits it). Apply the **same
-     degraded-evidence treatment specified for the lower bound above** to
-     a minute-granular upper bound: a review inside that ambiguous minute
-     is not asserted as confidently included or excluded either way;
-     prefer a reviewer clearly outside the ambiguous window, degrade to
-     `Other` if the only candidate falls inside it. Treat "is this bound
+     end-of-minute `12:00:59` bound admits it).
+
+     **Unlike the lower bound, "prefer a reviewer clearly outside the
+     ambiguous window" is not automatically safe here**, because this is
+     the *newer* edge of the window — an ambiguous-minute review can be
+     more recent than an outside-window candidate and thus change which
+     reviewer is "most recent" depending on the unknown sub-minute
+     ordering. Concretely: Bob reviewed at a time definitely inside the
+     window; Alice reviewed later, inside the ambiguous upper-bound
+     minute. If the true reopen happened before Alice's review, Alice is
+     outside the valid window and Bob is the answer; if it happened
+     after Alice's review, Alice is inside it and is the (more recent,
+     correct) answer. Preferring Bob regardless asserts a specific
+     answer in a case where it can genuinely go either way (failure #37,
+     found during this document's own review). The correct rule: after
+     picking the best candidate reviewer from clearly inside the window,
+     check whether any review *inside the ambiguous minute* has a
+     timestamp later than that candidate's. If none does, the candidate
+     is safe — no possible sub-minute ordering changes the answer. If one
+     does, the outcome is genuinely ambiguous: degrade to `Other`.
+     Treat "is this bound
      second-precision or minute-precision" as a fact to carry explicitly,
      never to infer from the value's shape (PR #21 rounds 21, 23, 34 each
      got this precision-mixing wrong in a different way; this document's
@@ -372,6 +401,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 33 | An outgoing reassignment replacement's Time Event predates `Execution=` (mid-upgrade legacy event), which `Code.gs` deliberately never backfills | Identity-only matching (§6's first bullet) cannot recognize the two sub-intervals as one execution, silently losing Work Type/Review Source across the reassignment | §6 |
 | 34 | Reopen actually happens at `12:00:10` (minute-granular in Sync Log); a review lands at `12:00:40`, after work resumed | Rounding the upper bound up to `12:00:59` admits the `:40` review as if it caused the reopen it postdates — the same rounding mistake the lower-bound fix (failure #30) already corrected, repeated on the other bound | §5 |
 | 35 | A genuine close to `Review` at t1 succeeds but its paired `logSnapshot_` fails; the Task is edited again while still `Review` at t2 (this edit *does* get logged) before the next reopen | Step 2 returns t2 as the run's earliest available row; comparing "more recent" against the genuine t1 close picks t2, excluding causal reviews submitted between t1 and t2 — failure #14's defect through a different mechanism | §3 step 3 |
+| 36 | A mapped execution closes to `Review` (genuine, t1); an unmapped-actor `In Progress` spell follows (opens no Time Event) and returns to `Review` again before the current mapped reopen | The unconditional same-status coalescing rule (failure #35's fix) treats t1 and the new `Review` run as one transition and uses the older t1, moving the lower bound back into the *wrong, earlier* review period | §3 step 3 |
+| 37 | Bob reviews at a time definitely inside the Review Source window; Alice reviews later, inside the ambiguous upper-bound minute | Unconditionally preferring the outside-window candidate (Bob) asserts an answer that depends on an unknowable sub-minute ordering — if the true reopen followed Alice's review, she is the correct (more recent) answer | §5 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -425,15 +456,19 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 35 rows in §7 exist as named regression tests before requesting
+- [ ] All 37 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
-- [ ] A minute-granular Review Source **upper** bound gets the identical
-      degraded-evidence treatment as the lower bound — no end-of-minute
-      rounding on either bound (failure #34).
+- [ ] A minute-granular Review Source **upper** bound degrades to `Other`
+      whenever an ambiguous-minute review could outrank the best
+      outside-window candidate — not a blanket "prefer outside the
+      window" (that rule is only unconditionally safe for the *lower*
+      bound; failure #37).
 - [ ] When a genuine Time Event close and a Sync Log candidate report the
-      *same* status, the genuine close's (earlier) timestamp is used, not
-      whichever is chronologically later — "more recent wins" applies
-      only across candidates reporting *different* statuses (failure #35).
+      *same* status, first verify no intervening different-status Sync
+      Log row (including unmapped-actor `In Progress`) exists between
+      them before coalescing to the genuine close's earlier timestamp —
+      otherwise they are different periods and §4's ordinary comparison
+      applies instead (failures #35, #36).
 - [ ] The legacy-inheritance stopping condition (§6) checks for *either*
       `Reason=left_in_progress` or a retroactively-stamped
       `Boundary=left_in_progress`, matching `Code.gs`'s own
