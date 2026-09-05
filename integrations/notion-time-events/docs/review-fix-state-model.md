@@ -101,7 +101,16 @@ to classify it as `Initial Work` or `Review Fix`:
      close wrote (typically `End Status=In Progress` and the
      reassignment's own timestamp), not the real destination status or
      the real time the Task actually left. **Do not read status or
-     timestamp from this candidate** — see step 3.
+     timestamp from this candidate** — see step 3. This staleness also
+     makes the original close's `Write=` (§4) the wrong value for
+     *ordering* this candidate against a Sync Log row: it timestamps the
+     original reassignment, not the discovery of the boundary.
+     `stampExecutionBoundary_` must write its own fresh `Write=` at the
+     moment it performs the retroactive stamp (overwriting, not
+     preserving, any `Write=` left by the original close) — that stamp
+     time, not the stale close time, is this candidate's comparison
+     timestamp in step 3 (failure #31, found during this document's own
+     review).
 2. **Find the candidate boundary from the Sync Log side**: identify the
    most recent **same-status run** of Sync Log rows for this Task — rows
    sharing one non-`In Progress` status value, contiguous going backward,
@@ -189,17 +198,29 @@ best-effort, not authoritative.
    - **Lower bound**: the timestamp resolved in §3 step 5 — the same
      evidence instance Work Type classification used, not an independent
      Sync Log lookup (PR #21 round 7, round 13). **Carry its precision
-     explicitly, the same as the upper bound below.** Sync Log timestamps
-     are minute-granular; treating a minute-granular value as an exact
-     lower bound wrongly admits a review submitted *earlier in that same
-     minute* but before the true (sub-minute) transition — e.g. a review
-     at `12:00:20` followed by the actual transition to `Review` at
-     `12:00:50` could not have caused that Review Fix, yet an exact-value
-     comparison would credit it anyway. When the resolved lower bound is
-     only minute-granular, round it **up** to the end of that minute
-     before filtering; use it exactly only when a trusted, second-precision
-     timestamp is available (failure #30, found during this document's own
-     review — not one of PR #21's original 27).
+     explicitly, the same as the upper bound below.** When it is only
+     minute-granular, the whole clock-minute is inherently ambiguous —
+     Notion's precision cannot say whether the true transition happened
+     early or late within it, so **neither rounding direction is
+     correct in general**, mirroring §4's tie-resolution principle:
+     - Treating the bound as exact (no rounding) wrongly admits a review
+       submitted earlier in the same minute but before the true
+       transition (e.g. transition at `12:00:50`, review at `12:00:20` —
+       not causal).
+     - Rounding up to end-of-minute wrongly excludes a review submitted
+       later in the same minute, after a transition that happened early
+       in it (e.g. transition at `12:00:10`, review at `12:00:40` —
+       genuinely causal; this was this document's own first, wrong
+       attempt at this fix).
+     Do not pick either rounding as "the" answer. Instead, treat any
+     review that falls inside that same ambiguous minute as **degraded
+     evidence**: prefer a reviewer clearly outside the ambiguous window
+     when one exists; if the only candidate reviewer falls inside it,
+     degrade to `Other` rather than assert a specific reviewer without
+     the precision to justify it. Use the lower bound exactly, with no
+     ambiguity window, only when a trusted, second-precision timestamp is
+     available (failure #30, found during this document's own review —
+     not one of PR #21's original 27).
    - **Upper bound**: the moment this execution's reopen was *actually
      observed*, not the poll's own wall-clock time and not a blind
      "round up to end of minute." If a trusted, second-precision start
@@ -210,7 +231,9 @@ best-effort, not authoritative.
      second-precision or minute-precision" as a fact to carry explicitly,
      never to infer from the value's shape).
 3. Classify the most recent reviewer login inside the window into
-   `Codex` / `Claude` / `Human` / `Other`.
+   `Codex` / `Claude` / `Human` / `Other`, applying the lower bound's
+   ambiguous-minute degradation from step 2 when it applies (prefer a
+   reviewer outside that window; degrade to `Other` if none exists).
 4. **Degrade to `Other`, never throw**, on: missing `Pull Request` URL,
    missing `GITHUB_TOKEN`, any GitHub API failure, or an unexpected
    response shape. Reconciliation availability must never depend on
@@ -225,11 +248,20 @@ best-effort, not authoritative.
 - Only *genuine* churn inherits. A close caused by
   `ambiguous_provenance_restart` (a deliberate "treat as new execution"
   restart for unknown-provenance pages) must **not** inherit — it starts a
-  fresh, unclassified execution (PR #21 round 26). Whether the churn-
-  history fallback can still reach past such a restart when the filtered
-  candidate list is empty was an **open, unresolved thread when PR #21 was
-  superseded** (round 27, `is_resolved:false`) — treat this as a required
-  test case for `ADP-051-B`, not a solved problem to assume away.
+  fresh, unclassified execution (PR #21 round 26).
+- **`ambiguous_provenance_restart` is a hard history cutoff, decided here
+  rather than left to `ADP-051-B`'s implementation** (PR #21 round 27,
+  `is_resolved:false` at supersession, left open): the churn-history
+  fallback must never scan past the most recent
+  `ambiguous_provenance_restart` for this Task, full stop, even when the
+  filtered candidate list on the near side of it is empty. If no genuine
+  churn candidate remains after applying that cutoff, this execution has
+  **no** Time-Event-side churn candidate at all — it does not inherit
+  from anything on the far side of the restart, consistent with the
+  restart's own purpose of starting a fresh, unclassified execution.
+  Required regression test: an `ambiguous_provenance_restart` with an
+  empty near-side candidate set must not inherit Work Type/Review Source
+  from an older execution that predates it.
 
 ## 7. Failure matrix (from PR #21's 27 review rounds)
 
@@ -264,7 +296,7 @@ names the section above that prevents it.
 | 24 | Symmetric check: whichever of {close, log} genuinely wrote later must win | (regression test confirming `Write=` resolves both directions, not just one) | §4 |
 | 25 | Upper bound rounded up to end-of-minute even when the start was already second-precision | Admits reviews that postdate the real fix start | §5.2 |
 | 26 | Close reason is `ambiguous_provenance_restart` | Wrongly inherited as ordinary churn instead of starting fresh | §6 |
-| 27 | Filtered churn candidates empty after an `ambiguous_provenance_restart`; fallback rescans full history | May reach past the restart to an unrelated old reassignment — **unresolved at supersession** | §6 — required open test case, not an assumed-safe fallback |
+| 27 | Filtered churn candidates empty after an `ambiguous_provenance_restart`; fallback rescans full history | May reach past the restart to an unrelated old reassignment — was **unresolved at supersession**; resolved here (§6): the restart is a hard cutoff, no history-crossing fallback | §6 — required regression test |
 
 Found during this document's own review (`ADP-051-A`, not PR #21's history):
 
@@ -272,7 +304,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 |---|---|---|---|
 | 28 | Assignee cleared mid-`In Progress` (reassignment close, `End Status=In Progress`), no open event exists when the Task later actually reaches `Review`, so `stampExecutionBoundary_` retroactively tags that same reassignment close `Boundary=left_in_progress` — and the paired Sync Log row for the real `Review` transition is missing (crash) | Reading `End Status=`/`Ended At` directly from this candidate reports `Initial Work` (or a wrong timestamp) instead of surfacing that the true destination status is unknown | §3 step 1/3 |
 | 29 | A closed Time Event's `Write=` field survives long enough to matter, but a later note compaction (`appendNote_`) runs on it | Silently evicted like an ordinary low-priority field, downgrading that event to the legacy `snapshotWasEverLogged_` fallback (known to guess wrong per §4) | §4 |
-| 30 | A GitHub review lands at `12:00:20`; the Task's actual transition to `Review` (minute-granular in Sync Log) is at `12:00:50` | Treating the minute-granular lower bound as exact admits the `12:00:20` review as if it caused the fix it precedes | §5 |
+| 30 | A GitHub review lands at `12:00:20`; the Task's actual transition to `Review` (minute-granular in Sync Log) is at `12:00:50` — or the reverse, transition at `12:00:10` and review at `12:00:40` | Treating the minute-granular lower bound as exact admits the non-causal `:20` review; rounding it up to end-of-minute instead wrongly excludes the genuinely causal `:40` review — neither fixed rounding direction is correct | §5 |
+| 31 | `stampExecutionBoundary_` retroactively tags an old reassignment close as the boundary; a Sync Log row exists from around the same real time | Comparing the stale original close's `Write=` (timestamped at the reassignment, not at the retroactive stamp) against the Sync Log row's `Write=` has no principled answer — the retroactive candidate's only valid comparison timestamp doesn't exist yet | §3 step 1/3 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -313,8 +346,11 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 - [ ] `Write=` is in `appendNote_`'s protected-field list, verified by a
       regression test that compacts a closed event and checks `Write=`
       survives (failure #29).
-- [ ] The Review Source lower bound rounds up to end-of-minute when only
-      minute-granular, mirroring the upper bound (failure #30).
+- [ ] A minute-granular Review Source lower bound treats reviews inside
+      that ambiguous minute as degraded evidence (prefer a reviewer
+      outside the window; degrade to `Other` if none exists) rather than
+      resolving the ambiguity by rounding in either direction
+      (failure #30).
 - [ ] **`ADP-051-C`** (Review Source), when implemented, updates
       `integrations/notion-time-events/README.md`'s Security Model and
       Success Criteria sections — both currently state `NOTION_TOKEN` is
@@ -323,10 +359,16 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 30 rows in §7 exist as named regression tests before requesting
+- [ ] All 31 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] Failure #27 (churn-history fallback past an `ambiguous_provenance_restart`)
-      is resolved explicitly, not left as an implicit fallback.
+      implements the hard-cutoff rule decided in §6 — no scanning past the
+      restart under any circumstances.
+- [ ] `stampExecutionBoundary_` writes a fresh `Write=` at the moment it
+      retroactively stamps a boundary, distinct from (and overwriting) the
+      original close's `Write=` — verified by a regression test comparing
+      a retroactive stamp against a Sync Log row written around the same
+      time (failure #31).
 
 ## References
 
