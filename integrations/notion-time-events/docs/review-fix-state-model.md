@@ -144,20 +144,36 @@ to classify it as `Initial Work` or `Review Fix`:
    logged repeatedly with no real transition in between (failure #14).
    Two further corrections to this candidate construction, both found
    during this document's own review:
-   - **Exclude rows logged while the page's `Type=` was `Story`.**
-     `logSnapshot_` records `Type` (`Code.gs` ~628) and logs *every*
-     observation regardless of Type, including a Story's own reduced
-     handling (`reconcileStoryTask_`) — it is not limited to executable
-     Task rows. A page reclassified from `Type=Story` directly to
+   - **A `Type=Story` observation is a hard history cutoff for this
+     scan, not merely an ineligible row to skip past.** `logSnapshot_`
+     records `Type` (`Code.gs` ~628) and logs *every* observation
+     regardless of Type, including a Story's own reduced handling
+     (`reconcileStoryTask_`) — it is not limited to executable Task
+     rows. A page reclassified from `Type=Story` directly to
      `Type=Task, Status=In Progress` can therefore have an older,
      Story-era `Review` row sitting in its Sync Log history; scanning
      for "the most recent non-`In Progress` status" without a Type
      filter picks that Story-era row up and wrongly labels the Task's
-     very first executable interval `Review Fix`. Only rows logged with
-     an executable Type (i.e. not `Story`) are eligible candidates; a
-     Story→Task reclassification with no eligible row on the near side
-     has no Sync Log candidate at all, the same as if none were ever
-     logged (failure #45).
+     very first executable interval `Review Fix` (failure #45). Merely
+     *excluding* Story-era rows from eligibility while continuing the
+     backward scan past them is not enough: if the page was an
+     executable Task before its Story spell too (e.g. `Task, Review` →
+     `Story` → back to `Task, In Progress`), the scan reaches across the
+     Story spell to that older, pre-Story `Review` row and coalesces it
+     with the current reopen, exactly the same class of mistake
+     failure #27 already ruled out for `ambiguous_provenance_restart` in
+     §6 (failure #48, found during this document's own review — corrects
+     failure #45's fix, which excluded Story-era rows from eligibility
+     but didn't stop the scan from crossing them). The correct rule:
+     the most recent `Type=Story` observation is a hard cutoff, same as
+     an `ambiguous_provenance_restart`; the scan never crosses it under
+     any circumstances. Only rows logged with an executable Type
+     strictly *after* the most recent Story observation are eligible
+     candidates (a page with no Story history at all has no cutoff, and
+     the scan simply covers its whole history as before); if the page
+     does have a Story observation and no eligible row exists between
+     "now" and it, there is no Sync Log candidate at all, the same as if
+     none were ever logged.
    - **Interpret a `done_gate_rejected:...:rollback=<Status>` row by its
      rollback status, not its logged `Status` column.** `logSnapshot_`
      is called with the page's *pre-reconciliation* status (`Code.gs`
@@ -398,20 +414,32 @@ best-effort, not authoritative.
      check whether any review *inside the ambiguous minute* has a
      timestamp later than that candidate's. If none does, the candidate
      is safe — no possible sub-minute ordering changes the answer. If one
-     does, check whether that later ambiguous-minute review classifies
-     into the **same source category** (`Codex`/`Claude`/`Human`/`Other`,
-     per §5 step 3) as the definite candidate — the persisted value is
-     the category, not a specific reviewer's identity, so if both
-     possible orderings resolve to the same category (e.g. Bob and
-     Alice are both `Human`), the result is safe regardless of which one
-     actually happened, and asserting that category is not the
-     unjustified specific-reviewer guess failure #37 was about (failure
-     #44, found during this document's own review — corrects failure
-     #37's fix, which degraded on any ambiguous-minute timestamp overlap
-     without checking whether it could actually change the output).
-     Only when the ambiguous-minute review's category *differs* from the
-     definite candidate's is the outcome genuinely ambiguous: degrade to
-     `Other`.
+     or more do, **check every one of them, not only the single latest
+     one** — each such review is "potentially the latest eligible
+     review" under some possible sub-minute reopen time, not just
+     whichever happens to be latest overall: with ambiguous reviews at,
+     say, `Codex` then `Human` (both after the definite candidate,
+     `Human`), a reopen between the two makes `Codex` the latest
+     *eligible* one, while a reopen after both makes the second `Human`
+     review the latest eligible one — inspecting only the overall-latest
+     ambiguous review (`Human`) and finding it matches the definite
+     candidate's category would wrongly call this safe, missing that the
+     intermediate ordering produces `Codex` instead (failure #49, found
+     during this document's own review — corrects failure #44's fix,
+     which checked only the single latest ambiguous-minute review).
+     Check whether every ambiguous-minute review with a timestamp later
+     than the definite candidate's classifies into the **same source
+     category** (`Codex`/`Claude`/`Human`/`Other`, per §5 step 3) as that
+     definite candidate — the persisted value is the category, not a
+     specific reviewer's identity, so if *all* of them agree with the
+     definite candidate's category, the result is safe regardless of
+     which sub-minute ordering actually happened (this is the case
+     failure #44 established: e.g. Bob and Alice both `Human`), and
+     asserting that category is not the unjustified specific-reviewer
+     guess failure #37 was about. If **any** later ambiguous-minute
+     review's category differs from the definite candidate's — even one
+     that isn't the single latest by timestamp — the outcome is
+     genuinely ambiguous: degrade to `Other`.
      Treat "is this bound
      second-precision or minute-precision" as a fact to carry explicitly,
      never to infer from the value's shape (PR #21 rounds 21, 23, 34 each
@@ -435,13 +463,16 @@ best-effort, not authoritative.
    - **Upper bound**: if no review is clearly outside the ambiguous
      minute at all, there is no definite candidate to begin with —
      degrade to `Other` outright (failure #47). Otherwise, after picking
-     the best candidate clearly outside the ambiguous minute, check any
-     review *inside* the ambiguous minute with a timestamp later than
-     that candidate's — even though an outside-window candidate exists
-     (failure #37). Degrade to `Other` only if that later review
-     classifies into a **different** source category than the definite
-     candidate; if it classifies into the same category, both possible
-     orderings agree and no degradation is needed (failure #44).
+     the best candidate clearly outside the ambiguous minute, check
+     **every** review *inside* the ambiguous minute with a timestamp
+     later than that candidate's — not only the single latest one, since
+     each is potentially the latest eligible reviewer under some
+     sub-minute reopen time (failure #49) — even though an outside-window
+     candidate exists (failure #37). Degrade to `Other` if **any** of
+     them classifies into a **different** source category than the
+     definite candidate; only if all of them classify into the same
+     category do both possible orderings agree and no degradation is
+     needed (failure #44).
 4. **Degrade to `Other`, never throw**, on: missing `Pull Request` URL,
    missing `GITHUB_TOKEN`, any GitHub API failure, or an unexpected
    response shape. Reconciliation availability must never depend on
@@ -549,6 +580,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 45 | A page logged as `Type=Story, Status=Review`, later reclassified to `Type=Task, Status=In Progress` | §3 step 2's unfiltered same-status-run scan picks up the Story-era `Review` row as the Task's Sync Log candidate, labeling the Task's first executable interval `Review Fix` instead of `Initial Work` | §3 step 2 |
 | 46 | An invalid `Done` attempt with no open Time Event: `enforceDoneGate_` rolls the Task back to `Review`, but `logSnapshot_` (called with the pre-reconciliation status) logs `Status=Done` with outcome `done_gate_rejected:...:rollback=Review` | Reading the row's raw `Status=Done` instead of parsing its `rollback=` outcome hides the genuine `Review` observation behind a status this model was never meant to see as a candidate (`Done` is a terminal gate result, out of scope per §1), falling through to the wrong default classification | §3 step 2 |
 | 47 | Every review in the Review Source window falls inside the ambiguous upper-bound minute — none is clearly outside it | With no "best candidate clearly inside the window" to compare against, the procedure as specified has no defined answer and could wrongly persist the latest ambiguous-minute reviewer regardless of whether it actually postdates the true (unknown, sub-minute) reopen | §5 step 2/3 |
+| 48 | A page was `Task, Review`, then spent time as `Story`, then converted directly back to `Task, In Progress` | The failure #45 fix excludes Story-era rows from eligibility but doesn't stop the backward scan from continuing past them, so it reaches the older pre-Story `Review` row and coalesces it with the current reopen — the same class of mistake failure #27 already ruled out for `ambiguous_provenance_restart` | §3 step 2 |
+| 49 | A definite `Human` review, then in the ambiguous upper-bound minute a `Codex` review, then another `Human` review | The failure #44 fix inspects only the single overall-latest ambiguous-minute review (`Human`, matching the definite candidate) and calls the result safe — but a reopen between the two ambiguous reviews makes `Codex` the latest *eligible* one instead, an outcome the single-review check never considers | §5 step 2/3 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -602,7 +635,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 47 rows in §7 exist as named regression tests before requesting
+- [ ] All 49 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] The retroactive-boundary-vs-Sync-Log staleness check (§3 step 3,
       failure #32) compares `Write=` directly against `Write=` on both
@@ -622,10 +655,17 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       because their timestamps could tie in either order. Two
       reviewers in the same category (e.g. both `Human`) never need
       degradation, since the persisted value is the category, not the
-      specific reviewer (failure #44).
-- [ ] §3 step 2's Sync Log candidate scan excludes rows logged while
-      `Type=` was `Story` — a Story→Task reclassification never inherits
-      a Story-era status as its boundary candidate (failure #45).
+      specific reviewer (failure #44) — but this check covers **every**
+      ambiguous-minute review with a timestamp later than the definite
+      candidate's, not only the single overall-latest one, since any of
+      them can be "the latest eligible reviewer" under some sub-minute
+      reopen ordering (failure #49).
+- [ ] §3 step 2's Sync Log candidate scan treats the most recent
+      `Type=Story` observation as a hard history cutoff — like
+      `ambiguous_provenance_restart` in §6 — never merely excluding
+      Story-era rows while letting the scan continue past them to an
+      older, pre-Story executable-Task row (failure #45; hard-cutoff
+      correction failure #48).
 - [ ] §3 step 2's Sync Log candidate construction interprets a
       `done_gate_rejected:...:rollback=<Status>` row by its parsed
       rollback status, never by the row's raw logged `Status` column,
