@@ -167,13 +167,26 @@ to classify it as `Initial Work` or `Review Fix`:
      but didn't stop the scan from crossing them). The correct rule:
      the most recent `Type=Story` observation is a hard cutoff, same as
      an `ambiguous_provenance_restart`; the scan never crosses it under
-     any circumstances. Only rows logged with an executable Type
-     strictly *after* the most recent Story observation are eligible
-     candidates (a page with no Story history at all has no cutoff, and
-     the scan simply covers its whole history as before); if the page
-     does have a Story observation and no eligible row exists between
-     "now" and it, there is no Sync Log candidate at all, the same as if
-     none were ever logged.
+     any circumstances. **This same cutoff must also apply directly to
+     this §3 step 2 scan for `ambiguous_provenance_restart` itself, not
+     only to §6's separate churn-history fallback**: §6 already stops
+     churn *inheritance* at the most recent restart, but this step 2
+     boundary/Sync-Log scan is a different mechanism that had no
+     awareness of the restart marker at all, so it could still reach
+     past it to an older, pre-restart `Review` row and classify the
+     explicitly fresh, unclassified replacement execution as
+     `Review Fix` — reusing an old Review Source even though churn
+     inheritance correctly refused to (failure #51, found during this
+     document's own review — the restart cutoff decided in §6 for churn
+     inheritance was never wired into this separate scan). This step's
+     hard cutoff is therefore the most recent of: a `Type=Story`
+     observation, **or** an `ambiguous_provenance_restart` close,
+     whichever is more recent. Only rows logged with an executable Type
+     strictly *after* that cutoff are eligible candidates (a page with
+     neither kind of cutoff in its history has none, and the scan simply
+     covers its whole history as before); if a cutoff exists and no
+     eligible row exists between "now" and it, there is no Sync Log
+     candidate at all, the same as if none were ever logged.
    - **Interpret a `done_gate_rejected:...:rollback=<Status>` row by its
      rollback status, not its logged `Status` column.** `logSnapshot_`
      is called with the page's *pre-reconciliation* status (`Code.gs`
@@ -376,6 +389,37 @@ best-effort, not authoritative.
      ambiguity window, only when a trusted, second-precision timestamp is
      available (failure #30, found during this document's own review —
      not one of PR #21's original 27).
+
+     **This "one ambiguous minute" framing itself understates the
+     uncertainty when the lower bound comes from a genuine Time Event
+     close's `Ended At`** (failure #38's evidence). Per README's
+     documented backlog-dependent imprecision, the inflation is **not**
+     capped at one poll interval: a sustained write-backlog can defer
+     the reconciler's observation of the true transition by
+     `ceil(backlog / MAX_TASKS_PER_RUN)` poll cycles, and if an unrelated
+     edit lands on the page during that whole deferred span, `Ended At`
+     is inflated by that many intervals, not just one. Treating this
+     case as "ambiguous only within the recorded minute" can still admit
+     or exclude reviews incorrectly across a wider real gap — e.g. the
+     true transition at `12:00`, a causal review at `12:05`, and the
+     unrelated edit landing at `12:15` recording `Ended At=12:15`: the
+     "same-minute" rule above only questions reviews near `12:15`, so it
+     wrongly treats the `12:05` review as definitively excluded when it
+     is, in fact, causal. Without independent corroboration (an adjacent
+     Sync Log row observed closer to the true transition, or a
+     `Write=`-style capture, per failure #41's constraint that `Write=`
+     itself cannot supply this), the safe lower bound is not "this
+     minute" but the **last independently corroborated evidence point
+     before this close** — e.g. the Time Event's own `Started At`, or an
+     earlier Sync Log row confirming the Task was still `In Progress` —
+     through the close's `Ended At`. Any review submitted anywhere in
+     that whole span must be treated as potentially causal and cannot be
+     safely excluded on timestamp alone; only reviews strictly before
+     that earlier corroborated point are safe to exclude (failure #50,
+     found during this document's own review — the backlog can span
+     multiple poll cycles, not just one minute, so the ambiguity window
+     for this specific evidence source must scale with that, not with
+     Notion's minute granularity alone).
    - **Upper bound**: the moment this execution's reopen was *actually
      observed*, not the poll's own wall-clock time. If a trusted,
      second-precision start timestamp is available, use it exactly. When
@@ -582,6 +626,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 47 | Every review in the Review Source window falls inside the ambiguous upper-bound minute — none is clearly outside it | With no "best candidate clearly inside the window" to compare against, the procedure as specified has no defined answer and could wrongly persist the latest ambiguous-minute reviewer regardless of whether it actually postdates the true (unknown, sub-minute) reopen | §5 step 2/3 |
 | 48 | A page was `Task, Review`, then spent time as `Story`, then converted directly back to `Task, In Progress` | The failure #45 fix excludes Story-era rows from eligibility but doesn't stop the backward scan from continuing past them, so it reaches the older pre-Story `Review` row and coalesces it with the current reopen — the same class of mistake failure #27 already ruled out for `ambiguous_provenance_restart` | §3 step 2 |
 | 49 | A definite `Human` review, then in the ambiguous upper-bound minute a `Codex` review, then another `Human` review | The failure #44 fix inspects only the single overall-latest ambiguous-minute review (`Human`, matching the definite candidate) and calls the result safe — but a reopen between the two ambiguous reviews makes `Codex` the latest *eligible* one instead, an outcome the single-review check never considers | §5 step 2/3 |
+| 50 | A genuine close's `Ended At` is inflated across multiple deferred poll cycles under a sustained write-backlog (per README's `ceil(backlog / MAX_TASKS_PER_RUN)` bound): true transition at `12:00`, a causal review at `12:05`, an unrelated edit finally observed at `12:15` recording `Ended At=12:15` | Treating the ambiguity as confined to "the recorded minute" (`12:15`) wrongly excludes the genuinely causal `12:05` review, which falls well outside that one-minute window but well inside the real, backlog-dependent uncertainty span | §5 step 2 |
+| 51 | An `ambiguous_provenance_restart` close exists, followed by an unrelated executable-Task `In Progress` reopen; an older, pre-restart `Review` row also exists in Sync Log | §6 correctly stops churn *inheritance* at the restart, but §3 step 2's boundary/Sync-Log scan has no awareness of the restart marker and can still reach the older `Review` row, classifying the explicitly fresh, unclassified replacement as `Review Fix` and reusing a stale Review Source | §3 step 2 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -635,7 +681,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 49 rows in §7 exist as named regression tests before requesting
+- [ ] All 51 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] The retroactive-boundary-vs-Sync-Log staleness check (§3 step 3,
       failure #32) compares `Write=` directly against `Write=` on both
@@ -666,6 +712,19 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       Story-era rows while letting the scan continue past them to an
       older, pre-Story executable-Task row (failure #45; hard-cutoff
       correction failure #48).
+- [ ] §3 step 2's Sync Log candidate scan also applies the
+      `ambiguous_provenance_restart` hard cutoff directly to itself, not
+      only relying on §6's separate churn-inheritance cutoff — the scan
+      never reaches past the most recent restart to an older, pre-restart
+      status row (failure #51).
+- [ ] The Review Source lower bound, when sourced from a genuine Time
+      Event close's `Ended At` with no independent corroboration, treats
+      the ambiguity window as spanning back to the last independently
+      corroborated evidence point (e.g. the event's own `Started At`, or
+      an earlier confirming Sync Log row) — never as confined to "the
+      recorded minute," since README's documented backlog-dependent
+      imprecision can span multiple poll cycles, not just one
+      (failure #50).
 - [ ] §3 step 2's Sync Log candidate construction interprets a
       `done_gate_rejected:...:rollback=<Status>` row by its parsed
       rollback status, never by the row's raw logged `Status` column,
