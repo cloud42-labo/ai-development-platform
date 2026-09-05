@@ -234,18 +234,31 @@ best-effort, not authoritative.
      available (failure #30, found during this document's own review —
      not one of PR #21's original 27).
    - **Upper bound**: the moment this execution's reopen was *actually
-     observed*, not the poll's own wall-clock time and not a blind
-     "round up to end of minute." If a trusted, second-precision start
-     timestamp is available, use it exactly; only when falling back to a
-     minute-granular timestamp is rounding up to the end of that minute
-     appropriate (PR #21 rounds 21, 23, 34 each got exactly this
-     precision-mixing wrong in a different way — treat "is this bound
+     observed*, not the poll's own wall-clock time. If a trusted,
+     second-precision start timestamp is available, use it exactly. When
+     only a minute-granular timestamp is available, **do not round up to
+     end-of-minute** — that reintroduces failure #17 in the opposite
+     direction: a review posted after the real (sub-minute) reopen but
+     before the rounded-up minute boundary gets wrongly credited as
+     causal, even though it postdates the actual resumption of work (e.g.
+     reopen at `12:00:10`, review at `12:00:40` — not causal, yet an
+     end-of-minute `12:00:59` bound admits it). Apply the **same
+     degraded-evidence treatment specified for the lower bound above** to
+     a minute-granular upper bound: a review inside that ambiguous minute
+     is not asserted as confidently included or excluded either way;
+     prefer a reviewer clearly outside the ambiguous window, degrade to
+     `Other` if the only candidate falls inside it. Treat "is this bound
      second-precision or minute-precision" as a fact to carry explicitly,
-     never to infer from the value's shape).
+     never to infer from the value's shape (PR #21 rounds 21, 23, 34 each
+     got this precision-mixing wrong in a different way; this document's
+     own first attempt at the upper bound repeated the same rounding
+     mistake the lower-bound fix above already corrected — failure #34,
+     found during this document's own review).
 3. Classify the most recent reviewer login inside the window into
-   `Codex` / `Claude` / `Human` / `Other`, applying the lower bound's
-   ambiguous-minute degradation from step 2 when it applies (prefer a
-   reviewer outside that window; degrade to `Other` if none exists).
+   `Codex` / `Claude` / `Human` / `Other`, applying the ambiguous-minute
+   degradation from step 2 (lower bound) and/or above (upper bound) when
+   either applies (prefer a reviewer outside the ambiguous window(s);
+   degrade to `Other` if none exists).
 4. **Degrade to `Other`, never throw**, on: missing `Pull Request` URL,
    missing `GITHUB_TOKEN`, any GitHub API failure, or an unexpected
    response shape. Reconciliation availability must never depend on
@@ -336,6 +349,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 31 | `stampExecutionBoundary_` retroactively tags an old reassignment close as the boundary; a Sync Log row exists from around the same real time | Comparing the stale original close's `Write=` (timestamped at the reassignment, not at the retroactive stamp) against the Sync Log row's `Write=` has no principled answer — the retroactive candidate's only valid comparison timestamp doesn't exist yet | §3 step 1/3 |
 | 32 | Sync Log logs `Review`, then several `In Progress` rows (all logged normally); a *later* execution's assignee is cleared and it leaves for `Backlog`, but crashes before that transition is logged. The Time Event side retroactively stamps the reassignment close as the boundary | Step 2 still returns the old, unrelated `Review` run as "the" Sync Log candidate merely because it exists and is non-`In Progress`; using it reports `Review Fix` for a transition that was actually to `Backlog` | §3 step 3 |
 | 33 | An outgoing reassignment replacement's Time Event predates `Execution=` (mid-upgrade legacy event), which `Code.gs` deliberately never backfills | Identity-only matching (§6's first bullet) cannot recognize the two sub-intervals as one execution, silently losing Work Type/Review Source across the reassignment | §6 |
+| 34 | Reopen actually happens at `12:00:10` (minute-granular in Sync Log); a review lands at `12:00:40`, after work resumed | Rounding the upper bound up to `12:00:59` admits the `:40` review as if it caused the reopen it postdates — the same rounding mistake the lower-bound fix (failure #30) already corrected, repeated on the other bound | §5 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -389,8 +403,11 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 33 rows in §7 exist as named regression tests before requesting
+- [ ] All 34 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
+- [ ] A minute-granular Review Source **upper** bound gets the identical
+      degraded-evidence treatment as the lower bound — no end-of-minute
+      rounding on either bound (failure #34).
 - [ ] Failure #27 (churn-history fallback past an `ambiguous_provenance_restart`)
       implements the hard-cutoff rule decided in §6 — no scanning past the
       restart under any circumstances.
