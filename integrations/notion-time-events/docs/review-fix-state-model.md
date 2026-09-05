@@ -84,32 +84,57 @@ Given a Task whose Time Event just opened (a fresh `In Progress` observed),
 to classify it as `Initial Work` or `Review Fix`:
 
 1. **Find the candidate boundary from the Time Event side**: the most
-   recent *genuine* boundary close for this Task — a close tagged
-   `Boundary=left_in_progress` (or the untagged legacy equivalent) —
-   excluding any close that is itself churn (reassignment /
-   duplicate-reconciliation / `ambiguous_provenance_restart`; see §6).
-   Read its `End Status=` field for the status it transitioned to — the
-   close itself is the evidence of what status this candidate represents.
+   recent close tagged `Boundary=left_in_progress` (or the untagged
+   legacy equivalent). Two different situations write this tag, and they
+   do **not** carry equally trustworthy status/timestamp evidence:
+   - **Genuine** (`Reason=left_in_progress`): written at the exact moment
+     the Task actually left `In Progress`. Its `End Status=` and
+     `Ended At` are accurate — read them directly as this candidate's
+     status and timestamp.
+   - **Retroactively stamped** (`Reason=reassignment` or
+     `duplicate_reconciliation`, with `Boundary=left_in_progress` added
+     *later* by `stampExecutionBoundary_` because no open Time Event
+     existed to close when the Task actually left): only the fact that
+     *a* boundary occurred by this point is reliable. Its `End Status=`
+     and `Ended At` are **stale** — `stampExecutionBoundary_` never
+     rewrites them, so they still hold whatever the original reassignment
+     close wrote (typically `End Status=In Progress` and the
+     reassignment's own timestamp), not the real destination status or
+     the real time the Task actually left. **Do not read status or
+     timestamp from this candidate** — see step 3.
 2. **Find the candidate boundary from the Sync Log side**: identify the
-   most recent *contiguous run* of non-`In Progress` Sync Log rows for
-   this Task (`In Progress` rows are mid-execution actor observations,
-   never the boundary itself — skip them), then take the **start** of
-   that run — its earliest row, not its most recently re-observed one.
-   The same status can be logged repeatedly with no real transition
-   in between (failure #14); only the run's first row is the actual
-   boundary timestamp and the evidence for §4's comparison.
+   most recent **same-status run** of Sync Log rows for this Task — rows
+   sharing one non-`In Progress` status value, contiguous going backward,
+   stopping at either an `In Progress` row or a row with a *different*
+   non-`In Progress` status (not only at `In Progress`: `Review →
+   Backlog → In Progress` is two runs, and only the later one — `Backlog`
+   — is the candidate; failure #5 misclassifies this if the two are
+   merged into one run). Take the **start** of that run — its earliest
+   row, not its most recently re-observed one; the same status can be
+   logged repeatedly with no real transition in between (failure #14).
 3. **Resolve which candidate is actually more recent** using the priority
    order in §4. This must be a single shared resolver — never let Work
    Type and Review Source each re-derive "the most recent relevant
    evidence" independently (PR #21 round 7/13: doing so let them disagree
-   about the same instant).
-4. **Classify**: if the winning candidate's status is `Review` →
-   `Review Fix`; otherwise (`Blocked`/`Ready`/`Backlog`, or no candidate at
-   all) → `Initial Work`.
-5. **Carry the winning candidate's timestamp forward** as the lower bound
-   for Review Source resolution (§5) — Work Type and Review Source must
-   consume the identical evidence instance, not merely the same *kind* of
-   evidence re-queried.
+   about the same instant). **If the winning candidate is a
+   retroactively-stamped Time Event boundary** (step 1), its own
+   `End Status=`/`Ended At` cannot supply the classification — use the
+   Sync Log candidate from step 2 for the actual status and timestamp
+   instead, even though the Time Event boundary is what proved a
+   boundary exists at all. If Sync Log has no row covering that gap
+   either (a genuine crash-before-log race), there is no reliable status
+   source at all: implementations must surface this as an explicit
+   unresolved/ambiguous case for review, never silently default to
+   `Initial Work` or `Review Fix` as if it were an ordinary confident
+   result (failure #28, found during this document's own review — not
+   one of PR #21's original 27).
+4. **Classify**: if the winning status is `Review` → `Review Fix`;
+   otherwise (`Blocked`/`Ready`/`Backlog`, or no candidate at all) →
+   `Initial Work`.
+5. **Carry the winning timestamp forward** as the lower bound for Review
+   Source resolution (§5) — Work Type and Review Source must consume the
+   identical evidence instance, not merely the same *kind* of evidence
+   re-queried.
 
 ## 4. Evidence priority & timestamp-tie resolution
 
@@ -143,7 +168,12 @@ The two legitimate ways to break a tie, in priority order:
    Snapshot ever logged elsewhere" (`snapshotWasEverLogged_`-style
    inference) may be used — but this fallback is known to guess the wrong
    direction in some cases (PR #21 round 32) and must not be extended to
-   any row that could instead carry `Write=`.
+   any row that could instead carry `Write=`. **`Write=` must be added to
+   `appendNote_`'s protected-field list alongside `Execution=`/
+   `Boundary=`/`Task Origin=`/`End Status=`** — otherwise a later note
+   compaction on a closed Time Event can evict it, silently downgrading
+   that event back to the legacy fallback this field exists to retire
+   (failure #29, found during this document's own review).
 
 Concretely: compare by Notion timestamp first; if tied at minute
 granularity, compare by `Write=` milliseconds; only if `Write=` is absent
@@ -156,9 +186,20 @@ best-effort, not authoritative.
    **every page**, not just the first (PR #21 round 1 — the single most
    basic miss, and the first thing to regression-test).
 2. Window the eligible reviews to `[lower bound, upper bound]`:
-   - **Lower bound**: the exact timestamp resolved in §3 step 5 — the same
+   - **Lower bound**: the timestamp resolved in §3 step 5 — the same
      evidence instance Work Type classification used, not an independent
-     Sync Log lookup (PR #21 round 7, round 13).
+     Sync Log lookup (PR #21 round 7, round 13). **Carry its precision
+     explicitly, the same as the upper bound below.** Sync Log timestamps
+     are minute-granular; treating a minute-granular value as an exact
+     lower bound wrongly admits a review submitted *earlier in that same
+     minute* but before the true (sub-minute) transition — e.g. a review
+     at `12:00:20` followed by the actual transition to `Review` at
+     `12:00:50` could not have caused that Review Fix, yet an exact-value
+     comparison would credit it anyway. When the resolved lower bound is
+     only minute-granular, round it **up** to the end of that minute
+     before filtering; use it exactly only when a trusted, second-precision
+     timestamp is available (failure #30, found during this document's own
+     review — not one of PR #21's original 27).
    - **Upper bound**: the moment this execution's reopen was *actually
      observed*, not the poll's own wall-clock time and not a blind
      "round up to end of minute." If a trusted, second-precision start
@@ -225,6 +266,14 @@ names the section above that prevents it.
 | 26 | Close reason is `ambiguous_provenance_restart` | Wrongly inherited as ordinary churn instead of starting fresh | §6 |
 | 27 | Filtered churn candidates empty after an `ambiguous_provenance_restart`; fallback rescans full history | May reach past the restart to an unrelated old reassignment — **unresolved at supersession** | §6 — required open test case, not an assumed-safe fallback |
 
+Found during this document's own review (`ADP-051-A`, not PR #21's history):
+
+| # | State sequence / input | Wrong classification | Principle |
+|---|---|---|---|
+| 28 | Assignee cleared mid-`In Progress` (reassignment close, `End Status=In Progress`), no open event exists when the Task later actually reaches `Review`, so `stampExecutionBoundary_` retroactively tags that same reassignment close `Boundary=left_in_progress` — and the paired Sync Log row for the real `Review` transition is missing (crash) | Reading `End Status=`/`Ended At` directly from this candidate reports `Initial Work` (or a wrong timestamp) instead of surfacing that the true destination status is unknown | §3 step 1/3 |
+| 29 | A closed Time Event's `Write=` field survives long enough to matter, but a later note compaction (`appendNote_`) runs on it | Silently evicted like an ordinary low-priority field, downgrading that event to the legacy `snapshotWasEverLogged_` fallback (known to guess wrong per §4) | §4 |
+| 30 | A GitHub review lands at `12:00:20`; the Task's actual transition to `Review` (minute-granular in Sync Log) is at `12:00:50` | Treating the minute-granular lower bound as exact admits the `12:00:20` review as if it caused the fix it precedes | §5 |
+
 ## 8. Non-goals (unchanged from `ADP-051`)
 
 - No manual editing of Task Time Events.
@@ -256,7 +305,25 @@ names the section above that prevents it.
 - [ ] Reviews API pagination walks all pages (failure #1).
 - [ ] Review Source resolution never throws; missing PR/token/API failure
       all degrade to `Other`.
-- [ ] All 27 rows in §7 exist as named regression tests before requesting
+- [ ] A retroactively-stamped Time Event boundary (`Reason=reassignment`/
+      `duplicate_reconciliation` + added `Boundary=`) never has its
+      `End Status=`/`Ended At` read directly; Sync Log supplies the real
+      status/timestamp instead, and a genuine crash-before-log gap is
+      surfaced as unresolved, not silently classified (failure #28).
+- [ ] `Write=` is in `appendNote_`'s protected-field list, verified by a
+      regression test that compacts a closed event and checks `Write=`
+      survives (failure #29).
+- [ ] The Review Source lower bound rounds up to end-of-minute when only
+      minute-granular, mirroring the upper bound (failure #30).
+- [ ] **`ADP-051-C`** (Review Source), when implemented, updates
+      `integrations/notion-time-events/README.md`'s Security Model and
+      Success Criteria sections — both currently state `NOTION_TOKEN` is
+      the *only* secret, which stops being true the moment `GITHUB_TOKEN`
+      is added (PR #21 round 2 already had to make this exact README
+      update once; this document introducing the plan for `GITHUB_TOKEN`
+      without a corresponding README change was itself flagged as
+      inconsistent during review).
+- [ ] All 30 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] Failure #27 (churn-history fallback past an `ambiguous_provenance_restart`)
       is resolved explicitly, not left as an implicit fallback.

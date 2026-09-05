@@ -20,7 +20,12 @@ Work Type (Initial Work / Review Fix) and Review Source (Codex / Claude /
 Human / Other) classification is planned but not yet implemented in this
 file — see [`docs/review-fix-state-model.md`](docs/review-fix-state-model.md)
 for the state-transition and evidence model that `ADP-051-B`/`C`/`D` build
-against before adding that code here.
+against before adding that code here. **Review Source resolution requires
+a `GITHUB_TOKEN`, a second secret this file does not yet mention** — when
+`ADP-051-C` implements it, the "one secret, one place" claim in
+**Security model** and **Success criteria** below stops being true and
+both sections need updating in the same change, not left stale (this
+integration made the identical README update once already, in PR #21).
 
 ## Behavior
 
