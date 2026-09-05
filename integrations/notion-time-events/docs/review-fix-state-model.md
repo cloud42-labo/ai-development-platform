@@ -142,6 +142,37 @@ to classify it as `Initial Work` or `Review Fix`:
    merged into one run). Take the **start** of that run — its earliest
    row, not its most recently re-observed one; the same status can be
    logged repeatedly with no real transition in between (failure #14).
+   Two further corrections to this candidate construction, both found
+   during this document's own review:
+   - **Exclude rows logged while the page's `Type=` was `Story`.**
+     `logSnapshot_` records `Type` (`Code.gs` ~628) and logs *every*
+     observation regardless of Type, including a Story's own reduced
+     handling (`reconcileStoryTask_`) — it is not limited to executable
+     Task rows. A page reclassified from `Type=Story` directly to
+     `Type=Task, Status=In Progress` can therefore have an older,
+     Story-era `Review` row sitting in its Sync Log history; scanning
+     for "the most recent non-`In Progress` status" without a Type
+     filter picks that Story-era row up and wrongly labels the Task's
+     very first executable interval `Review Fix`. Only rows logged with
+     an executable Type (i.e. not `Story`) are eligible candidates; a
+     Story→Task reclassification with no eligible row on the near side
+     has no Sync Log candidate at all, the same as if none were ever
+     logged (failure #45).
+   - **Interpret a `done_gate_rejected:...:rollback=<Status>` row by its
+     rollback status, not its logged `Status` column.** `logSnapshot_`
+     is called with the page's *pre-reconciliation* status (`Code.gs`
+     ~561, ~628), but `enforceDoneGate_` can reject an invalid `Done`
+     attempt and roll the Task back to `Review` or `In Progress` in that
+     same pass (`Code.gs` ~2042–2046), recording the rollback in the
+     `outcome` field, not the `status` field. The logged row therefore
+     reads `Status=Done` even though the Task's actual effective status
+     immediately after that poll is the rollback status. Treating the
+     raw `Done` value as this candidate's status — rather than parsing
+     `rollback=` out of a `done_gate_rejected:` outcome and using that —
+     can hide a genuine `Review` (or `In Progress`) observation behind a
+     status this model was never meant to see as a candidate at all
+     (`Done` is a terminal gate result, out of scope per §1) and fall
+     through to the wrong default classification (failure #46).
 3. **Resolve which candidate is actually more recent** using the priority
    order in §4. This must be a single shared resolver — never let Work
    Type and Review Source each re-derive "the most recent relevant
@@ -352,8 +383,18 @@ best-effort, not authoritative.
      after Alice's review, Alice is inside it and is the (more recent,
      correct) answer. Preferring Bob regardless asserts a specific
      answer in a case where it can genuinely go either way (failure #37,
-     found during this document's own review). The correct rule: after
-     picking the best candidate reviewer from clearly inside the window,
+     found during this document's own review). The correct rule requires
+     a definite candidate to exist in the first place: **if every review
+     in the window falls inside the ambiguous upper-bound minute — no
+     review is clearly outside it — there is no "best candidate clearly
+     inside the window" to compare anything against.** Whether such a
+     review counts at all depends on the unknown sub-minute reopen time
+     exactly as in the Bob/Alice case, so this is unresolvable the same
+     way an all-ambiguous case is: degrade to `Other` outright, never
+     fall through to treating the latest ambiguous-minute review as if
+     it were a definite candidate (failure #47, found during this
+     document's own review). Otherwise, after picking the best candidate
+     reviewer from clearly inside the window,
      check whether any review *inside the ambiguous minute* has a
      timestamp later than that candidate's. If none does, the candidate
      is safe — no possible sub-minute ordering changes the answer. If one
@@ -391,14 +432,16 @@ best-effort, not authoritative.
    ambiguous-minute review could still outrank it):
    - **Lower bound**: prefer a reviewer clearly outside the ambiguous
      minute; degrade to `Other` only if none exists.
-   - **Upper bound**: after picking the best candidate clearly outside
-     the ambiguous minute, check any review *inside* the ambiguous
-     minute with a timestamp later than that candidate's — even though
-     an outside-window candidate exists (failure #37). Degrade to
-     `Other` only if that later review classifies into a **different**
-     source category than the definite candidate; if it classifies into
-     the same category, both possible orderings agree and no
-     degradation is needed (failure #44).
+   - **Upper bound**: if no review is clearly outside the ambiguous
+     minute at all, there is no definite candidate to begin with —
+     degrade to `Other` outright (failure #47). Otherwise, after picking
+     the best candidate clearly outside the ambiguous minute, check any
+     review *inside* the ambiguous minute with a timestamp later than
+     that candidate's — even though an outside-window candidate exists
+     (failure #37). Degrade to `Other` only if that later review
+     classifies into a **different** source category than the definite
+     candidate; if it classifies into the same category, both possible
+     orderings agree and no degradation is needed (failure #44).
 4. **Degrade to `Other`, never throw**, on: missing `Pull Request` URL,
    missing `GITHUB_TOKEN`, any GitHub API failure, or an unexpected
    response shape. Reconciliation availability must never depend on
@@ -503,6 +546,9 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 42 | A backlogged poll both discovers a retroactive boundary (`stampExecutionBoundary_`, real reconciliation time 12:15) and appends the correct Sync Log row for the same delayed transition (logical/Notion timestamp ~12:00) in the same pass | Comparing the Sync Log candidate's own Notion-side timestamp (12:00) against the boundary's `Write=` (12:15) via §4's general hierarchy wrongly rejects this same-cycle row as "predating discovery," reintroducing the unresolved verdict for the single most common case (an ordinary delayed poll), not just the crash case it targets | §3 step 3 |
 | 43 | Bob reviews at a time definitely inside the Review Source window; Alice reviews later, inside the ambiguous upper-bound minute (same scenario as failure #37) | The §5 step 3 summary line restated the lower and upper bound degradation rules as one shared rule ("prefer outside window; degrade only if none exists"), silently dropping the upper bound's extra condition (failure #37) that also degrades when an outside candidate exists but an ambiguous-minute review could still outrank it — reintroducing failure #37's exact defect through the summary rather than the detailed rule | §5 step 3 |
 | 44 | Bob (definite candidate) and Alice (ambiguous upper-bound-minute review) are both classified as `Human` | The failure #37 fix degrades to `Other` whenever an ambiguous-minute review's timestamp could outrank the definite candidate's, regardless of category — but since the persisted value is the source *category*, not the specific reviewer, both possible orderings here produce `Human` either way; degrading loses information the evidence actually supports | §5 step 2/3 |
+| 45 | A page logged as `Type=Story, Status=Review`, later reclassified to `Type=Task, Status=In Progress` | §3 step 2's unfiltered same-status-run scan picks up the Story-era `Review` row as the Task's Sync Log candidate, labeling the Task's first executable interval `Review Fix` instead of `Initial Work` | §3 step 2 |
+| 46 | An invalid `Done` attempt with no open Time Event: `enforceDoneGate_` rolls the Task back to `Review`, but `logSnapshot_` (called with the pre-reconciliation status) logs `Status=Done` with outcome `done_gate_rejected:...:rollback=Review` | Reading the row's raw `Status=Done` instead of parsing its `rollback=` outcome hides the genuine `Review` observation behind a status this model was never meant to see as a candidate (`Done` is a terminal gate result, out of scope per §1), falling through to the wrong default classification | §3 step 2 |
+| 47 | Every review in the Review Source window falls inside the ambiguous upper-bound minute — none is clearly outside it | With no "best candidate clearly inside the window" to compare against, the procedure as specified has no defined answer and could wrongly persist the latest ambiguous-minute reviewer regardless of whether it actually postdates the true (unknown, sub-minute) reopen | §5 step 2/3 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -556,7 +602,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 44 rows in §7 exist as named regression tests before requesting
+- [ ] All 47 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] The retroactive-boundary-vs-Sync-Log staleness check (§3 step 3,
       failure #32) compares `Write=` directly against `Write=` on both
@@ -577,6 +623,18 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       reviewers in the same category (e.g. both `Human`) never need
       degradation, since the persisted value is the category, not the
       specific reviewer (failure #44).
+- [ ] §3 step 2's Sync Log candidate scan excludes rows logged while
+      `Type=` was `Story` — a Story→Task reclassification never inherits
+      a Story-era status as its boundary candidate (failure #45).
+- [ ] §3 step 2's Sync Log candidate construction interprets a
+      `done_gate_rejected:...:rollback=<Status>` row by its parsed
+      rollback status, never by the row's raw logged `Status` column,
+      which reflects the pre-reconciliation (rejected) `Done` value
+      (failure #46).
+- [ ] The Review Source upper bound explicitly degrades to `Other` when
+      no review is clearly outside the ambiguous minute at all (no
+      definite candidate exists to compare against), rather than
+      leaving that case undefined (failure #47).
 - [ ] A minute-granular Review Source **upper** bound degrades to `Other`
       whenever an ambiguous-minute review could outrank the best
       outside-window candidate — not a blanket "prefer outside the
