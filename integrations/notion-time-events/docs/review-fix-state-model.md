@@ -357,7 +357,20 @@ best-effort, not authoritative.
      check whether any review *inside the ambiguous minute* has a
      timestamp later than that candidate's. If none does, the candidate
      is safe — no possible sub-minute ordering changes the answer. If one
-     does, the outcome is genuinely ambiguous: degrade to `Other`.
+     does, check whether that later ambiguous-minute review classifies
+     into the **same source category** (`Codex`/`Claude`/`Human`/`Other`,
+     per §5 step 3) as the definite candidate — the persisted value is
+     the category, not a specific reviewer's identity, so if both
+     possible orderings resolve to the same category (e.g. Bob and
+     Alice are both `Human`), the result is safe regardless of which one
+     actually happened, and asserting that category is not the
+     unjustified specific-reviewer guess failure #37 was about (failure
+     #44, found during this document's own review — corrects failure
+     #37's fix, which degraded on any ambiguous-minute timestamp overlap
+     without checking whether it could actually change the output).
+     Only when the ambiguous-minute review's category *differs* from the
+     definite candidate's is the outcome genuinely ambiguous: degrade to
+     `Other`.
      Treat "is this bound
      second-precision or minute-precision" as a fact to carry explicitly,
      never to infer from the value's shape (PR #21 rounds 21, 23, 34 each
@@ -379,9 +392,13 @@ best-effort, not authoritative.
    - **Lower bound**: prefer a reviewer clearly outside the ambiguous
      minute; degrade to `Other` only if none exists.
    - **Upper bound**: after picking the best candidate clearly outside
-     the ambiguous minute, degrade to `Other` if any review *inside* the
-     ambiguous minute has a timestamp later than that candidate's —
-     even though an outside-window candidate exists (failure #37).
+     the ambiguous minute, check any review *inside* the ambiguous
+     minute with a timestamp later than that candidate's — even though
+     an outside-window candidate exists (failure #37). Degrade to
+     `Other` only if that later review classifies into a **different**
+     source category than the definite candidate; if it classifies into
+     the same category, both possible orderings agree and no
+     degradation is needed (failure #44).
 4. **Degrade to `Other`, never throw**, on: missing `Pull Request` URL,
    missing `GITHUB_TOKEN`, any GitHub API failure, or an unexpected
    response shape. Reconciliation availability must never depend on
@@ -485,6 +502,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 41 | A real transition happens at `12:00`, but a backlogged reconciliation cycle doesn't process it until `12:15`, writing `Write=12:15` on the close | Treating that `Write=` as a trusted, second-precision transition-boundary timestamp (as the failure #38 fix implied a future implementation might) reports `12:15` as when the Task changed status, when it actually changed at `12:00` — `Write=` timestamps the script's write, not the real-world transition, and is only valid for §4's tie-breaking between competing *candidates*, never as a substitute transition-boundary capture | §3 step 1 |
 | 42 | A backlogged poll both discovers a retroactive boundary (`stampExecutionBoundary_`, real reconciliation time 12:15) and appends the correct Sync Log row for the same delayed transition (logical/Notion timestamp ~12:00) in the same pass | Comparing the Sync Log candidate's own Notion-side timestamp (12:00) against the boundary's `Write=` (12:15) via §4's general hierarchy wrongly rejects this same-cycle row as "predating discovery," reintroducing the unresolved verdict for the single most common case (an ordinary delayed poll), not just the crash case it targets | §3 step 3 |
 | 43 | Bob reviews at a time definitely inside the Review Source window; Alice reviews later, inside the ambiguous upper-bound minute (same scenario as failure #37) | The §5 step 3 summary line restated the lower and upper bound degradation rules as one shared rule ("prefer outside window; degrade only if none exists"), silently dropping the upper bound's extra condition (failure #37) that also degrades when an outside candidate exists but an ambiguous-minute review could still outrank it — reintroducing failure #37's exact defect through the summary rather than the detailed rule | §5 step 3 |
+| 44 | Bob (definite candidate) and Alice (ambiguous upper-bound-minute review) are both classified as `Human` | The failure #37 fix degrades to `Other` whenever an ambiguous-minute review's timestamp could outrank the definite candidate's, regardless of category — but since the persisted value is the source *category*, not the specific reviewer, both possible orderings here produce `Human` either way; degrading loses information the evidence actually supports | §5 step 2/3 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -538,7 +556,7 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 43 rows in §7 exist as named regression tests before requesting
+- [ ] All 44 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
 - [ ] The retroactive-boundary-vs-Sync-Log staleness check (§3 step 3,
       failure #32) compares `Write=` directly against `Write=` on both
@@ -552,6 +570,13 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       exists" rule, which silently drops the upper bound's extra
       degrade-even-with-an-outside-candidate condition (failure #37,
       restated correctly per failure #43).
+- [ ] The upper-bound degrade rule (failure #37) degrades to `Other`
+      only when the ambiguous-minute review's classified source
+      *category* differs from the definite candidate's — not merely
+      because their timestamps could tie in either order. Two
+      reviewers in the same category (e.g. both `Human`) never need
+      degradation, since the persisted value is the category, not the
+      specific reviewer (failure #44).
 - [ ] A minute-granular Review Source **upper** bound degrades to `Other`
       whenever an ambiguous-minute review could outrank the best
       outside-window candidate — not a blanket "prefer outside the
