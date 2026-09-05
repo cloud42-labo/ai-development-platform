@@ -200,16 +200,43 @@ to classify it as `Initial Work` or `Review Fix`:
    boundary exists at all. **But first verify that Sync Log candidate is
    not itself stale relative to this boundary**: apply §4's comparison
    between the Sync Log candidate's timestamp and the boundary's own
-   discovery time (its fresh `Write=` from step 1) exactly as if they
-   were competing candidates. A Sync Log run that predates the boundary's
-   discovery is evidence from a *different, earlier* cycle — e.g. an old
-   logged `Review` run left over from before a run of logged
-   `In Progress` rows, with the current reopen's own transition never
-   logged (crash) — and must be rejected the same as having no Sync Log
-   row at all, not trusted merely because a same-status run technically
-   exists somewhere in the log (failure #32, found during this document's
-   own review). Only once the Sync Log candidate is confirmed to
-   postdate the boundary's discovery may its status be used. If no such
+   discovery time (its fresh `Write=` from step 1) — **but this specific
+   comparison must be `Write=`-to-`Write=` directly, not §4's general
+   "Notion timestamp first, `Write=` as tie-break" hierarchy.** §4's
+   hierarchy answers "which of two candidate *real-world transitions*
+   happened first"; this check answers a different question — "did this
+   Sync Log write happen at or after that boundary-discovery write" —
+   which is a write-ordering question between two Apps Script actions,
+   not a transition-recency question. Mediating it through the Sync Log
+   candidate's own Notion-side timestamp breaks exactly the common case
+   this check exists to allow: when a backlogged poll cycle both
+   discovers the boundary (`stampExecutionBoundary_`, `Write=` at the
+   real reconciliation time) and appends the correct Sync Log row for
+   the same, delayed transition in the same pass, that row's own
+   Notion-side timestamp reflects the transition's *logical* time, which
+   can be well before the reconciliation cycle's (and thus the
+   boundary's) real `Write=` time — comparing it against the boundary's
+   `Write=` as if both were the same kind of evidence wrongly rejects
+   this same-cycle row as "predating discovery," reintroducing the
+   unresolved verdict this check was built to avoid, for the single
+   most common case (an ordinary delayed poll) rather than the crash
+   case it targets (failure #42, found during this document's own
+   review — corrects failure #32's fix, which specified the comparison
+   direction but not that it must use `Write=` on both sides rather than
+   routing through §4). A Sync Log run that predates the boundary's
+   discovery **by this `Write=`-to-`Write=` comparison** is evidence
+   from a *different, earlier* cycle — e.g. an old logged `Review` run
+   left over from before a run of logged `In Progress` rows, with the
+   current reopen's own transition never logged (crash) — and must be
+   rejected the same as having no Sync Log row at all, not trusted
+   merely because a same-status run technically exists somewhere in the
+   log (failure #32, found during this document's own review). Only
+   once the Sync Log candidate's `Write=` is confirmed to postdate the
+   boundary's discovery `Write=` may its status be used. (A legacy Sync
+   Log row with no `Write=` at all falls back to the same best-effort
+   "ever logged" heuristic §4 already prescribes for legacy timestamp
+   ties — not to this direct comparison, which requires `Write=` on both
+   sides.) If no such
    Sync Log row exists — none at all, or only stale ones — there is no
    reliable status source: implementations must surface this as an
    explicit unresolved/ambiguous case for review, never silently default
@@ -339,10 +366,22 @@ best-effort, not authoritative.
      mistake the lower-bound fix above already corrected — failure #34,
      found during this document's own review).
 3. Classify the most recent reviewer login inside the window into
-   `Codex` / `Claude` / `Human` / `Other`, applying the ambiguous-minute
-   degradation from step 2 (lower bound) and/or above (upper bound) when
-   either applies (prefer a reviewer outside the ambiguous window(s);
-   degrade to `Other` if none exists).
+   `Codex` / `Claude` / `Human` / `Other`, applying step 2's two
+   ambiguous-minute degradation rules **exactly as specified there — they
+   are not symmetric, and restating them as one shared rule loses the
+   upper bound's stricter condition** (failure #43, found during this
+   document's own review — an earlier draft of this summary line
+   collapsed both into "prefer a reviewer outside the ambiguous
+   window(s); degrade to `Other` if none exists," which is only the
+   lower bound's rule and silently drops the upper bound's requirement
+   to also degrade when an outside candidate *does* exist but an
+   ambiguous-minute review could still outrank it):
+   - **Lower bound**: prefer a reviewer clearly outside the ambiguous
+     minute; degrade to `Other` only if none exists.
+   - **Upper bound**: after picking the best candidate clearly outside
+     the ambiguous minute, degrade to `Other` if any review *inside* the
+     ambiguous minute has a timestamp later than that candidate's —
+     even though an outside-window candidate exists (failure #37).
 4. **Degrade to `Other`, never throw**, on: missing `Pull Request` URL,
    missing `GITHUB_TOKEN`, any GitHub API failure, or an unexpected
    response shape. Reconciliation availability must never depend on
@@ -444,6 +483,8 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
 | 39 | A genuine close to `Review` at t1 succeeds and is logged; a later Sync Log row also reports `Review` at t2, with no differently-labeled row observed in between — but the polling model can silently skip an intervening transition inside one interval, so the *absence* of an intervening row cannot distinguish "t1/t2 are the same transition re-observed" from "a real, unobserved `Review`→other→`Review` round-trip happened between them" | The round-7 fix (failures #35/#36) treated "no intervening row found" as proof of the first case and confidently picked t1 — but that inference is unsound given documented polling collapse, so it can silently pick the wrong lower bound in either direction | §3 step 3 |
 | 40 | Same as failure #36's scenario: a genuine close to `Review` (t1), an unmapped-actor `In Progress` spell (opens no Time Event) that *is* logged, then `Review` again (t2) | The failure #39 fix over-corrected: it made *every* same-status/different-timestamp pair ambiguous, including this one, where an actually-observed intervening row positively proves two distinct periods and §4's ordinary comparison resolves it cleanly — blanket ambiguity here wrongly discards a resolvable case | §3 step 3 |
 | 41 | A real transition happens at `12:00`, but a backlogged reconciliation cycle doesn't process it until `12:15`, writing `Write=12:15` on the close | Treating that `Write=` as a trusted, second-precision transition-boundary timestamp (as the failure #38 fix implied a future implementation might) reports `12:15` as when the Task changed status, when it actually changed at `12:00` — `Write=` timestamps the script's write, not the real-world transition, and is only valid for §4's tie-breaking between competing *candidates*, never as a substitute transition-boundary capture | §3 step 1 |
+| 42 | A backlogged poll both discovers a retroactive boundary (`stampExecutionBoundary_`, real reconciliation time 12:15) and appends the correct Sync Log row for the same delayed transition (logical/Notion timestamp ~12:00) in the same pass | Comparing the Sync Log candidate's own Notion-side timestamp (12:00) against the boundary's `Write=` (12:15) via §4's general hierarchy wrongly rejects this same-cycle row as "predating discovery," reintroducing the unresolved verdict for the single most common case (an ordinary delayed poll), not just the crash case it targets | §3 step 3 |
+| 43 | Bob reviews at a time definitely inside the Review Source window; Alice reviews later, inside the ambiguous upper-bound minute (same scenario as failure #37) | The §5 step 3 summary line restated the lower and upper bound degradation rules as one shared rule ("prefer outside window; degrade only if none exists"), silently dropping the upper bound's extra condition (failure #37) that also degrades when an outside candidate exists but an ambiguous-minute review could still outrank it — reintroducing failure #37's exact defect through the summary rather than the detailed rule | §5 step 3 |
 
 ## 8. Non-goals (unchanged from `ADP-051`)
 
@@ -497,8 +538,20 @@ Found during this document's own review (`ADP-051-A`, not PR #21's history):
       update once; this document introducing the plan for `GITHUB_TOKEN`
       without a corresponding README change was itself flagged as
       inconsistent during review).
-- [ ] All 41 rows in §7 exist as named regression tests before requesting
+- [ ] All 43 rows in §7 exist as named regression tests before requesting
       review — do not wait for Codex to rediscover them one at a time.
+- [ ] The retroactive-boundary-vs-Sync-Log staleness check (§3 step 3,
+      failure #32) compares `Write=` directly against `Write=` on both
+      sides — never routes through §4's general "Notion timestamp first"
+      hierarchy, which wrongly rejects a same-cycle Sync Log row whose
+      own logical timestamp predates the boundary's `Write=` even though
+      both were written in the same reconciliation pass (failure #42).
+- [ ] Any summary or restatement of §5's lower/upper-bound ambiguous-
+      minute degradation rules keeps them asymmetric — never collapses
+      them into one shared "prefer outside window, degrade if none
+      exists" rule, which silently drops the upper bound's extra
+      degrade-even-with-an-outside-candidate condition (failure #37,
+      restated correctly per failure #43).
 - [ ] A minute-granular Review Source **upper** bound degrades to `Other`
       whenever an ambiguous-minute review could outrank the best
       outside-window candidate — not a blanket "prefer outside the
