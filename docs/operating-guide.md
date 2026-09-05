@@ -98,12 +98,14 @@ For the ADP knowledge model, see [`../governance/source-of-truth.md`](../governa
 
 ### PR / review / merge
 
-- The implementation agent normally stops after completing required implementation/fixes and creating the PR.
-- Codex independently reviews the PR diff, acceptance criteria and test evidence when required.
+- **Repository merge authority is determined by this Operating Guide first, then Repo-specific instructions.** Historical notes or brain decisions do not override the current durable Policy.
+- `cloud42-labo/brain` and `cloud42-labo/experimental` are explicit **self-merge repositories**. For both repositories, the working agent may merge its own PR for **all change types**; do not split authority by journal/code/docs/policy-like content.
+- In `brain` and `experimental`, independent review (Codex or another AI) may still run as a quality aid, but it is **not a mandatory merge gate**. Repository-specific tests, CI, P0/P1 handling, and other quality gates still apply where they exist.
+- For every other repository, self-merge is prohibited. The implementation agent normally stops after required implementation/fixes and PR creation; required independent review is performed, and final merge authority is separated from the author.
+- For non-self-merge repositories: Claude-authored work follows Claude PR → independent review → Claude fixes → Chris final verification/merge. Chris-authored work follows Chris PR → independent review → Chris fixes → Claude final verification/merge.
 - Review findings live in GitHub; Notion records only the conclusion and next action.
-- Do not merge with unresolved P0/P1 issues, failed CI, or required device verification incomplete.
-- The merge role is normally separated from implementation and handled by ChatGPT / Chris for final verification.
-- If an exception allows Claude to merge, all of the following must be true: the Owner has explicitly changed the merge responsibility; Codex review is complete where required; critical findings are resolved; CI is green; mergeability is clean; required real-device validation is complete or captured as an explicit post-merge task.
+- Do not merge with unresolved P0/P1 issues, failed required CI, or a verification gate that is explicitly mandatory for the current transition.
+- The Owner is not the routine merge operator. A direct Owner instruction may change repository authority and must then be synchronized back into this Operating Guide.
 
 ## 7. Backlog Refinement
 
@@ -145,9 +147,9 @@ The weekly close occurs on Monday, in this order:
 
 - Acceptance Criteria are satisfied.
 - Required tests pass.
-- Required independent review and final judgment are complete.
-- If Codex review is used, critical findings are resolved.
-- No unresolved P0/P1 remains; CI passes; required real-device verification is complete.
+- Review and final judgment required by the target repository's merge policy are complete; `brain` / `experimental` do not require independent review as a merge gate.
+- If Codex review is required or intentionally used as a gate, critical findings are resolved.
+- No unresolved P0/P1 remains; required CI passes; required real-device verification is complete when it gates the current transition.
 - `Result`, `Completed At` and `Status` are updated in Notion.
 - Related Story, Decision, Sprint or other operational state is updated as needed.
 
