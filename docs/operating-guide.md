@@ -107,8 +107,9 @@ For the ADP knowledge model, see [`../governance/source-of-truth.md`](../governa
 
 ## 7. Backlog Refinement
 
-Run Backlog Refinement for every Product after Sprint Review. Verify:
+Run Backlog Refinement for every Product only after the current `upstream-change-review` has refreshed external assumptions and Sprint Review / Retrospective have completed. Verify:
 
+- confirmed upstream changes and Instruction / Skill Debt signals that may invalidate current assumptions;
 - Epic purpose, dependencies and execution order;
 - correct Story/Task placement;
 - duplicates, stale items and unnecessary work;
@@ -121,14 +122,15 @@ Epics should normally converge in dependency/number order. A later Epic may move
 
 The weekly close occurs on Monday, in this order:
 
-1. **Sprint Review** — review outcomes, incomplete work and blockers.
-2. **Retrospective** — record Keep / Problem / Try and feed improvements into the next Sprint.
-3. **Backlog Refinement** — revisit Epic/Story/Task placement and priority in two passes: Product Vision → Epic → Story → Task structural review, then How review for each Task that passes it. Do not approve a Task's How while its own Story or Epic is still unreviewed or Revise.
-4. **Sprint Close** — confirm every unfinished Sprint item's disposition rather than letting it carry over implicitly.
-5. **Sprint Goal review** — re-evaluate the Sprint Goal in light of Review, Retrospective and Refinement, and revise it if the underlying structure changed.
-6. **Sprint Planning** — define the next Sprint's scope from the (possibly revised) Goal and include only Ready work.
+1. **Upstream Change Review** — check official primary documentation, release notes, changelogs, migration guidance and deprecation notices for the AI platforms and external services ADP currently depends on. Treat X, blogs and third-party summaries as discovery sources only; do not change Policy, Skills or Backlog until the relevant official source is confirmed. Pass confirmed changes, Watch items, Refinement Inputs and Instruction / Skill Debt signals into the rest of the loop.
+2. **Sprint Review** — review outcomes, incomplete work and blockers against the now-current external assumptions.
+3. **Retrospective** — record Keep / Problem / Try and feed improvements, including upstream-caused instruction or Skill debt, into the next Sprint.
+4. **Backlog Refinement** — revisit Epic/Story/Task placement and priority in two passes: Product Vision → Epic → Story → Task structural review, then How review for each Task that passes it. Do not approve a Task's How while its own Story or Epic is still unreviewed or Revise.
+5. **Sprint Close** — confirm every unfinished Sprint item's disposition rather than letting it carry over implicitly.
+6. **Sprint Goal review** — re-evaluate the Sprint Goal in light of Upstream Change Review, Sprint Review, Retrospective and Refinement, and revise it if the underlying structure or external assumptions changed.
+7. **Sprint Planning** — define the next Sprint's scope from the (possibly revised) Goal and include only Ready work.
 
-`cloud42-labo/skills` provides this loop as executable Skills, chained in the order above by the `weekly-sprint` Composite: `sprint-review`, `sprint-retrospective`, `backlog-refinement` (composing `hierarchical-refinement` for the structural pass and `task-approach-review` for the How pass), `sprint-close`, `sprint-goal-review` and `sprint-planning`. A Routine or Scheduler trigger for the weekly close should hold only the target Sprint/Product and the firing time, and invoke `weekly-sprint` rather than duplicate this procedure inline. Likewise, Task-start Approach Review (section 1) should invoke `task-approach-review` where available, and Human Request creation (section 11) should invoke the `human-gate-preflight` Skill, where available, as the executable procedure behind the Human Gate Pre-check in that section. Updating a live Routine/Scheduled-Task prompt's text to this reference form is Owner UI work; current progress on any one of these invocations is Notion Task state, not durable policy, so it is tracked in Notion (ADP-054) rather than here.
+`cloud42-labo/skills` provides this loop as executable Skills, chained in the order above by the `weekly-sprint` Composite: `upstream-change-review`, `sprint-review`, `sprint-retrospective`, `backlog-refinement` (composing `hierarchical-refinement` for the structural pass and `task-approach-review` for the How pass), `sprint-close`, `sprint-goal-review` and `sprint-planning`. A Routine or Scheduler trigger for the weekly close should hold only the target Sprint/Product and the firing time, and invoke `weekly-sprint` rather than duplicate this procedure inline. The `upstream-change-review` procedure must use official primary sources as its Source of Truth; if there is no material upstream change, it should return that result without creating new rules or Tasks. Likewise, Task-start Approach Review (section 1) should invoke `task-approach-review` where available, and Human Request creation (section 11) should invoke the `human-gate-preflight` Skill, where available, as the executable procedure behind the Human Gate Pre-check in that section. Updating a live Routine/Scheduled-Task prompt's text to this reference form is Owner UI work; current progress on any one of these invocations is Notion Task state, not durable policy, so it is tracked in Notion (ADP-054 / ADP-057) rather than here.
 
 ## 9. Definition of Ready
 
