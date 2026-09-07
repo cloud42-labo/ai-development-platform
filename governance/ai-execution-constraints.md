@@ -4,14 +4,16 @@ This file converts mandatory Vibe Product Development operating rules into pre-e
 
 ## New Task placement pre-flight check
 
-Before creating any new record in Notion Stories & Tasks, the acting AI MUST evaluate placement evidence **before** the create operation.
+Before creating any new record in Notion Stories & Tasks, the acting AI MUST apply the following invariant **before** the create operation.
 
-1. **Explicit Owner placement** — Did the Owner explicitly name the Product / Epic for this task?
-2. **Explicit derivation** — If not, is this task an explicit child/derivative of an existing Task or Story whose placement makes the Product / Epic / Parent Story unambiguous?
-3. **If either is true** — create the task only in that evidenced placement.
-4. **If neither is true** — do not infer placement from topic similarity. Create it as `MISC｜<title>` with `Status = Backlog`, leaving Product / Epic / Parent Story unset until Backlog Refinement.
+1. **Always enter through MISC** — every new Task is created as `MISC｜<title>` with `Status = Backlog`.
+2. **Leave formal hierarchy unset** — Product / Epic / Parent Story MUST be unset at creation time.
+3. **No direct execution state** — a newly created MISC may not be created as `Ready`, `In Progress`, `Review`, or `Human Request`, and may not receive an Approved Approach Review before formal placement.
+4. **Backlog Refinement owns placement** — only Backlog Refinement may assign Product / Epic / Parent Story, remove the `MISC｜` prefix, create a missing Epic / Story when required, and route the formally placed Task into hierarchical-refinement and task-approach-review.
+5. **No placement exceptions** — explicit Owner naming of a Product/Epic, explicit derivation from an existing Task/Story, urgency, or obvious topic similarity does not permit direct formal placement at creation time. Those facts are inputs to Backlog Refinement, not exceptions to the intake rule.
+6. **Urgent work still uses the same gate** — if the work cannot wait for the scheduled weekly refinement, create MISC / Backlog first and immediately invoke Backlog Refinement for that item. Do not bypass MISC intake.
 
-Creating first and correcting placement afterward does not satisfy this check. The placement decision is a precondition to the write operation.
+Creating first in a formal hierarchy and correcting placement afterward does not satisfy this check. The MISC intake is the required precondition to every new Task write.
 
 ## Managed-work execution pre-flight
 
@@ -134,11 +136,11 @@ Documentation of the violation is not closure. Closure requires the preventive w
 
 ## Enforcement rule
 
-Any AI workflow or Skill that creates a Stories & Tasks record MUST execute the placement pre-flight check first. Any AI workflow that performs managed work MUST execute the managed-work execution pre-flight and completion post-flight. Any AI workflow that would stop, block, de-authorize, add approval/re-review waiting, alter merge responsibility, or withhold an otherwise-Ready handoff from another AI MUST execute the AI-to-AI stop gate pre-flight first.
+Any AI workflow or Skill that creates a Stories & Tasks record MUST create it through the MISC / Backlog intake invariant above. Any AI workflow that performs managed work MUST execute the managed-work execution pre-flight and completion post-flight. Any AI workflow that would stop, block, de-authorize, add approval/re-review waiting, alter merge responsibility, or withhold an otherwise-Ready handoff from another AI MUST execute the AI-to-AI stop gate pre-flight first.
 
-A prompt such as “this looks like ADP/AOD/etc.” is not placement evidence. Only explicit Owner placement or explicit derivation from an already placed Task/Story is sufficient.
+Direct Product / Epic / Story placement at Task creation time is invalid even when the Owner named the Product/Epic or the task is an obvious derivative of an existing Story. Those facts are retained as placement evidence for Backlog Refinement only.
 
-If placement evidence is ambiguous, default to MISC / Backlog. Weekly Backlog Refinement is responsible for formal placement.
+Backlog Refinement is solely responsible for formal Task placement. If immediate execution is needed, run Backlog Refinement immediately after MISC creation rather than bypassing the intake rule.
 
 ## Related mandatory constraints
 
