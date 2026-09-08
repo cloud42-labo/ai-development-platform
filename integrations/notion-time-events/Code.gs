@@ -6,6 +6,7 @@ const DEFAULTS = {
   START_STATUS: 'In Progress',
   REVIEW_STATUS: 'Review',
   DONE_STATUS: 'Done',
+  SUPERSEDED_STATUS: 'Superseded',
   // `Stories & Tasks`.Status is a `select` property in the real database
   // schema, not Notion's distinct `status` property type — the two use
   // different filter and page-property-write shapes ({ select: { equals /
@@ -1397,9 +1398,15 @@ function isFreeOutcome_(outcome) {
   // that DID have a stray open event archived reports
   // 'archived_story_event:...' instead, which is a real write and does
   // count, the same as any other write.
+  // 'superseded_no_open_events' makes no Notion write either (a Superseded
+  // Task with nothing open to close — see enforceSupersededLifecycle_) —
+  // free to re-scan on every poll just like a duplicate or ignored outcome.
+  // A Superseded Task that DID have an open event closed reports
+  // 'closed_superseded:...' instead, which is a real write and does count.
   if (outcome === 'ignored:not_configured_task' ||
     outcome === 'done_gate_passed' ||
     outcome === 'story_excluded' ||
+    outcome === 'superseded_no_open_events' ||
     /^duplicate:/.test(String(outcome))) {
     return true;
   }
@@ -1442,6 +1449,16 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
   // completion evidence must already exist before Done is allowed to persist.
   if (currentStatus === DEFAULTS.DONE_STATUS) {
     return enforceDoneGate_(task, allEvents, openEvents);
+  }
+
+  // Superseded is a terminal outcome of its own, deliberately handled before
+  // (and never falling through to) enforceDoneGate_ — ADP-052-T05. A
+  // Superseded Task (e.g. split into replacements, see `Split From`) needs
+  // none of Done's completion evidence (Result / Completed At / an
+  // applicable closed event) and is never rolled back the way a rejected
+  // Done is: once Status reads Superseded there is nothing left to gate.
+  if (currentStatus === DEFAULTS.SUPERSEDED_STATUS) {
+    return enforceSupersededLifecycle_(task, openEvents, changedBy, snapshotId, when);
   }
 
   if (currentStatus === DEFAULTS.START_STATUS) {
@@ -2044,6 +2061,47 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     : DEFAULTS.REVIEW_STATUS;
   updateTaskStatus_(task.id, rollbackStatus);
   return 'done_gate_rejected:' + failures.join('+') + ':rollback=' + rollbackStatus;
+}
+
+// ADP-052-T05: stop timing a Task that has been superseded (e.g. split into
+// replacement Tasks via `Split From`), without routing it through Done's
+// completion gate at all — see the call site's comment for why Superseded is
+// a separate terminal outcome, never falling through to enforceDoneGate_.
+//
+// Closes every still-open Time Event using the Task's own `Closed At`, not
+// this poll's `authoritativeEditTime_`, so the recorded interval reflects
+// when the Task was actually superseded rather than whenever a later poll
+// happened to observe it. `Closed At` is written together with `Closure
+// Reason` by whoever marks a Task Superseded, before Status itself flips —
+// it is expected to already be present by the time this runs. If a poll
+// still observes Superseded before that write has landed (a race, or a
+// manual Status edit ahead of the rest), fall back to `when` exactly like
+// the ordinary Review/Blocked/Ready close does (see the `else if
+// (openEvents.length)` branch above), rather than leaving the interval open
+// indefinitely with no closing timestamp at all.
+//
+// Deliberately never writes Completed At: this reconciler does not write
+// that field for a genuine Done either (see enforceDoneGate_) — Superseded
+// is not Done, so nothing here should start populating it just because the
+// Task terminated a different way.
+//
+// closeNotionTimeEvent_ only appends a close marker via appendNote_, the
+// same mechanism the ordinary non-active-status close already uses (never
+// rewriting or clearing prior fields) — so whatever Execution=/Task
+// Origin=/prior evidence the event already carries is preserved exactly as
+// the ordinary path preserves it. A Task created from this one via `Split
+// From` starts with no Time Events of its own at all, so there is nothing
+// for it to inherit by construction: this function intentionally adds no
+// Split-From-aware copying/inheritance logic between the two pages.
+function enforceSupersededLifecycle_(task, openEvents, changedBy, snapshotId, when) {
+  if (!openEvents || !openEvents.length) return 'superseded_no_open_events';
+
+  const closedAt = propertyDate_(task.properties['Closed At']) || when;
+  const actions = openEvents.map(function (eventPage) {
+    closeNotionTimeEvent_(eventPage, DEFAULTS.SUPERSEDED_STATUS, changedBy, snapshotId, closedAt, 'task_superseded_split');
+    return 'closed_superseded:' + eventPage.id;
+  });
+  return actions.join(',');
 }
 
 function resultFingerprint_(resultText) {
