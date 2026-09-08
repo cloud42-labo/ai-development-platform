@@ -1055,6 +1055,141 @@ function backfillStoryExclusion_() {
   });
 }
 
+// Operator escape hatch for an EXISTING LIVE DEPLOYMENT being upgraded to add
+// enforceSupersededLifecycle_ (ADP-052-T05) — Codex-reported gap (P1): the
+// ordinary incremental poll only ever reconciles a Task whose
+// `last_edited_time` is at or after the stored cursor. A Task that already
+// became `Superseded` (and, critically, was left with an open Time Event)
+// BEFORE this revision was deployed has a `last_edited_time` the cursor has
+// already advanced past — `pollTaskChanges`'s ordinary incremental query
+// never reaches it again, and the one-time fresh-deploy bootstrap only ever
+// covers `Status = In Progress` Tasks, not `Superseded` ones. That legacy
+// open event would otherwise stay Active indefinitely, continuing to
+// inflate Active-hour totals, unless some unrelated future edit happens to
+// touch that exact Task page. Run this once, immediately after deploying
+// this revision, to close every already-Superseded Task's stray open
+// event(s) up front — the same "upgrade backfill" pattern already used for
+// the Story exclusion (`backfillStoryExclusion_`) and provenance marker
+// (`backfillTaskOriginProvenance_`) revisions. A fresh deployment has no
+// pre-existing Superseded history and can skip this (or run it against an
+// empty result, harmlessly).
+//
+// `bypassDedup: true` — same reason as `backfillStoryExclusion_`'s identical
+// flag: a legacy Superseded Task's own Notion page hasn't changed since
+// before this revision, so its reconciliation snapshot was already logged
+// under the OLD code (which had no Superseded branch at all) — without
+// bypassing dedup, `reconcileTaskPage_`'s ordinary `hasProcessedSnapshot_`
+// check would return `duplicate:` immediately and this backfill's whole
+// purpose (actually reaching `enforceSupersededLifecycle_` for these Tasks)
+// would never fire. `reconcileAuthoritativeTimeEvents_`'s Superseded branch
+// is itself fully idempotent (a Task with nothing open reports
+// `superseded_no_open_events`, a free outcome — see `isFreeOutcome_`), so
+// bypassing dedup here only ever costs an extra, harmless re-check for a
+// Superseded Task with nothing left to close.
+//
+// Resumable and pagination-bounded via the identical position-based
+// tie-offset pattern `backfillStoryExclusion_` uses (see its own comment for
+// the full rationale) — not the more expensive ID-based tie tracking
+// `backfillTaskOriginProvenance_` needs. That extra cost exists there only
+// because silently skipping a page has an asymmetric, irreversible
+// consequence (permanently misclassifying genuine history as archivable
+// once `TASK_ORIGIN_BACKFILL_COMPLETE` latches true) — this backfill has no
+// equivalent one-shot completion flag and no such asymmetry: a Superseded
+// Task silently skipped by one call's tie-offset stays exactly as
+// reachable — and exactly as safely re-processable — on every subsequent
+// call, the same recoverable gap `backfillStoryExclusion_` itself accepts.
+function backfillSupersededTasks_() {
+  return withPollLock_(function () {
+    const runStartedAt = new Date();
+    const props = PropertiesService.getScriptProperties();
+    const resumeCursor = props.getProperty('SUPERSEDED_BACKFILL_RESUME_CURSOR');
+    const tieOffset = resumeCursor ? Number(props.getProperty('SUPERSEDED_BACKFILL_RESUME_TIE_OFFSET') || '0') : 0;
+    const filter = resumeCursor
+      ? { and: [
+          { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.SUPERSEDED_STATUS } },
+          { timestamp: 'last_edited_time', last_edited_time: { on_or_after: resumeCursor } },
+        ] }
+      : { property: 'Status', [DEFAULTS.STATUS_PROPERTY_TYPE]: { equals: DEFAULTS.SUPERSEDED_STATUS } };
+    function tieOffsetStartIndex_(results) {
+      let index = 0;
+      if (resumeCursor && tieOffset > 0) {
+        let skipped = 0;
+        while (
+          index < results.length &&
+          skipped < tieOffset &&
+          String(results[index].last_edited_time || '') === resumeCursor
+        ) {
+          skipped++;
+          index++;
+        }
+      }
+      return index;
+    }
+    const result = paginateNotionQuery_(
+      '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+      {
+        page_size: 100,
+        filter: filter,
+        sorts: [{ timestamp: 'last_edited_time', direction: 'ascending' }],
+      },
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS / 2,
+      runStartedAt.getTime() + MAX_RUN_DURATION_MS - MIN_PROCESSING_RESERVE_MS,
+      function (results) { return tieOffsetStartIndex_(results) < results.length; }
+    );
+    const startIndex = tieOffsetStartIndex_(result.results);
+    const toProcess = result.results.slice(startIndex);
+
+    const outcomes = [];
+    let iterated = 0;
+    while (
+      iterated < toProcess.length &&
+      (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
+    ) {
+      outcomes.push(reconcileTaskPage_(toProcess[iterated], { bypassDedup: true }));
+      iterated++;
+    }
+    const timedOut = iterated < toProcess.length;
+    const processed = toProcess.slice(0, iterated);
+
+    if ((result.truncated || timedOut) && processed.length) {
+      const lastSeen = String(processed[processed.length - 1].last_edited_time || '');
+      if (lastSeen) {
+        props.setProperty('SUPERSEDED_BACKFILL_RESUME_CURSOR', lastSeen);
+        let newTieOffset = 0;
+        for (let i = 0; i < processed.length; i++) {
+          newTieOffset = String(processed[i].last_edited_time || '') === lastSeen ? newTieOffset + 1 : 0;
+        }
+        const cumulativeTieOffset = (lastSeen === resumeCursor ? tieOffset : 0) + newTieOffset;
+        props.setProperty('SUPERSEDED_BACKFILL_RESUME_TIE_OFFSET', String(cumulativeTieOffset));
+      }
+      Logger.log(
+        'backfillSupersededTasks_: stopped at the ' +
+        (timedOut ? 'wall-clock bound' : 'pagination safety limit') +
+        ' after reconciling ' + iterated + ' of ' + result.results.length +
+        ' Superseded Task(s) this call — call again to resume' +
+        (processed.length ? ' from ' + processed[processed.length - 1].last_edited_time : '') + '.'
+      );
+    } else if (result.truncated || timedOut) {
+      // Stopped with nothing new processed this call (the whole returned
+      // batch was already covered by the tie-offset skip): leave the resume
+      // state exactly as it was rather than losing the resume point.
+    } else {
+      // Fully drained: clear any stale resume point so a future call starts
+      // a fresh full pass.
+      props.setProperty('SUPERSEDED_BACKFILL_RESUME_CURSOR', '');
+      props.setProperty('SUPERSEDED_BACKFILL_RESUME_TIE_OFFSET', '');
+    }
+
+    return {
+      scanned: result.results.length,
+      processed: iterated,
+      truncated: result.truncated,
+      timedOut: timedOut,
+      outcomes: outcomes,
+    };
+  });
+}
+
 // Operator escape hatch for an EXISTING LIVE DEPLOYMENT being upgraded to
 // add the `Task Origin=` provenance marker (see
 // eventWasTouchedDuringTaskExecution_): flags every pre-existing Time
@@ -2098,7 +2233,20 @@ function enforceSupersededLifecycle_(task, openEvents, changedBy, snapshotId, wh
 
   const closedAt = propertyDate_(task.properties['Closed At']) || when;
   const actions = openEvents.map(function (eventPage) {
-    closeNotionTimeEvent_(eventPage, DEFAULTS.SUPERSEDED_STATUS, changedBy, snapshotId, closedAt, 'task_superseded_split');
+    // Clamped to never precede this event's own Started At — Codex-reported
+    // gap: `Closed At` is Human/process-entered data (or a stale value on
+    // an existing deployment), not something this script controls the way
+    // it controls `when`, so it can legitimately predate an event that
+    // opened after `Closed At` was recorded (or was never refreshed).
+    // Closing at an earlier `Closed At` in that case would set `Ended At`
+    // before `Started At` — a negative duration in Notion and the Sheet
+    // projection. Same clamp pattern as reconcileStoryTask_'s
+    // boundaryNoEarlierThanStart (ambiguous/Task-era Story-conversion
+    // closes) and archiveEvent-adjacent boundaries elsewhere in this file.
+    const boundaryNoEarlierThanStart = closedAt.getTime() >= eventStartedAt_(eventPage).getTime()
+      ? closedAt
+      : eventStartedAt_(eventPage);
+    closeNotionTimeEvent_(eventPage, DEFAULTS.SUPERSEDED_STATUS, changedBy, snapshotId, boundaryNoEarlierThanStart, 'task_superseded_split');
     return 'closed_superseded:' + eventPage.id;
   });
   return actions.join(',');

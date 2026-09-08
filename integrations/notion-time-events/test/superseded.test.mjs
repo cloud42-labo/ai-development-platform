@@ -219,6 +219,34 @@ test('Superseded preserves prior Execution=/Task Origin= evidence already on the
   assert.match(note, /Reason=task_superseded_split/);
 });
 
+test('closing a Superseded event is clamped to never precede the event\'s own Started At', () => {
+  // Codex-reported gap (P2): Closed At is Human/process-entered (or stale
+  // legacy) data, not something this script controls the way it controls
+  // `when` — it can predate an event that opened after Closed At was
+  // recorded. Closing at the raw Closed At in that case would set
+  // Ended At before Started At, a negative duration.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Superseded',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T09:00:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+      closedAt: '2026-08-30T05:00:00.000Z', // predates the event's own Started At below
+    })],
+    events: [
+      eventPage('evt-claude', { actor: 'Claude', startedAt: '2026-08-30T05:10:00.000Z' }),
+    ],
+  });
+
+  sandbox.pollTaskChanges();
+
+  const closes = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-claude');
+  const body = JSON.parse(closes[0].options.payload);
+  // Clamped to the event's own Started At, not the earlier Closed At.
+  assert.equal(body.properties['Ended At'].date.start, '2026-08-30T05:10:00.000Z');
+});
+
 test('a Story reaching Superseded is still excluded the same way as any other Story Status (BUG-ADP-TTE-01), not routed through enforceSupersededLifecycle_', () => {
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
   const { sandbox, fetchLog } = harness({
@@ -250,4 +278,159 @@ test('a Story reaching Superseded is still excluded the same way as any other St
   const note = payload.properties.Note.rich_text[0].text.content;
   assert.match(note, /Reason=story_excluded/);
   assert.doesNotMatch(note, /task_superseded_split/);
+});
+
+// --- backfillSupersededTasks_ (Codex-reported gap, P1) -----------------------------
+//
+// On an existing live deployment, a Task that became Superseded BEFORE this
+// revision was deployed has a last_edited_time the ordinary incremental
+// poll's cursor has already advanced past — reconcileAuthoritativeTimeEvents_'s
+// new Superseded branch is never reached for it, leaving any open Time Event
+// stray forever unless an unrelated future edit happens to touch that exact
+// page. backfillSupersededTasks_ is the one-time (or re-run-to-convergence)
+// operator escape hatch that closes those out, mirroring
+// backfillStoryExclusion_'s pattern.
+
+test('backfillSupersededTasks_ closes a legacy Superseded Task\'s stray open event, regardless of how stale its last_edited_time is', () => {
+  // pollTaskChanges' ordinary incremental query only ever selects a page
+  // whose last_edited_time is at or after the stored cursor (see
+  // queryChangedTasks_) — a Task that has sat Superseded, untouched, since
+  // long before this revision was deployed is never re-selected by it, no
+  // matter how long this reconciler keeps running afterward. This backfill's
+  // query has no such constraint (on a fresh/no-resume-cursor call), so it
+  // reaches it regardless of staleness — the same structural fix
+  // backfillStoryExclusion_ already applies for old Story pages.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Superseded',
+      agent: 'Claude Opus',
+      lastEdited: '2026-01-01T09:00:00.000Z', // years-stale relative to any realistic poll cursor
+      startedAt: '2026-01-01T05:10:00.000Z',
+      closedAt: '2026-01-01T06:00:00.000Z',
+    })],
+    events: [eventPage('evt-legacy', { actor: 'Claude', startedAt: '2026-01-01T05:10:00.000Z' })],
+  });
+
+  const summary = sandbox.backfillSupersededTasks_();
+
+  assert.match(summary.outcomes[0], /^closed_superseded:evt-legacy$/);
+  const closes = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-legacy');
+  assert.equal(closes.length, 1);
+  assert.equal(JSON.parse(closes[0].options.payload).properties['Ended At'].date.start, '2026-01-01T06:00:00.000Z');
+});
+
+test('backfillSupersededTasks_ queries Status=Superseded with a select filter, not status', () => {
+  let seenFilter = null;
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      seenFilter = body.filter;
+      return { results: [], has_more: false };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  sandbox.backfillSupersededTasks_();
+
+  assert.deepEqual(seenFilter, { property: 'Status', select: { equals: 'Superseded' } });
+});
+
+test('backfillSupersededTasks_ is a free re-scan once a legacy Task has already been closed out', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Superseded',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-20T09:00:00.000Z',
+      startedAt: '2026-08-20T05:10:00.000Z',
+      closedAt: '2026-08-20T06:00:00.000Z',
+    })],
+    events: [],
+  });
+
+  sandbox.backfillSupersededTasks_();
+  const mutationsAfterFirst =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+
+  const second = sandbox.backfillSupersededTasks_();
+
+  // bypassDedup means this genuinely re-runs the Superseded branch rather
+  // than short-circuiting on `duplicate:` — free either way, since there is
+  // nothing left open to close.
+  assert.equal(second.outcomes[0], 'superseded_no_open_events');
+  const mutationsAfterSecond =
+    requestsTo(fetchLog, 'POST', '/v1/pages').length + requestsTo(fetchLog, 'PATCH', '/v1/pages').length;
+  assert.equal(mutationsAfterSecond, mutationsAfterFirst);
+});
+
+test('backfillSupersededTasks_ resumes past a truncated prefix using the persisted cursor, not re-fetching it forever', () => {
+  let pageCalls = 0;
+  const seenFilters = [];
+  const routes = {
+    [TASKS_QUERY]: (body) => {
+      pageCalls += 1;
+      seenFilters.push(body.filter);
+      // Force paginateNotionQuery_'s own truncation (QUERY_PAGE_SAFETY_LIMIT
+      // = 50 pages) by always claiming more exist, one Task per page.
+      const idx = pageCalls;
+      const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d' + String(idx).padStart(4, '0'), {
+        status: 'Superseded',
+        agent: 'Claude Opus',
+        lastEdited: '2026-08-01T00:' + String(idx).padStart(2, '0') + ':00.000Z',
+        startedAt: '2026-08-01T00:00:00.000Z',
+      });
+      return { results: [task], has_more: true, next_cursor: 'cursor-' + idx };
+    },
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    'POST /v1/pages': () => ({ id: 'evt-created' }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' },
+    fetch: notionFetchStub(routes),
+  });
+
+  const firstRun = sandbox.backfillSupersededTasks_();
+
+  assert.equal(firstRun.truncated, true);
+  assert.equal(firstRun.scanned, 50); // QUERY_PAGE_SAFETY_LIMIT
+  assert.deepEqual(seenFilters[0], { property: 'Status', select: { equals: 'Superseded' } }); // first call: no resume clause yet
+  const resumeCursor = scriptProps.get('SUPERSEDED_BACKFILL_RESUME_CURSOR');
+  assert.ok(resumeCursor, 'expected a resume cursor to be persisted after a truncated backfill');
+
+  sandbox.backfillSupersededTasks_();
+
+  const secondCallFilter = seenFilters[seenFilters.length - 50];
+  assert.ok(secondCallFilter.and, 'expected the resumed call to use a compound and-filter');
+  const onOrAfterClause = secondCallFilter.and.find((f) => f.timestamp === 'last_edited_time');
+  assert.equal(onOrAfterClause.last_edited_time.on_or_after, resumeCursor);
+});
+
+test('backfillSupersededTasks_ clears its resume cursor once fully drained', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f03';
+  const { sandbox, scriptProps } = harness({
+    scriptProperties: { SUPERSEDED_BACKFILL_RESUME_CURSOR: '2026-08-01T00:00:00.000Z', SUPERSEDED_BACKFILL_RESUME_TIE_OFFSET: '3' },
+    tasks: [taskPage(taskId, {
+      status: 'Superseded',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T09:00:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+      closedAt: '2026-08-30T06:00:00.000Z',
+    })],
+    events: [],
+  });
+
+  const summary = sandbox.backfillSupersededTasks_();
+
+  assert.equal(summary.truncated, false);
+  assert.equal(scriptProps.get('SUPERSEDED_BACKFILL_RESUME_CURSOR'), '');
+  assert.equal(scriptProps.get('SUPERSEDED_BACKFILL_RESUME_TIE_OFFSET'), '');
 });
