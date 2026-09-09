@@ -36,7 +36,7 @@ schema_version: 0.1.0-experimental
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 2.0.0
+rules_version: 3.0.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -264,3 +264,23 @@ migration_path:
       locally. An adopter with an existing `AI Work Sessions`-equivalent
       database may keep its historical rows for audit purposes; this bump
       only removes the requirement to keep writing new ones.
+  - field: rules_version
+    from: "2.0.0"
+    to: "3.0.0"
+    date: "2026-09-05"
+    change: >-
+      ADP-056: reviewer availability failure no longer forces an indefinite
+      stop when another independent reviewer exists; the exact reviewed SHA
+      must equal the merge head; and review-loop cost is bounded by an
+      Approach Refinement trigger at round 3 and a default hard cap at round
+      5. MAJOR because this deliberately loosens the prior Codex-specific
+      review gate while changing previously-compliant repeated-review
+      behavior into a refinement requirement.
+    action_required: >-
+      Adopters must preserve Author != Reviewer, record fallback evidence,
+      verify the exact reviewed SHA again immediately before merge, and must
+      stop patch-by-patch review after three repeated same-area finding
+      rounds. A sixth substantive automated review requires explicit Owner
+      approval; otherwise return to Approach Refinement, split the PR, or
+      redesign the change. Reviewer usage limits do not authorize paid
+      capacity changes without Owner approval.
