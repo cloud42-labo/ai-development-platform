@@ -178,12 +178,18 @@ test('an open Time Event takes precedence over a stray Completed At -- ordinary 
     completedAt: '2026-09-07T00:00:00.000Z',
   });
   const openEvent = eventPage('evt-open', { actor: 'Claude', startedAt: '2026-09-08T04:31:00.000Z' });
-  const { sandbox, fetchLog } = harness({ tasks: [task], events: [openEvent] });
+  const { sandbox, fetchLog, scriptProps } = harness({ tasks: [task], events: [openEvent] });
 
   const summary = sandbox.pollTaskChanges();
 
-  assert.match(summary.outcomes[0], /^already_open:evt-open$/);
+  // The open event still takes precedence -- no write either way -- but
+  // reconcileStaleCompletionEvidence_ now also reports its own defer
+  // outcome (Codex, PR #43: this Task must be requeued for a later recheck
+  // rather than silently dropped) alongside the ordinary In Progress
+  // handling's own outcome.
+  assert.match(summary.outcomes[0], /^stale_completion_evidence_deferred:open_time_event,already_open:evt-open$/);
   assert.equal(fetchLog.filter((entry) => (entry.options && entry.options.method) === 'patch').length, 0);
+  assert.deepEqual(JSON.parse(scriptProps.get('STALE_COMPLETION_RETRY_IDS')), [TASK_ID]);
 });
 
 test('a Task with no completion evidence at all is unaffected (no false positive)', () => {
@@ -460,4 +466,140 @@ test('a retry-tracked Task is re-checked by direct fetch once it no longer appea
     'expected the retry-fetched Task to be promoted: ' + JSON.stringify(summary2.outcomes)
   );
   assert.deepEqual(JSON.parse(second.scriptProps.get('STALE_COMPLETION_RETRY_IDS')), []);
+});
+
+// --- Codex, PR #43 (round 2): bound and correctly index retry-set work ---
+
+test('retry-set reconciliation is bounded by its own wall-clock budget and rotates unattempted ids to the front for next run', () => {
+  const baseProps = { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' };
+  const idA = '3d5fbd82-6f3b-8138-833f-dbd841a2c3a1';
+  const idB = '3d5fbd82-6f3b-8138-833f-dbd841a2c3a2';
+  const idC = '3d5fbd82-6f3b-8138-833f-dbd841a2c3a3';
+
+  function stuckTaskFor(id) {
+    // closedAt present, completedAt missing -> always evaluates unresolved,
+    // regardless of when it's checked, so this test can isolate the retry
+    // loop's own bounding/rotation behavior from evidence evaluation.
+    return taskPage(id, {
+      status: 'Review',
+      agent: 'Claude Sonnet',
+      lastEdited: '2026-09-08T05:00:00.000Z',
+      startedAt: '2026-09-08T04:31:00.000Z',
+      result: 'published',
+      closedAt: '2026-09-08T04:50:00.000Z',
+    });
+  }
+
+  const getCalls = [];
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [], has_more: false }),
+    ['GET /v1/pages/' + idA]: () => { getCalls.push('A'); return stuckTaskFor(idA); },
+    ['GET /v1/pages/' + idB]: () => { getCalls.push('B'); return stuckTaskFor(idB); },
+    ['GET /v1/pages/' + idC]: () => { getCalls.push('C'); return stuckTaskFor(idC); },
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+
+  // The retry loop must always attempt at least its first id (runStartedAt
+  // itself, captured on the very first Date access) regardless of the
+  // clock; every access after that returns a moment 10 minutes later, far
+  // past RETRY_RECONCILE_BUDGET_MS (60s) -- so id A is attempted, and the
+  // loop must stop there rather than also attempting B or C.
+  const BASE = Date.parse('2026-09-09T00:00:00.000Z');
+  let dateCalls = 0;
+  const now = () => {
+    dateCalls += 1;
+    return dateCalls === 1 ? BASE : BASE + 10 * 60 * 1000;
+  };
+
+  const { scriptProps, sandbox } = loadCodeGsSandbox({
+    scriptProperties: Object.assign({}, baseProps, {
+      STALE_COMPLETION_RETRY_IDS: JSON.stringify([idA, idB, idC]),
+      LAST_SYNC_CURSOR: '2026-09-08T05:00:00.000Z',
+      BOOTSTRAP_ACTIVE_DONE: '1',
+    }),
+    fetch: notionFetchStub(routes),
+    now,
+  });
+
+  sandbox.pollTaskChanges();
+
+  assert.deepEqual(getCalls, ['A'], 'only the first retry-set id should be fetched once the budget is exhausted');
+  assert.deepEqual(
+    JSON.parse(scriptProps.get('STALE_COMPLETION_RETRY_IDS')),
+    [idB, idC, idA],
+    'ids the budget never reached (B, C) rotate to the front; the attempted-but-still-unresolved id (A) moves to the back'
+  );
+});
+
+test('outcomes are correctly aligned to a resumed slice of tasksToProcess when finalizing the retry set', () => {
+  // Regression for Codex round 2: outcomes[] is 0-indexed from startIndex,
+  // not from 0. A prior capped run leaves LAST_SYNC_CURSOR_TIE_OFFSET set,
+  // which makes THIS run's startIndex > 0 -- the finalize step must read
+  // outcomes[i - startIndex], not outcomes[i], or it associates the wrong
+  // Task with the wrong outcome. Made observable here by giving the
+  // resumed Task an *unresolved* (not promoted) outcome: the old,
+  // misaligned code would read tasksToProcess[0]'s (idSkip's, never
+  // actually reconciled) slot as outcomes[0] -- which is really
+  // idResumed's unresolved outcome -- wrongly queuing idSkip, while
+  // tasksToProcess[1] (idResumed itself) reads outcomes[1], out of bounds
+  // (undefined), so the Task that IS genuinely unresolved never gets
+  // queued at all.
+  const tiedEdit = '2026-09-08T05:00:00.000Z';
+  // idSkip shares the tied cursor timestamp and is the one member the tie
+  // offset (1) already covers -- present in tasksToProcess but never
+  // actually reconciled this run.
+  const idSkip = '3d5fbd82-6f3b-8138-833f-dbd841a2c3a4';
+  // idResumed is the Task this run actually reconciles, immediately after
+  // the tie-skip. Completed At is deliberately missing, so its real
+  // outcome is stale_completion_evidence_unresolved:, not a promotion.
+  const idResumed = '3d5fbd82-6f3b-8138-833f-dbd841a2c3a5';
+
+  const taskSkip = taskPage(idSkip, {
+    status: 'Blocked',
+    agent: 'Claude Sonnet',
+    lastEdited: tiedEdit,
+    startedAt: '2026-09-08T04:00:00.000Z',
+  });
+  const taskResumed = taskPage(idResumed, {
+    status: 'Review',
+    agent: 'Claude Sonnet',
+    lastEdited: tiedEdit,
+    startedAt: '2026-09-08T04:31:00.000Z',
+    result: 'published',
+    closedAt: '2026-09-08T04:50:00.000Z',
+  });
+  const closedEvent = eventPage('evt-resumed', {
+    actor: 'Claude',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    endedAt: '2026-09-08T04:45:00.000Z',
+  });
+
+  const routes = {
+    [TASKS_QUERY]: () => ({ results: [taskSkip, taskResumed], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [closedEvent], has_more: false }),
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const { sandbox, scriptProps } = loadCodeGsSandbox({
+    scriptProperties: {
+      NOTION_TOKEN: 'test-token',
+      SPREADSHEET_ID: 'test-sheet',
+      LAST_SYNC_CURSOR: tiedEdit,
+      LAST_SYNC_CURSOR_TIE_OFFSET: '1',
+      BOOTSTRAP_ACTIVE_DONE: '1',
+    },
+    fetch: notionFetchStub(routes),
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.outcomes.length, 1, 'the tie-skipped Task must not be reconciled or reported at all: ' + JSON.stringify(summary.outcomes));
+  assert.match(summary.outcomes[0], /^stale_completion_evidence_unresolved:missing_completed_at$/);
+  assert.deepEqual(
+    JSON.parse(scriptProps.get('STALE_COMPLETION_RETRY_IDS') || '[]'),
+    [idResumed],
+    'the genuinely unresolved Task (idResumed) must be queued -- and the never-reconciled idSkip must not be'
+  );
 });

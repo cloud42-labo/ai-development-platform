@@ -80,6 +80,14 @@ const MAX_TASKS_PER_RUN = 25;
 // already produces — rather than risking an unrecoverable mid-scan kill.
 const MAX_RUN_DURATION_MS = 4 * 60 * 1000;
 
+// How much of MAX_RUN_DURATION_MS pollTaskChanges' STALE_COMPLETION_RETRY_IDS
+// recheck is allowed to spend before the ordinary tasksToProcess loop even
+// starts (see the comment at that recheck's call site). Deliberately a
+// fraction of MAX_RUN_DURATION_MS, not the whole thing: retry-set work must
+// never be able to consume the entire run budget and leave nothing for
+// ordinary reconciliation, which is this mechanism's whole reason to exist.
+const RETRY_RECONCILE_BUDGET_MS = 60 * 1000;
+
 // How much of MAX_RUN_DURATION_MS backfillResultFingerprints_ always reserves
 // for actually processing and checkpointing whatever pagination retrieved,
 // even while its pagination phase is escalating past the primary half-budget
@@ -215,17 +223,17 @@ function pollTaskChanges() {
     const sourceTruncated = changedResult.truncated || Boolean(activeResult && activeResult.truncated);
 
     // BUG-ADP-STATUS-01 (Codex, PR #43, AC9): reconcileStaleCompletionEvidence_'s
-    // own "unresolved" finding makes no Notion write, so nothing about the
-    // page is ever re-edited by it — once LAST_SYNC_CURSOR advances past the
-    // Task's last_edited_time by more than SYNC_OVERLAP_MS, queryChangedTasks_
-    // alone stops returning it at all, silently ending AC9's "must keep
-    // surfacing every poll until resolved" guarantee for any Status other
-    // than In Progress (queryActiveInProgressTasks_ already covers that one
-    // continuously, by Status rather than last_edited_time). STALE_
-    // COMPLETION_RETRY_IDS is a small, self-maintaining set of Task IDs
-    // known to be in that state, re-checked by a direct per-ID fetch every
-    // poll — not a second broad database query, so a backlog with zero open
-    // anomalies costs nothing extra — and kept entirely OUT of
+    // own "unresolved"/"deferred" findings make no Notion write, so nothing
+    // about the page is ever re-edited by them — once LAST_SYNC_CURSOR
+    // advances past the Task's last_edited_time by more than SYNC_OVERLAP_MS,
+    // queryChangedTasks_ alone stops returning it at all, silently ending
+    // AC9's "must keep surfacing every poll until resolved" guarantee for
+    // any Status other than In Progress (queryActiveInProgressTasks_ already
+    // covers that one continuously, by Status rather than last_edited_time).
+    // STALE_COMPLETION_RETRY_IDS is a small, self-maintaining set of Task
+    // IDs known to be in that state, re-checked by a direct per-ID fetch
+    // every poll — not a second broad database query, so a backlog with
+    // zero open anomalies costs nothing extra — and kept entirely OUT of
     // tasksToProcess/LAST_SYNC_CURSOR's own bookkeeping below, which exists
     // solely to track queryChangedTasks_'s incremental window. A fetch
     // failure (deleted/archived page, or a transient error) simply leaves
@@ -234,17 +242,37 @@ function pollTaskChanges() {
     // later poll instead of silently forgotten. Membership is finalized
     // below, once this run's own outcomes (both this and the ordinary
     // tasksToProcess path) are known.
+    //
+    // Bounded by its own wall-clock slice, separate from MAX_TASKS_PER_RUN/
+    // MAX_RUN_DURATION_MS which only ever guard the ordinary tasksToProcess
+    // loop below (Codex, PR #43): without this, a retry set large enough to
+    // matter could run this direct-fetch loop past Apps Script's actual
+    // execution limit before the ordinary loop even starts or any
+    // checkpoint is written — starving every changed Task this run and
+    // repeating the identical retry-set prefix next time with zero
+    // progress. Never cut off before at least one id is attempted (mirrors
+    // paginateNotionQuery_'s own "never stop before the first page" rule),
+    // and any id this budget never reaches is simply left for next run —
+    // finalized below via priorRetryIds/retryAttempted, not by resetting the
+    // whole set.
     const priorRetryIds = readStaleCompletionRetryIds_(props);
     const retryOutcomeById = {};
-    priorRetryIds.forEach(function (id) {
+    const retryDeadlineMs = runStartedAt.getTime() + RETRY_RECONCILE_BUDGET_MS;
+    let retryAttempted = 0;
+    while (
+      retryAttempted < priorRetryIds.length &&
+      (retryAttempted === 0 || Date.now() < retryDeadlineMs)
+    ) {
+      const id = priorRetryIds[retryAttempted];
+      retryAttempted++;
       let page;
       try {
         page = retrieveNotionPage_(id);
       } catch (e) {
-        return;
+        continue;
       }
       if (page && page.id) retryOutcomeById[id] = reconcileTaskPage_(page);
-    });
+    }
 
     // A capped run (MAX_TASKS_PER_RUN or MAX_RUN_DURATION_MS) can stop
     // partway through a group of Tasks that all share the exact same
@@ -379,27 +407,37 @@ function pollTaskChanges() {
       }
     }
 
-    // Finalize STALE_COMPLETION_RETRY_IDS from this run's actual outcomes:
-    // start from what was already tracked, apply the retry-fetch path's own
-    // results, then let the ordinary tasksToProcess path (which runs after
-    // and so reflects the most current re-check when a Task appears via
-    // both paths in the same run) have the final say. Only Tasks actually
-    // reconciled this run change membership at all; anything skipped by
-    // either path this run (fetch failed, or capped out of tasksToProcess)
-    // carries forward exactly as it was.
-    const nextRetrySet = {};
-    priorRetryIds.forEach(function (id) { nextRetrySet[id] = true; });
-    Object.keys(retryOutcomeById).forEach(function (id) {
-      if (/^stale_completion_evidence_unresolved:/.test(retryOutcomeById[id])) nextRetrySet[id] = true;
-      else delete nextRetrySet[id];
+    // Finalize STALE_COMPLETION_RETRY_IDS from this run's actual outcomes.
+    // Order matters here, not just membership (Codex, PR #43): an id this
+    // run's retry budget never reached (priorRetryIds[retryAttempted..]) is
+    // put FIRST for next run, so a retry set larger than one run's budget
+    // rotates through every member instead of the same leading ids
+    // starving whatever is behind them forever. Ids the budget did attempt
+    // move to the back, kept only if still unresolved/deferred.
+    const IS_RETRYABLE_OUTCOME = /^stale_completion_evidence_(unresolved|deferred):/;
+    const unattemptedRetryIds = priorRetryIds.slice(retryAttempted);
+    const stillPendingFromRetry = priorRetryIds.slice(0, retryAttempted).filter(function (id) {
+      return retryOutcomeById[id] && IS_RETRYABLE_OUTCOME.test(retryOutcomeById[id]);
     });
-    for (let i = 0; i < iterated; i++) {
+    const nextRetryIds = unattemptedRetryIds.concat(stillPendingFromRetry);
+    // The ordinary tasksToProcess path runs after the retry-fetch path
+    // above and reflects the most current re-check when a Task appears via
+    // both in the same run, so it has the final say. `outcomes` is
+    // 0-indexed from `startIndex`, NOT from 0 (a resumed capped run has
+    // startIndex > 0) — outcomes[i - startIndex] is tasksToProcess[i]'s own
+    // result; indexing outcomes[i] directly here misaligned every lookup
+    // whenever a run resumed mid-window (Codex, PR #43).
+    for (let i = startIndex; i < iterated; i++) {
       const id = tasksToProcess[i].id;
-      if (/^stale_completion_evidence_unresolved:/.test(outcomes[i])) nextRetrySet[id] = true;
-      else delete nextRetrySet[id];
+      const outcome = outcomes[i - startIndex];
+      const idx = nextRetryIds.indexOf(id);
+      if (IS_RETRYABLE_OUTCOME.test(outcome)) {
+        if (idx === -1) nextRetryIds.push(id);
+      } else if (idx !== -1) {
+        nextRetryIds.splice(idx, 1);
+      }
     }
-    const nextRetryIds = Object.keys(nextRetrySet).sort();
-    if (JSON.stringify(nextRetryIds) !== JSON.stringify(priorRetryIds.slice().sort())) {
+    if (JSON.stringify(nextRetryIds) !== JSON.stringify(priorRetryIds)) {
       props.setProperty('STALE_COMPLETION_RETRY_IDS', JSON.stringify(nextRetryIds));
     }
 
@@ -1522,7 +1560,13 @@ function isFreeOutcome_(outcome) {
   // reconcileStaleCompletionEvidence_) is free by the identical reasoning: an
   // ambiguous/incomplete stale-evidence finding makes no Notion write, so
   // reporting it rather than silently dropping it must not itself cost
-  // reconciliation budget. 'stale_status_promoted_to_done:...' is
+  // reconciliation budget. 'stale_completion_evidence_deferred:...' is the
+  // same by itself (an open-Time-Event defer makes no write of its own) —
+  // but it commonly appears joined with a real write from the ordinary
+  // Status-driven handling that runs right after it in the same call (e.g.
+  // closing that very event), which correctly still counts since not every
+  // joined segment matches a free prefix in that case.
+  // 'stale_status_promoted_to_done:...' is
   // deliberately NOT listed here: it writes Status=Done (and stamps the
   // Result fingerprint), a real mutation that must count like any other
   // write, the same distinction as 'done_gate_passed' (free) vs.
@@ -1531,6 +1575,7 @@ function isFreeOutcome_(outcome) {
     'skipped_ambiguous_pre_upgrade_provenance:',
     'skipped_pending_provenance_backfill:',
     'stale_completion_evidence_unresolved:',
+    'stale_completion_evidence_deferred:',
   ];
   const segments = String(outcome).split(',');
   return segments.length > 0 && segments.every(function (segment) {
@@ -2204,12 +2249,10 @@ function enforceDoneGate_(task, allEvents, openEvents) {
 // (AGENTS.md "Completion") requires Status/Result/Completed At/Time-Event
 // close to be written together as one act, but a partial write (evidence
 // recorded, Status left stale) is a real, repeatedly observed failure mode,
-// not a hypothetical one: SPOT-03-S03 (and its two Subtasks),
-// HUMAN-AOD-007-2 (both the canonical page and its duplicate),
-// HUMAN-AOD-008-1, HUMAN-AOD-03-S02-T04, and SPOT-PLAN-02 were all found
-// stuck exactly this way and manually corrected in Notion on 2026-09-09 —
-// this function is the automated version of that same, otherwise-manual,
-// correction.
+// not a hypothetical one — concrete instances, their Task IDs, and the
+// dates they were found live in Notion, not here (AGENTS.md "Source-of-
+// truth rules"). This function is the automated version of what was, until
+// now, a manual correction each time.
 //
 // Deliberately reuses evaluateDoneEvidence_ rather than inventing a second,
 // looser "looks complete" heuristic: the bar for auto-promoting a Task that
@@ -2241,9 +2284,27 @@ function reconcileStaleCompletionEvidence_(task, allEvents, openEvents) {
   // clear either field on reopen). Do not race the ordinary Status-driven
   // event handling in reconcileAuthoritativeTimeEvents_ here: leave it to
   // close the event first (Review/Blocked/Ready/Backlog) or keep timing it
-  // (In Progress); this check runs again, and can fire, on whichever later
-  // poll actually observes openEvents.length === 0.
-  if (openEvents && openEvents.length) return null;
+  // (In Progress).
+  //
+  // Requeue rather than silently drop (Codex, PR #43): the ordinary
+  // handling that runs right after this returns often closes that very
+  // event in this SAME call (e.g. a non-In-Progress Status always closes a
+  // stray open event) — but that PATCH touches only the Time Event page,
+  // never the Task's own last_edited_time, so nothing guarantees a LATER
+  // poll ever re-examines this Task again once queryChangedTasks_'s window
+  // moves past it. A distinct outcome (not the evidence-incomplete
+  // `_unresolved:` case — this Task's evidence may be perfectly fine, just
+  // blocked by a currently-open event) queues it into
+  // STALE_COMPLETION_RETRY_IDS the same as `_unresolved:` does, so the next
+  // poll re-checks it by direct fetch regardless of whether anything else
+  // ever edits the Task page again. If the event is still genuinely open
+  // next time (real ongoing work), this same branch fires again and it
+  // simply stays queued — harmless, and no different in cost from any other
+  // Task whose real activity keeps it naturally inside the incremental
+  // window anyway.
+  if (openEvents && openEvents.length) {
+    return { promoted: false, outcome: 'stale_completion_evidence_deferred:open_time_event' };
+  }
 
   const evaluation = evaluateDoneEvidence_(task, allEvents, openEvents);
   if (!evaluation.failures.length) {
