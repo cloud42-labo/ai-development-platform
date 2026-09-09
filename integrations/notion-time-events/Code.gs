@@ -214,6 +214,38 @@ function pollTaskChanges() {
     // not advance past data that was never retrieved.
     const sourceTruncated = changedResult.truncated || Boolean(activeResult && activeResult.truncated);
 
+    // BUG-ADP-STATUS-01 (Codex, PR #43, AC9): reconcileStaleCompletionEvidence_'s
+    // own "unresolved" finding makes no Notion write, so nothing about the
+    // page is ever re-edited by it — once LAST_SYNC_CURSOR advances past the
+    // Task's last_edited_time by more than SYNC_OVERLAP_MS, queryChangedTasks_
+    // alone stops returning it at all, silently ending AC9's "must keep
+    // surfacing every poll until resolved" guarantee for any Status other
+    // than In Progress (queryActiveInProgressTasks_ already covers that one
+    // continuously, by Status rather than last_edited_time). STALE_
+    // COMPLETION_RETRY_IDS is a small, self-maintaining set of Task IDs
+    // known to be in that state, re-checked by a direct per-ID fetch every
+    // poll — not a second broad database query, so a backlog with zero open
+    // anomalies costs nothing extra — and kept entirely OUT of
+    // tasksToProcess/LAST_SYNC_CURSOR's own bookkeeping below, which exists
+    // solely to track queryChangedTasks_'s incremental window. A fetch
+    // failure (deleted/archived page, or a transient error) simply leaves
+    // that id untouched for this run — same "no progress, don't lose state"
+    // rule as everywhere else in this function — so it is retried on a
+    // later poll instead of silently forgotten. Membership is finalized
+    // below, once this run's own outcomes (both this and the ordinary
+    // tasksToProcess path) are known.
+    const priorRetryIds = readStaleCompletionRetryIds_(props);
+    const retryOutcomeById = {};
+    priorRetryIds.forEach(function (id) {
+      let page;
+      try {
+        page = retrieveNotionPage_(id);
+      } catch (e) {
+        return;
+      }
+      if (page && page.id) retryOutcomeById[id] = reconcileTaskPage_(page);
+    });
+
     // A capped run (MAX_TASKS_PER_RUN or MAX_RUN_DURATION_MS) can stop
     // partway through a group of Tasks that all share the exact same
     // last_edited_time (a bulk edit, or many Done Tasks re-verified in the
@@ -347,15 +379,57 @@ function pollTaskChanges() {
       }
     }
 
+    // Finalize STALE_COMPLETION_RETRY_IDS from this run's actual outcomes:
+    // start from what was already tracked, apply the retry-fetch path's own
+    // results, then let the ordinary tasksToProcess path (which runs after
+    // and so reflects the most current re-check when a Task appears via
+    // both paths in the same run) have the final say. Only Tasks actually
+    // reconciled this run change membership at all; anything skipped by
+    // either path this run (fetch failed, or capped out of tasksToProcess)
+    // carries forward exactly as it was.
+    const nextRetrySet = {};
+    priorRetryIds.forEach(function (id) { nextRetrySet[id] = true; });
+    Object.keys(retryOutcomeById).forEach(function (id) {
+      if (/^stale_completion_evidence_unresolved:/.test(retryOutcomeById[id])) nextRetrySet[id] = true;
+      else delete nextRetrySet[id];
+    });
+    for (let i = 0; i < iterated; i++) {
+      const id = tasksToProcess[i].id;
+      if (/^stale_completion_evidence_unresolved:/.test(outcomes[i])) nextRetrySet[id] = true;
+      else delete nextRetrySet[id];
+    }
+    const nextRetryIds = Object.keys(nextRetrySet).sort();
+    if (JSON.stringify(nextRetryIds) !== JSON.stringify(priorRetryIds.slice().sort())) {
+      props.setProperty('STALE_COMPLETION_RETRY_IDS', JSON.stringify(nextRetryIds));
+    }
+
+    const retryOutcomeValues = Object.keys(retryOutcomeById).map(function (id) { return retryOutcomeById[id]; });
+
     return {
-      scanned: tasksToProcess.length,
-      processed: reconciledCount,
+      scanned: tasksToProcess.length + retryOutcomeValues.length,
+      processed: reconciledCount + retryOutcomeValues.filter(function (o) { return !isFreeOutcome_(o); }).length,
       capped: capped,
       truncated: sourceTruncated,
       bootstrap: isBootstrap,
-      outcomes: outcomes,
+      outcomes: outcomes.concat(retryOutcomeValues),
     };
   });
+}
+
+// Small persisted JSON array of Task IDs known to carry an unresolved
+// reconcileStaleCompletionEvidence_ finding — see the comment in
+// pollTaskChanges where this is read and finalized. Malformed or missing
+// state reads as empty rather than throwing, matching how every other
+// optional Script Property in this file degrades.
+function readStaleCompletionRetryIds_(props) {
+  const raw = props.getProperty('STALE_COMPLETION_RETRY_IDS');
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(function (id) { return typeof id === 'string' && id; }) : [];
+  } catch (e) {
+    return [];
+  }
 }
 
 // Operator escape hatch for E2E and debugging: reconcile one Task on demand.
@@ -2173,9 +2247,37 @@ function reconcileStaleCompletionEvidence_(task, allEvents, openEvents) {
 
   const evaluation = evaluateDoneEvidence_(task, allEvents, openEvents);
   if (!evaluation.failures.length) {
-    updateTaskStatus_(task.id, DEFAULTS.DONE_STATUS);
-    markResultValidated_(evaluation.applicableClosedEvent, evaluation.result);
-    return { promoted: true, outcome: 'stale_status_promoted_to_done:' + evaluation.applicableClosedEvent.id };
+    // Reopen guard (Codex, PR #43): evaluateDoneEvidence_'s freshness checks
+    // validate evidence against the *current execution* (Started At, the
+    // applicable closed event), but a Task reopened to a non-Done Status
+    // right after being Done keeps that same execution's evidence intact —
+    // Notion does not clear Completed At/Closed At/Result on reopen — so it
+    // can pass every one of those checks again completely unchanged, even
+    // though the reopen itself is exactly the signal that this evidence is
+    // no longer current. What actually distinguishes a genuine "Status
+    // write never happened" bug from a reopened-but-otherwise-untouched
+    // Done is whether this evidence has ever already validated a Done state
+    // before: enforceDoneGate_ (which only ever runs while Status IS Done)
+    // and this function's own promotion branch below are the only two call
+    // sites that stamp the applicable event with a Result Fingerprint
+    // (markResultValidated_) — a Task whose Status genuinely never reached
+    // Done has never hit either one, so its applicable event carries no
+    // stamp at all. A stamp already present — matching the current Result
+    // or not, self-recurrence is exactly what an ordinary Done
+    // re-verification produces (see evaluateDoneEvidence_'s own
+    // reusedFromEarlierExecution comment) — means this exact evidence
+    // already produced a Done once; silently reproducing that Done now,
+    // while Status currently reads something else, would undo whatever
+    // moved it away. Report, never promote.
+    const alreadyValidated = Boolean(
+      parseNoteMeta_(propertyText_(evaluation.applicableClosedEvent.properties.Note)).resultFingerprints.length
+    );
+    if (!alreadyValidated) {
+      updateTaskStatus_(task.id, DEFAULTS.DONE_STATUS);
+      markResultValidated_(evaluation.applicableClosedEvent, evaluation.result);
+      return { promoted: true, outcome: 'stale_status_promoted_to_done:' + evaluation.applicableClosedEvent.id };
+    }
+    return { promoted: false, outcome: 'stale_completion_evidence_unresolved:possible_reopen_after_done' };
   }
 
   // Ambiguous or genuinely incomplete: AC3 requires never guessing this

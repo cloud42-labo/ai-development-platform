@@ -312,3 +312,152 @@ test('a Human-assigned Task (Human Request) promotes identically to an AI-assign
 
   assert.match(summary.outcomes[0], /^stale_status_promoted_to_done:/);
 });
+
+// --- Codex, PR #43 (P1): reopen guard ---------------------------------
+
+test('reopen guard: a Task reopened to Ready with unchanged prior-Done evidence is not silently re-closed', () => {
+  // The applicable closed event already carries a Result Fingerprint stamp
+  // -- meaning this exact evidence already validated a Done once, either via
+  // enforceDoneGate_'s ordinary re-verification while Status genuinely was
+  // Done, or an earlier run of this very promotion. Status now reads Ready
+  // (a human reopened it) while nothing else about the evidence has changed
+  // -- Notion does not clear Completed At/Result/Started At on reopen -- so
+  // evaluateDoneEvidence_ alone reads this as fully valid, current evidence
+  // and would silently promote it straight back to Done, undoing the
+  // reopen.
+  const task = taskPage(TASK_ID, {
+    status: 'Ready',
+    agent: 'Claude Sonnet',
+    lastEdited: '2026-09-08T06:00:00.000Z',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    result: 'published',
+    completedAt: '2026-09-08T04:50:00.000Z',
+  });
+  const closedEvent = eventPage('evt-current', {
+    actor: 'Claude',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    endedAt: '2026-09-08T04:45:00.000Z',
+    note: 'Result Fingerprint=already-validated-once',
+  });
+  const { sandbox, fetchLog } = harness({ tasks: [task], events: [closedEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /^stale_completion_evidence_unresolved:possible_reopen_after_done$/);
+  const statusWrites = requestsTo(fetchLog, 'PATCH', '/v1/pages/' + TASK_ID).filter((entry) =>
+    JSON.parse(entry.options.payload).properties.Status
+  );
+  assert.equal(statusWrites.length, 0, 'a reopened Task must never be silently re-closed to Done');
+});
+
+test('reopen guard does not block a genuinely fresh completion whose applicable event has never been stamped', () => {
+  // Regression guard for the guard itself: the real HUMAN-AOD-008-1 pattern
+  // -- an applicable event with no prior Result Fingerprint stamp at all --
+  // still promotes exactly as before.
+  const task = taskPage(TASK_ID, {
+    status: 'Review',
+    agent: 'Claude Sonnet',
+    lastEdited: '2026-09-08T05:00:00.000Z',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    result: 'published',
+    completedAt: '2026-09-08T04:50:00.000Z',
+  });
+  const closedEvent = eventPage('evt-current', {
+    actor: 'Claude',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    endedAt: '2026-09-08T04:45:00.000Z',
+  });
+  const { sandbox } = harness({ tasks: [task], events: [closedEvent] });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /^stale_status_promoted_to_done:evt-current$/);
+});
+
+// --- Codex, PR #43 (P2): survive falling out of the incremental window ---
+
+test('an unresolved finding is tracked in STALE_COMPLETION_RETRY_IDS', () => {
+  const task = taskPage(TASK_ID, {
+    status: 'Review',
+    agent: 'Claude Sonnet',
+    lastEdited: '2026-09-08T05:00:00.000Z',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    result: 'published',
+    closedAt: '2026-09-08T04:50:00.000Z', // completedAt still missing -> unresolved
+  });
+  const closedEvent = eventPage('evt-current', {
+    actor: 'Claude',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    endedAt: '2026-09-08T04:45:00.000Z',
+  });
+  const { sandbox, scriptProps } = harness({ tasks: [task], events: [closedEvent] });
+
+  sandbox.pollTaskChanges();
+
+  assert.deepEqual(JSON.parse(scriptProps.get('STALE_COMPLETION_RETRY_IDS')), [TASK_ID]);
+});
+
+test('a retry-tracked Task is re-checked by direct fetch once it no longer appears in the incremental query, and drops out once resolved', () => {
+  const baseProps = { NOTION_TOKEN: 'test-token', SPREADSHEET_ID: 'test-sheet' };
+
+  // First poll: seed the retry set with an unresolved finding.
+  const stuckTask = taskPage(TASK_ID, {
+    status: 'Review',
+    agent: 'Claude Sonnet',
+    lastEdited: '2026-09-08T05:00:00.000Z',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    result: 'published',
+    closedAt: '2026-09-08T04:50:00.000Z', // completedAt still missing -> unresolved
+  });
+  const closedEvent = eventPage('evt-current', {
+    actor: 'Claude',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    endedAt: '2026-09-08T04:45:00.000Z',
+  });
+  const first = harness({ tasks: [stuckTask], events: [closedEvent], scriptProperties: baseProps });
+  first.sandbox.pollTaskChanges();
+  assert.deepEqual(JSON.parse(first.scriptProps.get('STALE_COMPLETION_RETRY_IDS')), [TASK_ID]);
+
+  // Second poll: the incremental TASKS_QUERY route now returns nothing for
+  // this Task at all -- simulating it aging out of the last_edited_time
+  // window, since the unresolved finding itself never re-edits the page --
+  // but Completed At has since been filled in directly on the page (a
+  // human/agent fixed the evidence). Only a direct per-ID fetch of the
+  // retry-tracked id can discover that.
+  const resolvedTask = taskPage(TASK_ID, {
+    status: 'Review',
+    agent: 'Claude Sonnet',
+    lastEdited: '2026-09-09T00:00:00.000Z',
+    startedAt: '2026-09-08T04:31:00.000Z',
+    result: 'published',
+    closedAt: '2026-09-08T04:50:00.000Z',
+    completedAt: '2026-09-08T04:50:00.000Z',
+  });
+  let getRequests = 0;
+  const routes2 = {
+    [TASKS_QUERY]: () => ({ results: [], has_more: false }),
+    [EVENTS_QUERY]: () => ({ results: [closedEvent], has_more: false }),
+    ['GET /v1/pages/' + TASK_ID]: () => {
+      getRequests += 1;
+      return resolvedTask;
+    },
+    'PATCH *': () => ({}),
+    'GET *': () => ({}),
+  };
+  const carriedProps = Object.assign({}, baseProps, {
+    STALE_COMPLETION_RETRY_IDS: first.scriptProps.get('STALE_COMPLETION_RETRY_IDS'),
+    LAST_SYNC_CURSOR: first.scriptProps.get('LAST_SYNC_CURSOR'),
+    LAST_SYNC_CURSOR_TIE_OFFSET: first.scriptProps.get('LAST_SYNC_CURSOR_TIE_OFFSET') || '0',
+    BOOTSTRAP_ACTIVE_DONE: first.scriptProps.get('BOOTSTRAP_ACTIVE_DONE') || '',
+  });
+  const second = loadCodeGsSandbox({ scriptProperties: carriedProps, fetch: notionFetchStub(routes2) });
+
+  const summary2 = second.sandbox.pollTaskChanges();
+
+  assert.equal(getRequests, 1, 'expected exactly one direct per-ID fetch of the retry-tracked Task');
+  assert.ok(
+    summary2.outcomes.some((o) => /^stale_status_promoted_to_done:/.test(o)),
+    'expected the retry-fetched Task to be promoted: ' + JSON.stringify(summary2.outcomes)
+  );
+  assert.deepEqual(JSON.parse(second.scriptProps.get('STALE_COMPLETION_RETRY_IDS')), []);
+});
