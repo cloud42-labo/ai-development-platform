@@ -4,7 +4,7 @@
 > **規程ID:** R06  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-06 JST  
+> **最終改定日:** 2026-09-09 JST  
 > **関連規程:** R01 組織規程 / R02 職務権限規程 / R03 決裁規程 / R04 文書管理規程 / R05 システム開発管理規程  
 > **移管元:** `docs/operating-guide.md` §1、§7、§8、§9、§10、§11、§13、§14
 
@@ -169,7 +169,8 @@ TaskをDoneとするには、原則として次を満たす。
 3. 実測できない作業時間を推測・捏造しない。
 4. Active Time、Waiting Time、Review Fix等の計測は、Bottleneck、Review cost、Task sizing failureその他の管理改善に利用する。
 5. 計測の不整合を見つけた場合は、データを都合よく補正するのではなく、生成・状態遷移・証跡モデルを修正する。
-6. Active / Waiting等の期間集計は、`Ended At`が確定している Closed Time Event の Duration のみを合算する。Open Time Event（`Ended At`未確定）が存在しても、それを理由に集計値全体をN/A化しない——Closedデータから算出できる数値はそのまま報告し、Open件数・対象Task・滞留理由は別項目として明記する（`BUG-ADP-TTE-01`）。Open Time Eventが表すのは実作業のExecution時間ではなく、Taskが当該Statusに滞留している時間（Process Occupancy）であり、これをClosed Durationと同一視してActive時間へ合算しない。
+6. Active時間の期間集計は、`Ended At`が確定している Closed Time Event の Duration のみを合算する。Open Time Event（`Ended At`未確定）が存在しても、それを理由に集計値全体をN/A化しない——Closedデータから算出できる数値はそのまま報告し、Open件数・対象Task・滞留理由は別項目として明記する（`BUG-ADP-TTE-01`）。Open Time Eventが表すのは実作業のExecution時間ではなく、Taskが当該Statusに滞留している時間（Process Occupancy）であり、これをClosed Durationと同一視してActive時間へ合算しない。
+7. Waiting時間（Review等、`In Progress`以外での滞留）はTime Event（`In Progress`区間のみ生成される）からは算出できない。Sync Logまたは状態遷移記録等、別の情報源から独立して計測する（`BUG-ADP-TTE-01-C`）。第6項のClosed Time Event基準をWaiting時間の算出根拠として流用しない。
 
 ## 第16条 Portfolio Dashboard
 
