@@ -6,6 +6,13 @@ const DEFAULTS = {
   START_STATUS: 'In Progress',
   REVIEW_STATUS: 'Review',
   DONE_STATUS: 'Done',
+  // Superseded is the only other terminal Status besides Done. A Task
+  // legitimately reaches it without ever producing Done's own completion
+  // evidence (Result / Time Event / Completed At) — a Task can be
+  // Superseded mid-flight by a Refinement decision — so
+  // reconcileStaleCompletionEvidence_ (BUG-ADP-STATUS-01) must never touch
+  // it: it is already terminal, and Done's evidence rules do not apply to
+  // it at all.
   SUPERSEDED_STATUS: 'Superseded',
   // `Stories & Tasks`.Status is a `select` property in the real database
   // schema, not Notion's distinct `status` property type — the two use
@@ -72,6 +79,14 @@ const MAX_TASKS_PER_RUN = 25;
 // actually reconciled — same graceful "capped" behavior MAX_TASKS_PER_RUN
 // already produces — rather than risking an unrecoverable mid-scan kill.
 const MAX_RUN_DURATION_MS = 4 * 60 * 1000;
+
+// How much of MAX_RUN_DURATION_MS pollTaskChanges' STALE_COMPLETION_RETRY_IDS
+// recheck is allowed to spend before the ordinary tasksToProcess loop even
+// starts (see the comment at that recheck's call site). Deliberately a
+// fraction of MAX_RUN_DURATION_MS, not the whole thing: retry-set work must
+// never be able to consume the entire run budget and leave nothing for
+// ordinary reconciliation, which is this mechanism's whole reason to exist.
+const RETRY_RECONCILE_BUDGET_MS = 60 * 1000;
 
 // How much of MAX_RUN_DURATION_MS backfillResultFingerprints_ always reserves
 // for actually processing and checkpointing whatever pagination retrieved,
@@ -207,6 +222,58 @@ function pollTaskChanges() {
     // not advance past data that was never retrieved.
     const sourceTruncated = changedResult.truncated || Boolean(activeResult && activeResult.truncated);
 
+    // BUG-ADP-STATUS-01 (Codex, PR #43, AC9): reconcileStaleCompletionEvidence_'s
+    // own "unresolved"/"deferred" findings make no Notion write, so nothing
+    // about the page is ever re-edited by them — once LAST_SYNC_CURSOR
+    // advances past the Task's last_edited_time by more than SYNC_OVERLAP_MS,
+    // queryChangedTasks_ alone stops returning it at all, silently ending
+    // AC9's "must keep surfacing every poll until resolved" guarantee for
+    // any Status other than In Progress (queryActiveInProgressTasks_ already
+    // covers that one continuously, by Status rather than last_edited_time).
+    // STALE_COMPLETION_RETRY_IDS is a small, self-maintaining set of Task
+    // IDs known to be in that state, re-checked by a direct per-ID fetch
+    // every poll — not a second broad database query, so a backlog with
+    // zero open anomalies costs nothing extra — and kept entirely OUT of
+    // tasksToProcess/LAST_SYNC_CURSOR's own bookkeeping below, which exists
+    // solely to track queryChangedTasks_'s incremental window. A fetch
+    // failure (deleted/archived page, or a transient error) simply leaves
+    // that id untouched for this run — same "no progress, don't lose state"
+    // rule as everywhere else in this function — so it is retried on a
+    // later poll instead of silently forgotten. Membership is finalized
+    // below, once this run's own outcomes (both this and the ordinary
+    // tasksToProcess path) are known.
+    //
+    // Bounded by its own wall-clock slice, separate from MAX_TASKS_PER_RUN/
+    // MAX_RUN_DURATION_MS which only ever guard the ordinary tasksToProcess
+    // loop below (Codex, PR #43): without this, a retry set large enough to
+    // matter could run this direct-fetch loop past Apps Script's actual
+    // execution limit before the ordinary loop even starts or any
+    // checkpoint is written — starving every changed Task this run and
+    // repeating the identical retry-set prefix next time with zero
+    // progress. Never cut off before at least one id is attempted (mirrors
+    // paginateNotionQuery_'s own "never stop before the first page" rule),
+    // and any id this budget never reaches is simply left for next run —
+    // finalized below via priorRetryIds/retryAttempted, not by resetting the
+    // whole set.
+    const priorRetryIds = readStaleCompletionRetryIds_(props);
+    const retryOutcomeById = {};
+    const retryDeadlineMs = runStartedAt.getTime() + RETRY_RECONCILE_BUDGET_MS;
+    let retryAttempted = 0;
+    while (
+      retryAttempted < priorRetryIds.length &&
+      (retryAttempted === 0 || Date.now() < retryDeadlineMs)
+    ) {
+      const id = priorRetryIds[retryAttempted];
+      retryAttempted++;
+      let page;
+      try {
+        page = retrieveNotionPage_(id);
+      } catch (e) {
+        continue;
+      }
+      if (page && page.id) retryOutcomeById[id] = reconcileTaskPage_(page);
+    }
+
     // A capped run (MAX_TASKS_PER_RUN or MAX_RUN_DURATION_MS) can stop
     // partway through a group of Tasks that all share the exact same
     // last_edited_time (a bulk edit, or many Done Tasks re-verified in the
@@ -340,15 +407,67 @@ function pollTaskChanges() {
       }
     }
 
+    // Finalize STALE_COMPLETION_RETRY_IDS from this run's actual outcomes.
+    // Order matters here, not just membership (Codex, PR #43): an id this
+    // run's retry budget never reached (priorRetryIds[retryAttempted..]) is
+    // put FIRST for next run, so a retry set larger than one run's budget
+    // rotates through every member instead of the same leading ids
+    // starving whatever is behind them forever. Ids the budget did attempt
+    // move to the back, kept only if still unresolved/deferred.
+    const IS_RETRYABLE_OUTCOME = /^stale_completion_evidence_(unresolved|deferred):/;
+    const unattemptedRetryIds = priorRetryIds.slice(retryAttempted);
+    const stillPendingFromRetry = priorRetryIds.slice(0, retryAttempted).filter(function (id) {
+      return retryOutcomeById[id] && IS_RETRYABLE_OUTCOME.test(retryOutcomeById[id]);
+    });
+    const nextRetryIds = unattemptedRetryIds.concat(stillPendingFromRetry);
+    // The ordinary tasksToProcess path runs after the retry-fetch path
+    // above and reflects the most current re-check when a Task appears via
+    // both in the same run, so it has the final say. `outcomes` is
+    // 0-indexed from `startIndex`, NOT from 0 (a resumed capped run has
+    // startIndex > 0) — outcomes[i - startIndex] is tasksToProcess[i]'s own
+    // result; indexing outcomes[i] directly here misaligned every lookup
+    // whenever a run resumed mid-window (Codex, PR #43).
+    for (let i = startIndex; i < iterated; i++) {
+      const id = tasksToProcess[i].id;
+      const outcome = outcomes[i - startIndex];
+      const idx = nextRetryIds.indexOf(id);
+      if (IS_RETRYABLE_OUTCOME.test(outcome)) {
+        if (idx === -1) nextRetryIds.push(id);
+      } else if (idx !== -1) {
+        nextRetryIds.splice(idx, 1);
+      }
+    }
+    if (JSON.stringify(nextRetryIds) !== JSON.stringify(priorRetryIds)) {
+      props.setProperty('STALE_COMPLETION_RETRY_IDS', JSON.stringify(nextRetryIds));
+    }
+
+    const retryOutcomeValues = Object.keys(retryOutcomeById).map(function (id) { return retryOutcomeById[id]; });
+
     return {
-      scanned: tasksToProcess.length,
-      processed: reconciledCount,
+      scanned: tasksToProcess.length + retryOutcomeValues.length,
+      processed: reconciledCount + retryOutcomeValues.filter(function (o) { return !isFreeOutcome_(o); }).length,
       capped: capped,
       truncated: sourceTruncated,
       bootstrap: isBootstrap,
-      outcomes: outcomes,
+      outcomes: outcomes.concat(retryOutcomeValues),
     };
   });
+}
+
+// Small persisted JSON array of Task IDs known to carry an unresolved
+// reconcileStaleCompletionEvidence_ finding — see the comment in
+// pollTaskChanges where this is read and finalized. Malformed or missing
+// state reads as empty rather than throwing, matching how every other
+// optional Script Property in this file degrades.
+function readStaleCompletionRetryIds_(props) {
+  const raw = props.getProperty('STALE_COMPLETION_RETRY_IDS');
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(function (id) { return typeof id === 'string' && id; }) : [];
+  } catch (e) {
+    return [];
+  }
 }
 
 // Operator escape hatch for E2E and debugging: reconcile one Task on demand.
@@ -593,7 +712,22 @@ function reconcileTaskPage_(task, options) {
   // no new mutation was needed, not that an invalid state goes unchecked.
   // A Story is exempt regardless of Status — see isStory above, and
   // reconcileStoryTask_ never enforces the Done gate at all.
-  const mustReverify = currentStatus === DEFAULTS.DONE_STATUS && !isStory;
+  //
+  // BUG-ADP-STATUS-01: a non-Done, non-Superseded page already carrying
+  // Closed At and/or Completed At needs the identical always-reverify
+  // treatment, for the same reason as Done above — if
+  // reconcileStaleCompletionEvidence_ reports an unresolved finding on the
+  // first poll that observes this snapshot, the hash does not change again
+  // on its own, so without this the finding would log once and then dedup
+  // to `duplicate:` forever after, going silent exactly the way AC9
+  // requires it not to. Cheap to check here (both are simple date
+  // properties already on hand) rather than inside
+  // reconcileStaleCompletionEvidence_ itself, which has no say over dedup.
+  const hasCompletionEvidence = !isStory &&
+    currentStatus !== DEFAULTS.DONE_STATUS &&
+    currentStatus !== DEFAULTS.SUPERSEDED_STATUS &&
+    (Boolean(propertyDate_(task.properties['Closed At'])) || Boolean(propertyDate_(task.properties['Completed At'])));
+  const mustReverify = (currentStatus === DEFAULTS.DONE_STATUS && !isStory) || hasCompletionEvidence;
   // hasProcessedSnapshot_ checks this page's single MOST RECENT Sync Log
   // observation, not "was this exact snapshot ever logged, at any point in
   // this page's history" (an earlier version of this check) — Codex-reported
@@ -1563,10 +1697,30 @@ function isFreeOutcome_(outcome) {
   // one genuinely archived or closed) still made a real write and must
   // still count, exactly like 'archived_story_event:...' and
   // 'closed_task_era_at_story_conversion:...' always have.
-  const FREE_STORY_SKIP_PREFIXES = ['skipped_ambiguous_pre_upgrade_provenance:', 'skipped_pending_provenance_backfill:'];
+  // 'stale_completion_evidence_unresolved:...' (BUG-ADP-STATUS-01, see
+  // reconcileStaleCompletionEvidence_) is free by the identical reasoning: an
+  // ambiguous/incomplete stale-evidence finding makes no Notion write, so
+  // reporting it rather than silently dropping it must not itself cost
+  // reconciliation budget. 'stale_completion_evidence_deferred:...' is the
+  // same by itself (an open-Time-Event defer makes no write of its own) —
+  // but it commonly appears joined with a real write from the ordinary
+  // Status-driven handling that runs right after it in the same call (e.g.
+  // closing that very event), which correctly still counts since not every
+  // joined segment matches a free prefix in that case.
+  // 'stale_status_promoted_to_done:...' is
+  // deliberately NOT listed here: it writes Status=Done (and stamps the
+  // Result fingerprint), a real mutation that must count like any other
+  // write, the same distinction as 'done_gate_passed' (free) vs.
+  // 'done_gate_passed:stamped' (counts).
+  const FREE_ACTION_PREFIXES = [
+    'skipped_ambiguous_pre_upgrade_provenance:',
+    'skipped_pending_provenance_backfill:',
+    'stale_completion_evidence_unresolved:',
+    'stale_completion_evidence_deferred:',
+  ];
   const segments = String(outcome).split(',');
   return segments.length > 0 && segments.every(function (segment) {
-    return FREE_STORY_SKIP_PREFIXES.some(function (prefix) { return segment.indexOf(prefix) === 0; });
+    return FREE_ACTION_PREFIXES.some(function (prefix) { return segment.indexOf(prefix) === 0; });
   });
 }
 
@@ -1587,13 +1741,25 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
   }
 
   // Superseded is a terminal outcome of its own, deliberately handled before
-  // (and never falling through to) enforceDoneGate_ — ADP-052-T05. A
-  // Superseded Task (e.g. split into replacements, see `Split From`) needs
-  // none of Done's completion evidence (Result / Completed At / an
-  // applicable closed event) and is never rolled back the way a rejected
-  // Done is: once Status reads Superseded there is nothing left to gate.
+  // (and never falling through to) enforceDoneGate_ or
+  // reconcileStaleCompletionEvidence_ — ADP-052-T05. A Superseded Task
+  // (e.g. split into replacements, see `Split From`) needs none of Done's
+  // completion evidence (Result / Completed At / an applicable closed
+  // event) and is never rolled back the way a rejected Done is: once
+  // Status reads Superseded there is nothing left to gate.
   if (currentStatus === DEFAULTS.SUPERSEDED_STATUS) {
     return enforceSupersededLifecycle_(task, openEvents, changedBy, snapshotId, when);
+  }
+
+  // BUG-ADP-STATUS-01: before handling this Status the ordinary way, check
+  // whether the Task already carries Done's own completion evidence despite
+  // never having Status flipped to Done. See
+  // reconcileStaleCompletionEvidence_ for the full rationale and scope.
+  // Superseded is already excluded by the early return immediately above.
+  const staleCompletion = reconcileStaleCompletionEvidence_(task, allEvents, openEvents);
+  if (staleCompletion) {
+    if (staleCompletion.promoted) return staleCompletion.outcome;
+    actions.push(staleCompletion.outcome);
   }
 
   if (currentStatus === DEFAULTS.START_STATUS) {
@@ -1967,7 +2133,17 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
   return actions.length ? actions.join(',') : 'no_change:' + currentStatus;
 }
 
-function enforceDoneGate_(task, allEvents, openEvents) {
+// Pure evidence check, no writes: computes exactly the failures/evidence
+// enforceDoneGate_ already trusted to validate an existing Status=Done, so
+// reconcileStaleCompletionEvidence_ (BUG-ADP-STATUS-01) can reuse the
+// identical rules to decide whether a Task that is NOT yet Done already has
+// everything Done would require, without duplicating a second evidence
+// model that could quietly drift from this one. enforceDoneGate_ itself is
+// now a thin wrapper: call this, then act on the result (stamp+report on
+// success, rollback+report on failure). Splitting the pure check out changes
+// no existing behavior of enforceDoneGate_ — every failure string, ordering,
+// and edge case below is unchanged from before this split.
+function evaluateDoneEvidence_(task, allEvents, openEvents) {
   const failures = [];
   const result = propertyText_(task.properties.Result).trim();
   const completedAt = propertyDate_(task.properties['Completed At']);
@@ -2175,6 +2351,22 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     if (completedAt.getTime() < appliedEndedAt.getTime()) failures.push('stale_completed_at');
   }
 
+  return { failures: failures, applicableClosedEvent: applicableClosedEvent, result: result };
+}
+
+// Thin wrapper around evaluateDoneEvidence_: this is the only call site that
+// may write in response to the evidence check while a Task's current Status
+// already reads Done — an existing Done attempt either gets stamped as
+// valid or rolled back. See reconcileStaleCompletionEvidence_ for the
+// opposite-direction caller (BUG-ADP-STATUS-01): it PROMOTES a non-Done Task
+// instead of validating/rolling back one that already claims to be Done, but
+// reuses this exact same evidence check to decide when that promotion is
+// safe.
+function enforceDoneGate_(task, allEvents, openEvents) {
+  const evaluation = evaluateDoneEvidence_(task, allEvents, openEvents);
+  const failures = evaluation.failures;
+  const applicableClosedEvent = evaluation.applicableClosedEvent;
+
   if (!failures.length) {
     // Stamp the applicable event with the Result fingerprint that just
     // validated it, so a *future* reopen can tell whether Result was ever
@@ -2184,7 +2376,7 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     // event with no prior stamp), report a distinct outcome so the caller
     // charges it against the reconciliation write budget like any other
     // write — see isFreeOutcome_.
-    const stamped = markResultValidated_(applicableClosedEvent, result);
+    const stamped = markResultValidated_(applicableClosedEvent, evaluation.result);
     return stamped ? 'done_gate_passed:stamped' : 'done_gate_passed';
   }
 
@@ -2250,6 +2442,115 @@ function enforceSupersededLifecycle_(task, openEvents, changedBy, snapshotId, wh
     return 'closed_superseded:' + eventPage.id;
   });
   return actions.join(',');
+}
+
+// BUG-ADP-STATUS-01: a Task can accumulate Done's own completion evidence
+// (Closed At and/or Completed At, alongside Result and a closed Time Event)
+// without Status ever being flipped to Done — governance
+// (AGENTS.md "Completion") requires Status/Result/Completed At/Time-Event
+// close to be written together as one act, but a partial write (evidence
+// recorded, Status left stale) is a real, repeatedly observed failure mode,
+// not a hypothetical one — concrete instances, their Task IDs, and the
+// dates they were found live in Notion, not here (AGENTS.md "Source-of-
+// truth rules"). This function is the automated version of what was, until
+// now, a manual correction each time.
+//
+// Deliberately reuses evaluateDoneEvidence_ rather than inventing a second,
+// looser "looks complete" heuristic: the bar for auto-promoting a Task that
+// never claimed to be Done must be at least as strict as the bar for
+// letting an explicit Done claim stand, never looser. A Task whose evidence
+// would fail enforceDoneGate_ if someone tried to set Done right now is
+// necessarily not eligible here either — see the review-fix-state-model.md
+// "Enforcement defect" framing this follows: the completion RULE already
+// exists (AGENTS.md), only its enforcement was missing for the case where
+// nobody ever attempted the Status write at all.
+//
+// Scope is deliberately narrower than the evidence check's own reach in one
+// direction: Superseded — the Backlog's only other terminal Status — is
+// excluded by the caller (reconcileAuthoritativeTimeEvents_), never
+// auto-selected here. A Task can be legitimately Superseded by a Refinement
+// decision without ever producing Done's evidence (Result / Time Event /
+// Completed At) at all, so "evidence looks Done-shaped" can never justify
+// choosing Superseded instead — there is no automatable rule for that
+// direction, only Done promotion is safe to automate.
+function reconcileStaleCompletionEvidence_(task, allEvents, openEvents) {
+  const closedAt = propertyDate_(task.properties['Closed At']);
+  const completedAt = propertyDate_(task.properties['Completed At']);
+  if (!closedAt && !completedAt) return null;
+
+  // An open Time Event means work is still genuinely being timed right now
+  // — real, current activity outranks a Closed At/Completed At value that
+  // (per the Done gate's own staleness rules) may simply be left over from
+  // a PRIOR, already-finished execution of this same Task (Notion does not
+  // clear either field on reopen). Do not race the ordinary Status-driven
+  // event handling in reconcileAuthoritativeTimeEvents_ here: leave it to
+  // close the event first (Review/Blocked/Ready/Backlog) or keep timing it
+  // (In Progress).
+  //
+  // Requeue rather than silently drop (Codex, PR #43): the ordinary
+  // handling that runs right after this returns often closes that very
+  // event in this SAME call (e.g. a non-In-Progress Status always closes a
+  // stray open event) — but that PATCH touches only the Time Event page,
+  // never the Task's own last_edited_time, so nothing guarantees a LATER
+  // poll ever re-examines this Task again once queryChangedTasks_'s window
+  // moves past it. A distinct outcome (not the evidence-incomplete
+  // `_unresolved:` case — this Task's evidence may be perfectly fine, just
+  // blocked by a currently-open event) queues it into
+  // STALE_COMPLETION_RETRY_IDS the same as `_unresolved:` does, so the next
+  // poll re-checks it by direct fetch regardless of whether anything else
+  // ever edits the Task page again. If the event is still genuinely open
+  // next time (real ongoing work), this same branch fires again and it
+  // simply stays queued — harmless, and no different in cost from any other
+  // Task whose real activity keeps it naturally inside the incremental
+  // window anyway.
+  if (openEvents && openEvents.length) {
+    return { promoted: false, outcome: 'stale_completion_evidence_deferred:open_time_event' };
+  }
+
+  const evaluation = evaluateDoneEvidence_(task, allEvents, openEvents);
+  if (!evaluation.failures.length) {
+    // Reopen guard (Codex, PR #43): evaluateDoneEvidence_'s freshness checks
+    // validate evidence against the *current execution* (Started At, the
+    // applicable closed event), but a Task reopened to a non-Done Status
+    // right after being Done keeps that same execution's evidence intact —
+    // Notion does not clear Completed At/Closed At/Result on reopen — so it
+    // can pass every one of those checks again completely unchanged, even
+    // though the reopen itself is exactly the signal that this evidence is
+    // no longer current. What actually distinguishes a genuine "Status
+    // write never happened" bug from a reopened-but-otherwise-untouched
+    // Done is whether this evidence has ever already validated a Done state
+    // before: enforceDoneGate_ (which only ever runs while Status IS Done)
+    // and this function's own promotion branch below are the only two call
+    // sites that stamp the applicable event with a Result Fingerprint
+    // (markResultValidated_) — a Task whose Status genuinely never reached
+    // Done has never hit either one, so its applicable event carries no
+    // stamp at all. A stamp already present — matching the current Result
+    // or not, self-recurrence is exactly what an ordinary Done
+    // re-verification produces (see evaluateDoneEvidence_'s own
+    // reusedFromEarlierExecution comment) — means this exact evidence
+    // already produced a Done once; silently reproducing that Done now,
+    // while Status currently reads something else, would undo whatever
+    // moved it away. Report, never promote.
+    const alreadyValidated = Boolean(
+      parseNoteMeta_(propertyText_(evaluation.applicableClosedEvent.properties.Note)).resultFingerprints.length
+    );
+    if (!alreadyValidated) {
+      updateTaskStatus_(task.id, DEFAULTS.DONE_STATUS);
+      markResultValidated_(evaluation.applicableClosedEvent, evaluation.result);
+      return { promoted: true, outcome: 'stale_status_promoted_to_done:' + evaluation.applicableClosedEvent.id };
+    }
+    return { promoted: false, outcome: 'stale_completion_evidence_unresolved:possible_reopen_after_done' };
+  }
+
+  // Ambiguous or genuinely incomplete: AC3 requires never guessing this
+  // closed. Report it — a real, visible outcome (see isFreeOutcome_ and
+  // mustReverify below for why this keeps surfacing on every poll instead
+  // of going silent the moment the snapshot hash next matches) — but make
+  // no write and no Status change. Whatever ordinary handling
+  // reconcileAuthoritativeTimeEvents_ would otherwise run for this Status
+  // still runs after this: an ambiguous stale value must never block a
+  // Task's normal reconciliation, only Done itself.
+  return { promoted: false, outcome: 'stale_completion_evidence_unresolved:' + evaluation.failures.join('+') };
 }
 
 function resultFingerprint_(resultText) {
