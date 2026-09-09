@@ -4,7 +4,7 @@
 > **規程ID:** R06  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-09 JST  
+> **最終改定日:** 2026-09-10 JST  
 > **関連規程:** R01 組織規程 / R02 職務権限規程 / R03 決裁規程 / R04 文書管理規程 / R05 システム開発管理規程  
 > **移管元:** `docs/operating-guide.md` §1、§7、§8、§9、§10、§11、§13、§14
 
@@ -21,6 +21,14 @@
 3. **Story** — Epicの成果を利用者・業務価値の単位へ分解したもの。
 4. **Task** — AIまたはHumanが単独で実行・検証できる具体的な作業単位。
 5. **Sprint** — 一定期間に集中して進めるReady workの集合。
+
+### 新規Task受付原則
+
+1. **新規Taskは、発生経路・緊急度・OwnerによるProduct指定・既存Task/Storyからの派生有無にかかわらず、例外なく `MISC｜<title>` / `Status = Backlog` / Product・Epic・Parent Story未設定で受付する。**
+2. 新規Taskの正式なProduct / Epic / Story配置は、Backlog Refinementだけが行う。
+3. Backlog Refinementでは、適切な既存Epic / Storyがあればそこへ配置し、存在しなければ必要性を確認したうえでEpic / Storyを新設してからTaskを接続する。
+4. `MISC｜` のままApproach Review、Ready、In Progressへ進めてはならない。正式配置後にhierarchical-refinement、task-approach-reviewを通過して初めてReady候補とする。
+5. Task作成時点での直接正式配置を認める例外は設けない。突発的に生じるTaskの分類判断を作成者へ持たせず、未分類Inboxと正式配置の責務を分離する。
 
 現在状態はNotionを正本とし、R04に従う。
 
@@ -73,6 +81,8 @@ TaskをReadyとするには、原則として次を満たす。
 7. Task粒度が第3条を満たす。
 8. 必要なApproach Reviewが完了している。
 
+`MISC｜` のTaskは第2条の新規Task受付原則により正式配置前であるため、Definition of Readyを満たさない。
+
 詳細なDoR判定は下位基準として管理する。
 
 ## 第7条 Approach Review
@@ -87,15 +97,16 @@ TaskをReadyとするには、原則として次を満たす。
 
 Backlog Refinementでは、少なくとも次を確認する。
 
-1. Product Vision → Epic → Story → Taskの目的・整合性。
-2. Epic / Story / Taskの依存関係と実行順序。
-3. Taskの配置、重複、陳腐化、不必要な作業。
-4. Priority、Blocker、Human Gate。
-5. Task粒度とApproachの妥当性。
-6. 次Sprintへ入れるReady候補。
-7. 外部Platform / Serviceの公式変更が現行前提を壊していないか。
+1. **未分類MISCの正式配置** — Product Visionとの因果を確認し、適切な既存Epic / Storyへ配置する。必要なEpic / Storyが存在しない場合は、先に上位構造を新設する。
+2. Product Vision → Epic → Story → Taskの目的・整合性。
+3. Epic / Story / Taskの依存関係と実行順序。
+4. Taskの配置、重複、陳腐化、不必要な作業。
+5. Priority、Blocker、Human Gate。
+6. Task粒度とApproachの妥当性。
+7. 次Sprintへ入れるReady候補。
+8. 外部Platform / Serviceの公式変更が現行前提を壊していないか。
 
-構造Reviewが未完了のEpic / Story配下で、TaskのHowだけを先行承認しない。
+構造Reviewが未完了のEpic / Story配下で、TaskのHowだけを先行承認しない。MISC未配置TaskもHow Reviewへ進めない。
 
 ## 第9条 Sprint運用
 
@@ -104,7 +115,7 @@ Weekly Sprintは、原則として次の順で管理する。
 1. **Upstream Change Review** — 公式一次情報から外部前提の変化を確認する。
 2. **Sprint Review** — 成果、未完了、Blockerを確認する。
 3. **Retrospective** — Keep / Problem / Tryと改善入力を記録する。
-4. **Backlog Refinement** — 構造とHowを再評価する。
+4. **Backlog Refinement** — MISC受付の正式配置、構造とHowを再評価する。
 5. **Sprint Close** — 未完了項目の扱いを明示してSprintを閉じる。
 6. **Sprint Goal Review** — 新しい事実に基づきGoalを再評価する。
 7. **Sprint Planning** — Ready workから次Sprintを構成する。
