@@ -7,7 +7,10 @@ const EVENTS_DS = '544b9a17-2653-47aa-b62c-bb52425b3bf2';
 const TASKS_QUERY = 'POST /v1/data_sources/' + TASKS_DS + '/query';
 const EVENTS_QUERY = 'POST /v1/data_sources/' + EVENTS_DS + '/query';
 
-function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T', type = null }) {
+function taskPage(id, {
+  status, agent, lastEdited, startedAt = null, title = 'T', type = null,
+  result = '', completedAt = null, closedAt = null,
+}) {
   return {
     object: 'page',
     id,
@@ -25,8 +28,14 @@ function taskPage(id, { status, agent, lastEdited, startedAt = null, title = 'T'
       Status: { type: 'select', select: { name: status } },
       'Assigned Agent': { type: 'select', select: agent ? { name: agent } : null },
       'Started At': { type: 'date', date: startedAt ? { start: startedAt } : null },
-      Result: { type: 'rich_text', rich_text: [] },
-      'Completed At': { type: 'date', date: null },
+      Result: { type: 'rich_text', rich_text: result ? [{ plain_text: result }] : [] },
+      'Completed At': { type: 'date', date: completedAt ? { start: completedAt } : null },
+      // BUG-ADP-STATUS-01: defaults to null the same as every other
+      // completion-evidence field above, so every existing fixture keeps
+      // reading as carrying no completion evidence at all — only a test
+      // that explicitly passes `closedAt` exercises
+      // reconcileStaleCompletionEvidence_.
+      'Closed At': { type: 'date', date: closedAt ? { start: closedAt } : null },
       // `type` defaults to null (rendered as no Type at all) so every
       // existing fixture keeps reading as a normal executable Task/Subtask —
       // only tests that explicitly pass `type: 'Story'` exercise the
