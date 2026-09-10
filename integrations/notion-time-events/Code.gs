@@ -2354,6 +2354,48 @@ function evaluateDoneEvidence_(task, allEvents, openEvents) {
   return { failures: failures, applicableClosedEvent: applicableClosedEvent, result: result };
 }
 
+// BUG-ADP-STATUS-02: failures evaluateDoneEvidence_ can raise that reflect
+// only a Task Time Events *telemetry* gap (a missing/stale Started At, or no
+// applicable closed event to point at), never evidence that the Task's own
+// business-level completion is actually incomplete. Every other failure
+// (missing_result, missing_completed_at, open_time_event, stale_result, ...)
+// stays a hard rollback trigger regardless of what else is true about the
+// Task — this list is the only thing enforceDoneGate_ ever treats as
+// telemetry-only, and reconcileStaleCompletionEvidence_ does not consult it
+// at all (it keeps calling evaluateDoneEvidence_ directly and requires zero
+// failures, exactly as before).
+const TELEMETRY_ONLY_DONE_FAILURES_ = [
+  'missing_task_started_at',
+  'stale_task_started_at',
+  'missing_applicable_time_event',
+  'stale_completed_at',
+];
+
+// BUG-ADP-STATUS-02: whether an explicit Status=Done Task already carries
+// its own authoritative, human/process-recorded closure evidence —
+// independent of Task Time Events telemetry. `Stories & Tasks`.Status and
+// these explicit completion fields are business-state source of truth
+// (AGENTS.md "Completion"); Task Time Events is execution telemetry used to
+// catch a Done claim that was never actually backed by timed work. Live
+// evidence (`docs/status-authority-live-evidence.md`) showed
+// notion_poll repeatedly rolling objectively-complete Tasks — Closure
+// Reason=Done, a real Result, Completed At, Closed At, no open Time Event —
+// back to Review solely because legacy/pre-mechanism telemetry (Started At,
+// an applicable closed event) was missing or stale. This predicate is
+// deliberately narrower than "Status currently reads Done": it requires the
+// same closure fields a genuine completion act writes together, so a Done
+// that was never actually backed by a real completion (nothing here, just a
+// bare Status flip) still gets no special treatment.
+function hasAuthoritativeDoneClosure_(task, openEvents) {
+  if (openEvents && openEvents.length) return false;
+  return (
+    propertyText_(task.properties['Closure Reason']) === DEFAULTS.DONE_STATUS &&
+    Boolean(propertyText_(task.properties.Result).trim()) &&
+    Boolean(propertyDate_(task.properties['Completed At'])) &&
+    Boolean(propertyDate_(task.properties['Closed At']))
+  );
+}
+
 // Thin wrapper around evaluateDoneEvidence_: this is the only call site that
 // may write in response to the evidence check while a Task's current Status
 // already reads Done — an existing Done attempt either gets stamped as
@@ -2378,6 +2420,22 @@ function enforceDoneGate_(task, allEvents, openEvents) {
     // write — see isFreeOutcome_.
     const stamped = markResultValidated_(applicableClosedEvent, evaluation.result);
     return stamped ? 'done_gate_passed:stamped' : 'done_gate_passed';
+  }
+
+  // BUG-ADP-STATUS-02: every remaining failure must itself be telemetry-only
+  // AND the Task must already carry its own authoritative closure evidence
+  // — either condition alone is not enough. A hard completion gap (e.g.
+  // missing_result together with a telemetry gap) must still roll back, and
+  // telemetry-only failures on a Done that never actually recorded a real
+  // completion (no Closure Reason/Result/Completed At/Closed At) must still
+  // roll back too — this only ever suppresses the rollback, it never grants
+  // Done in the first place (no write happens here, unlike the passed
+  // branch above: nothing needs re-stamping since Status is not changing).
+  const allFailuresTelemetryOnly = failures.every(function (failure) {
+    return TELEMETRY_ONLY_DONE_FAILURES_.indexOf(failure) >= 0;
+  });
+  if (allFailuresTelemetryOnly && hasAuthoritativeDoneClosure_(task, openEvents)) {
+    return 'done_gate_warning:telemetry_gap:' + failures.join('+');
   }
 
   // If work is still timed, restore In Progress and deliberately leave the
