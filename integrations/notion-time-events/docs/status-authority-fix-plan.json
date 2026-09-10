@@ -1,0 +1,25 @@
+{
+  "task": "BUG-ADP-STATUS-02",
+  "target": "integrations/notion-time-events/Code.gs::enforceDoneGate_",
+  "preserve_done_when": [
+    "Closure Reason=Done",
+    "Result is non-empty",
+    "Completed At exists",
+    "Closed At exists",
+    "no open Time Event"
+  ],
+  "telemetry_only_failures": [
+    "missing_task_started_at",
+    "stale_task_started_at",
+    "missing_applicable_time_event",
+    "stale_completed_at"
+  ],
+  "hard_failures": [
+    "missing_result",
+    "missing_completed_at",
+    "open_time_event",
+    "stale_result"
+  ],
+  "warning_prefix": "done_gate_warning:telemetry_gap:",
+  "must_not_change": "reconcileStaleCompletionEvidence_"
+}
