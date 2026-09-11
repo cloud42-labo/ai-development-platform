@@ -2061,7 +2061,46 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
   } else if (openEvents.length) {
     // Review / Blocked / Ready / Backlog are non-active Task states and may close
     // intervals. Done is intentionally handled above and never closes timing.
+    //
+    // Collapse same-actor duplicates first, exactly like the In-Progress
+    // branch above already does, before closing what remains — Codex-
+    // reported gap (BUG-ADP-TTE-01-B PR #46 review): a genuine duplicate
+    // open event for the same actor previously reached this branch
+    // unreconciled whenever no In-Progress reconciliation pass ever ran on
+    // this Task in between (this branch's own openEvents/allEvents are
+    // fetched fresh, so it sees whatever exists right now regardless of
+    // what earlier polls did or didn't observe) — e.g. Task Time Events
+    // created directly (BUG-ADP-TTE-01-B's Execution Event self-reporting)
+    // write outside withPollLock_, so a self-reported open event and the
+    // poller's own In-Progress bootstrap open for the identical Task/Actor
+    // can both exist at once, and if the Task's own last_edited_time never
+    // changes again before it leaves In Progress, no incremental poll ever
+    // revisits it to run the ordinary sameActor dedup. Without this, each
+    // duplicate closed here as its own independent 'left_in_progress'
+    // interval, permanently double-counting the same actor's overlapping
+    // work. Grouping by Actor (not assuming exactly one actor) also
+    // correctly handles the ordinary case of two different actors each
+    // legitimately holding one open event (e.g. a stale reassignment) —
+    // this loop is a strict generalization of the plain "close everything"
+    // this replaced, never closing fewer events than before for a
+    // single-actor, non-duplicated Task.
+    const openByActor = {};
     openEvents.forEach(function (eventPage) {
+      const actor = propertyText_(eventPage.properties.Actor) || '';
+      (openByActor[actor] = openByActor[actor] || []).push(eventPage);
+    });
+    const survivorsToClose = [];
+    Object.keys(openByActor).forEach(function (actor) {
+      const group = openByActor[actor].slice().sort(function (a, b) {
+        return eventStartedAt_(b).getTime() - eventStartedAt_(a).getTime();
+      });
+      for (let i = 1; i < group.length; i++) {
+        closeNotionTimeEvent_(group[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation');
+        actions.push('closed_duplicate:' + group[i].id);
+      }
+      survivorsToClose.push(group[0]);
+    });
+    survivorsToClose.forEach(function (eventPage) {
       closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'left_in_progress');
       actions.push('closed:' + eventPage.id);
     });

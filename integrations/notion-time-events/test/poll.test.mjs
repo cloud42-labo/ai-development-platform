@@ -201,6 +201,78 @@ test('a self-reported Execution Event (BUG-ADP-TTE-01-B) is closed like any othe
   assert.ok(JSON.parse(closes[0].options.payload).properties['Ended At'].date.start);
 });
 
+test('leaving In Progress with a same-actor duplicate open event closes one as duplicate_reconciliation, not two independent intervals (Codex-reported gap, PR #46)', () => {
+  // Execution Event self-reporting (BUG-ADP-TTE-01-B) writes to Task Time
+  // Events outside withPollLock_, so a self-reported open event and the
+  // poller's own In-Progress bootstrap open can both exist for the same
+  // Task/Actor. If the Task's own last_edited_time never changes again
+  // before it leaves In Progress, no incremental poll ever revisits it to
+  // run the ordinary sameActor dedup that the In-Progress branch applies —
+  // this fixture simulates exactly that: two open events for the same
+  // actor are already present the first time this poll ever looks at the
+  // Task, which has already moved to Review.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f06';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Review',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+    })],
+    events: [
+      eventPage('evt-poller-opened', { actor: 'Claude', startedAt: '2026-08-30T05:10:00.000Z' }),
+      eventPage('evt-self-reported-dup', { actor: 'Claude', startedAt: '2026-08-30T05:11:00.000Z' }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  // The most-recently-started survives as the real interval; the earlier
+  // one is reconciled as a duplicate, exactly like the In-Progress branch's
+  // own sameActor dedup — never two independent 'closed:' intervals for
+  // the same actor.
+  assert.match(summary.outcomes[0], /closed:evt-self-reported-dup/);
+  assert.match(summary.outcomes[0], /closed_duplicate:evt-poller-opened/);
+  assert.doesNotMatch(summary.outcomes[0], /closed:evt-poller-opened/);
+
+  const duplicateClose = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-poller-opened')[0].options.payload
+  );
+  assert.match(duplicateClose.properties.Note.rich_text[0].text.content, /Reason=duplicate_reconciliation/);
+
+  const realClose = JSON.parse(
+    requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-self-reported-dup')[0].options.payload
+  );
+  assert.match(realClose.properties.Note.rich_text[0].text.content, /Reason=left_in_progress/);
+});
+
+test('leaving In Progress with open events for two different actors still closes both (no over-collapsing across actors)', () => {
+  // Grouping duplicate-collapse by Actor must not fold genuinely different
+  // actors' open events into a single survivor — this is the ordinary
+  // "leaving In Progress closes every open event for the Task" case,
+  // re-asserted after grouping by actor was introduced for the fix above.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f07';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Review',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+    })],
+    events: [
+      eventPage('evt-actor-a', { actor: 'Claude', startedAt: '2026-08-30T05:10:00.000Z' }),
+      eventPage('evt-actor-b', { actor: 'Chris', startedAt: '2026-08-30T05:20:00.000Z' }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /closed:evt-actor-a/);
+  assert.match(summary.outcomes[0], /closed:evt-actor-b/);
+  assert.doesNotMatch(summary.outcomes[0], /closed_duplicate:/);
+  assert.equal(requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-').length, 2);
+});
+
 test('re-reading an unchanged Task in the overlap window makes no Notion mutation', () => {
   const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d1f03', {
     status: 'In Progress',
