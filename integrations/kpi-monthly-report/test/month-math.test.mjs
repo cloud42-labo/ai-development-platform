@@ -65,3 +65,13 @@ test('generateMonthlyKpiReportFor rejects an out-of-range month instead of letti
   assert.throws(() => sandbox.generateMonthlyKpiReportFor('2026-01'), /NOTION_TOKEN/);
   assert.throws(() => sandbox.generateMonthlyKpiReportFor('2026-12'), /NOTION_TOKEN/);
 });
+
+// Regression: "0026-09" is syntactically \d{4}-\d{2}, but Number("0026") is
+// 26, and Date.UTC(26, ...) applies JS's legacy two-digit-year remap to
+// 1926 — silently generating/misdating a report for the wrong century under
+// a "26-09" title.
+test('generateMonthlyKpiReportFor rejects a leading-zero year instead of letting Number/Date.UTC collapse it', () => {
+  const { sandbox } = loadCodeGsSandbox();
+  assert.throws(() => sandbox.generateMonthlyKpiReportFor('0026-09'), /4-digit year/);
+  assert.throws(() => sandbox.generateMonthlyKpiReportFor('0999-09'), /4-digit year/);
+});

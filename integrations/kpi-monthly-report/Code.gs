@@ -156,6 +156,13 @@ function generateMonthlyKpiReportFor(label) {
   if (month < 1 || month > 12) {
     throw new Error('generateMonthlyKpiReportFor: month must be 01-12, got: ' + label);
   }
+  // A leading-zero year like "0026" is syntactically \d{4} but Number()
+  // collapses it to 26 — Date.UTC(26, ...) then applies JS's legacy
+  // two-digit-year remap to 1926, silently mislabeling and misdating the
+  // report. Require all 4 digits to survive numeric conversion.
+  if (String(year).length !== 4) {
+    throw new Error('generateMonthlyKpiReportFor: year must be a 4-digit year without leading zeros, got: ' + label);
+  }
   return withRunLock_(function () {
     return generateMonthlyKpiReportForMonth_(targetMonthFromYearMonth_(year, month));
   });
