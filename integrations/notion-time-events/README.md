@@ -62,6 +62,24 @@ Actor mapping:
 
 Normal conversation and non-Task activity are outside this integration because no managed Task state is reconciled.
 
+## Execution Event self-reporting (`BUG-ADP-TTE-01-B`)
+
+Every Time Event this integration itself creates or closes is opened and closed by `pollTaskChanges` inferring boundaries from `Status`, so its own `Started At`/`Ended At` can only ever be as precise as the poll interval and can only reflect *dwell time in `Status = In Progress`*, not genuine execution. `Status` can legitimately sit `In Progress` for stretches with no real work happening (e.g. waiting on an external response mid-task), and a delayed poll can inflate a boundary well past the real transition (see "Known limitations"). Neither gap is fixable from the polling side alone.
+
+`governance/ai-execution-constraints.md`'s managed-work pre-flight (steps 4–5) closes this by having the acting AI **self-report** the real wall-clock boundary directly, instead of leaving Active time to be inferred from `Status` alone:
+
+- **Open**: create a page in this same `Task Time Events` data source with `Task` (relation to the Task), `Actor` (select — same mapping as above), `Started At` (the real moment, not a poll-derived one), and `State = Active`. This is the identical shape `createNotionTimeEvent_` writes, minus the diagnostic `Note` metadata (`Execution=`/`Task Origin=`/`Snapshot=`) that only this script's own provenance tracking needs — a self-reported event needs none of it to be treated as authoritative.
+- **Close**: when work genuinely stops before `Status` itself changes, set `Ended At` on that same page to the real stop moment. If the stop coincides with a `Status` change away from `In Progress` (e.g. straight to `Review`), the next poll's ordinary transition handling closes it and no separate write is needed.
+
+**No Code.gs change was needed for this to work, and none should be added merely to special-case it.** `reconcileAuthoritativeTimeEvents_` decides "is there already an open event for this Task/Actor?" purely from the data — any `Task Time Events` page for the Task with no `Ended At` — never from who created it or whether it carries this script's own Note markers:
+
+- A self-reported event still open when the next poll runs is recognized as `already_open:` for that Actor; the poll does not open a second one.
+- If a different Actor is now `In Progress`, the self-reported event is closed as an ordinary `reassignment`, exactly like a script-created one.
+- A second, genuinely duplicate self-reported open event for the same Task/Actor is reconciled down to one via the existing `duplicate_reconciliation` path.
+- Leaving `In Progress` closes it via the existing generic close, the same as any other open event.
+
+This means self-reporting and this script's own Status-driven bootstrap can coexist for the same Task without conflicting or double-counting: whichever one opens the event first is kept, and the ordinary reconciliation rules above already govern what happens next. See `test/poll.test.mjs`, "a self-reported Execution Event…", for the regression coverage locking this in.
+
 ## Why there is no webhook receiver
 
 The earlier design in this directory used a Notion webhook subscription. Notion proves a webhook delivery's authenticity **only** through the `X-Notion-Signature` request header, computed as HMAC-SHA256 of the raw body under the subscription's verification token.

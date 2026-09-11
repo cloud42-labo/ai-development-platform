@@ -152,6 +152,55 @@ test('an In Progress Task with no open event opens exactly one Time Event', () =
   assert.equal(created.properties.Actor.select.name, 'Claude');
 });
 
+test('a self-reported Execution Event (BUG-ADP-TTE-01-B) is continued, not duplicated', () => {
+  // governance/ai-execution-constraints.md has the acting AI open this page
+  // itself, directly via the Notion API, at the real moment it starts
+  // substantive work — not through createNotionTimeEvent_. The fixture
+  // below is deliberately as bare as a self-report would be: no
+  // Execution=/Task Origin=/Snapshot= Note metadata at all, since only this
+  // script's own provenance tracking needs that, never the "is this
+  // already open" check itself.
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f04';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'In Progress',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T05:12:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+    })],
+    events: [
+      eventPage('evt-self-reported', { actor: 'Claude', startedAt: '2026-08-30T05:10:00.000Z' }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /^already_open:/);
+  assert.equal(requestsTo(fetchLog, 'POST', '/v1/pages').length, 0);
+});
+
+test('a self-reported Execution Event (BUG-ADP-TTE-01-B) is closed like any other when the Task leaves In Progress', () => {
+  const taskId = '3cafbd82-6f3b-8158-9622-d795b43d1f05';
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage(taskId, {
+      status: 'Review',
+      agent: 'Claude Opus',
+      lastEdited: '2026-08-30T06:00:00.000Z',
+      startedAt: '2026-08-30T05:10:00.000Z',
+    })],
+    events: [
+      eventPage('evt-self-reported-2', { actor: 'Claude', startedAt: '2026-08-30T05:10:00.000Z' }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.match(summary.outcomes[0], /closed:evt-self-reported-2/);
+  const closes = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-self-reported-2');
+  assert.equal(closes.length, 1);
+  assert.ok(JSON.parse(closes[0].options.payload).properties['Ended At'].date.start);
+});
+
 test('re-reading an unchanged Task in the overlap window makes no Notion mutation', () => {
   const task = taskPage('3cafbd82-6f3b-8158-9622-d795b43d1f03', {
     status: 'In Progress',
