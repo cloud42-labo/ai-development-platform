@@ -239,6 +239,12 @@ test('leaving In Progress with a same-actor duplicate open event closes one as d
     requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-poller-opened')[0].options.payload
   );
   assert.match(duplicateClose.properties.Note.rich_text[0].text.content, /Reason=duplicate_reconciliation/);
+  // Codex-reported gap, round 2: closing the duplicate at `when` (the exit
+  // timestamp, 06:00) instead of its own Started At would give it a real,
+  // non-zero Duration (h)/Active Hours — Notion's own formula on this data
+  // source has no Reason filter, so the overlapping interval would still be
+  // counted twice. Ended At must equal the duplicate's own Started At.
+  assert.equal(duplicateClose.properties['Ended At'].date.start, '2026-08-30T05:10:00.000Z');
 
   const realClose = JSON.parse(
     requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-self-reported-dup')[0].options.payload

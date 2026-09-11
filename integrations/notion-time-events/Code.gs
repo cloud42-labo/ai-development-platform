@@ -2095,7 +2095,29 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         return eventStartedAt_(b).getTime() - eventStartedAt_(a).getTime();
       });
       for (let i = 1; i < group.length; i++) {
-        closeNotionTimeEvent_(group[i], currentStatus, changedBy, snapshotId, when, 'duplicate_reconciliation');
+        // Close at the duplicate's OWN Started At, not `when` — Codex-
+        // reported gap (PR #46 review, round 2): closing every duplicate at
+        // the same exit timestamp as the survivor gives it a real, non-zero
+        // Duration (h)/Active Hours (Notion's own formula on this data
+        // source, and the Sheet projection's Duration (h) column, both key
+        // off State=Active + Ended At/Started At with no Reason filter — a
+        // duplicate_reconciliation-closed event is never excluded from
+        // either), so the overlapping interval still gets counted twice,
+        // only its Note label differs. Archiving it instead (the pattern
+        // this file already uses for a Story's stray events) is NOT safe
+        // here: review-fix-state-model.md's churn-inheritance rule (§6)
+        // deliberately treats a duplicate_reconciliation-closed event as
+        // queryable same-execution evidence, and archiving removes it from
+        // every query outright. Ended At = Started At keeps the event
+        // present with the correct Reason (still visible to that future
+        // logic) while making its own Duration exactly 0 — it never
+        // represented any additional real elapsed time beyond what the
+        // survivor already counts. The identical gap exists in the
+        // pre-existing In-Progress branch's own sameActor dedup above
+        // (closes at `when` the same way) — out of scope for this fix (a
+        // wider, pre-existing pattern this PR did not introduce); tracked
+        // as its own follow-on MISC item rather than changed here.
+        closeNotionTimeEvent_(group[i], currentStatus, changedBy, snapshotId, eventStartedAt_(group[i]), 'duplicate_reconciliation');
         actions.push('closed_duplicate:' + group[i].id);
       }
       survivorsToClose.push(group[0]);
