@@ -153,6 +153,9 @@ function generateMonthlyKpiReportFor(label) {
   if (!match) throw new Error('generateMonthlyKpiReportFor expects "YYYY-MM", got: ' + label);
   const year = Number(match[1]);
   const month = Number(match[2]);
+  if (month < 1 || month > 12) {
+    throw new Error('generateMonthlyKpiReportFor: month must be 01-12, got: ' + label);
+  }
   return withRunLock_(function () {
     return generateMonthlyKpiReportForMonth_(targetMonthFromYearMonth_(year, month));
   });
@@ -620,11 +623,15 @@ function githubSearchPRs_(repo, field, target) {
 // Product set, or more than one Task references it ambiguously.
 function lookupProductForPr_(repo, number) {
   const needle = repo + '/pull/' + number;
-  const result = notionRequest_('post', '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query', {
-    page_size: 5,
-    // `contains` is a coarse pre-filter only (e.g. PR #4 also matches a URL
-    // containing /pull/42) — pullRequestUrlMatches_ below re-checks with a
-    // path boundary so a numeric prefix never misattributes the Product.
+  // `contains` is a coarse pre-filter only (e.g. PR #4 also matches a URL
+  // containing /pull/42) — pullRequestUrlMatches_ below re-checks with a
+  // path boundary so a numeric prefix never misattributes the Product. Must
+  // paginate the candidate set (not just take a first small page): with a
+  // short-numbered PR, the exact match can sort past the first few
+  // coarse-matched Tasks (e.g. #4 alongside Tasks for #40-#49), which would
+  // otherwise drop a real match — or hide a real ambiguity — off-page.
+  const result = paginateNotionQuery_('/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query', {
+    page_size: MAX_PAGE_SIZE,
     filter: { property: 'Pull Request', url: { contains: needle } },
   });
   const matches = (result.results || []).filter(function (task) {

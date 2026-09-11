@@ -34,9 +34,12 @@ Notion page.
   Task matching ambiguously (more than one hit) is reported under
   `Unknown/未分類`. **Never guessed from repo name, title, or branch.**
 - **"Blocked / Human Gate" section is a snapshot at report-generation time**
-  (current `Status = Blocked` count, current open `Type = Human Request`
-  count in `Ready`/`In Progress`/`Review`/`Backlog`), plus Human Request
-  Tasks whose `Completed At` falls inside the target month. It is **not**
+  (current `Status = Blocked` count, current Actionable Human Queue count —
+  `Assigned Agent = Human` with `Status` in `Ready`/`In Progress`/`Review`,
+  the same governed predicate as `governance/ai-execution-constraints.md`'s
+  "Human Queue WIP constraint" and the Notion "Human Queue｜Actionable"
+  view), plus Human Request Tasks whose `Completed At` falls inside the
+  target month. It is **not**
   the weekly Blocked-reason classification (AI Dependency / True Human Gate
   / External Condition / Stale Blocker) the KPI Framework defines for Sprint
   Review — that classification reads free-text `Blocker` and requires
@@ -89,7 +92,7 @@ Script project or authorize it. This mirrors the precedent in
 1. In the Apps Script editor ([script.google.com](https://script.google.com)), create a new **standalone** project (File → New project). Do not bind it to a Spreadsheet — this integration has no Sheets output.
 2. Replace `Code.gs` with the current version from this directory.
 3. Under **Project Settings → Script Properties**, add:
-   - `NOTION_TOKEN` — same Notion integration token used by `integrations/notion-time-events`, with read access to `Stories & Tasks`, `Task Time Events`, `Products`, and **Insert Content** capability under the `AI Organization KPI Framework` page (to create/update the monthly report page and its blocks).
+   - `NOTION_TOKEN` — same Notion integration token used by `integrations/notion-time-events`, with read access to `Stories & Tasks`, `Task Time Events`, `Products`, and both **Insert Content** AND **Update Content** capability under the `AI Organization KPI Framework` page (Insert Content alone lets the first run create the monthly report page, but every rerun fails at `DELETE /v1/blocks/{id}` without Update Content too — see "Notion connection requirements" below).
    - `GITHUB_TOKEN` — a token (fine-grained PAT or GitHub App installation token) with `Contents: read` / `Pull requests: read` (or `public_repo` scope for a classic PAT) across the repos in `GITHUB_REPOS`.
    - Never set either from committed code, logs, or the Sheet — there is no Sheet here at all.
 4. Run `setup()` once from the editor. It records the default data-source/page IDs as Script Properties (only if not already set — safe to re-run) and installs the `generateMonthlyKpiReport` time-driven trigger (day 1 of month, ~07:00 `Asia/Tokyo`). Authorize the script when prompted.

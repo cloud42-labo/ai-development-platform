@@ -51,3 +51,17 @@ test('generateMonthlyKpiReportFor rejects a malformed label instead of guessing'
   assert.throws(() => sandbox.generateMonthlyKpiReportFor('2026-9'), /YYYY-MM/);
   assert.throws(() => sandbox.generateMonthlyKpiReportFor('not-a-month'), /YYYY-MM/);
 });
+
+// Regression: the shape check `\d{2}` alone accepts an out-of-range month
+// (e.g. "00" or "13"); Date then silently normalizes it into the adjacent
+// December/January while the report keeps the typo'd label as its title —
+// a backfill typo would create/overwrite a misleadingly named report.
+test('generateMonthlyKpiReportFor rejects an out-of-range month instead of letting Date normalize it', () => {
+  const { sandbox } = loadCodeGsSandbox();
+  assert.throws(() => sandbox.generateMonthlyKpiReportFor('2026-00'), /01-12/);
+  assert.throws(() => sandbox.generateMonthlyKpiReportFor('2026-13'), /01-12/);
+  // in-range boundaries must still be accepted (fail later, on the missing
+  // NOTION_TOKEN script property, not on the month check itself)
+  assert.throws(() => sandbox.generateMonthlyKpiReportFor('2026-01'), /NOTION_TOKEN/);
+  assert.throws(() => sandbox.generateMonthlyKpiReportFor('2026-12'), /NOTION_TOKEN/);
+});

@@ -113,6 +113,41 @@ test('lookupProductForPr_ does not attribute PR #4 to a Task whose URL is actual
   );
 });
 
+test('lookupProductForPr_ paginates the coarse candidate query so the exact match is not lost off a later page', () => {
+  // Regression: a naive single page_size:5 request can leave the one exact
+  // match (PR #4) sitting on page 2 behind five unrelated coarse matches
+  // (#40-#44), silently reporting Unknown/未分類 instead of the real Product.
+  const routes = {
+    'POST /v1/data_sources/tasks-ds/query': (body) => {
+      if (!body.start_cursor) {
+        return {
+          results: [40, 41, 42, 43, 44].map((n) => ({
+            properties: {
+              'Pull Request': { url: 'https://github.com/acme/widgets/pull/' + n },
+              Product: { type: 'relation', relation: [{ id: 'prod-A' }] },
+            },
+          })),
+          has_more: true,
+          next_cursor: 'page-2',
+        };
+      }
+      return {
+        results: [{
+          properties: {
+            'Pull Request': { url: 'https://github.com/acme/widgets/pull/4' },
+            Product: { type: 'relation', relation: [{ id: 'prod-B' }] },
+          },
+        }],
+        has_more: false,
+      };
+    },
+    'GET /v1/pages/prod-B': () => ({ properties: { Name: { type: 'title', title: [{ plain_text: 'AOD' }] } } }),
+  };
+  const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub(routes) });
+
+  assert.equal(sandbox.lookupProductForPr_('acme/widgets', 4), 'AOD');
+});
+
 test('pullRequestUrlMatches_ requires a path boundary right after the PR number', () => {
   const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub({}) });
   const needle = 'acme/widgets/pull/4';
