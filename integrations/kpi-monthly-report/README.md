@@ -132,6 +132,12 @@ under the KPI Framework page:
   page specifically (to create the first monthly report page there; every
   later page update only needs to touch that already-shared page and its
   own children, not the Framework page's own content).
+- **Update Content** capability as well — a rerun for an already-generated
+  month deletes that month's existing report-page child blocks
+  (`DELETE /v1/blocks/{id}`) before appending fresh ones, and Notion
+  requires Update Content for that endpoint. Insert Content alone lets the
+  first run create a report but makes every rerun fail before it can
+  refresh one.
 
 `Stories & Tasks`.`Status`/`Type` are Notion **`select`** properties, not
 the distinct **`status`** property type — the same schema fact
