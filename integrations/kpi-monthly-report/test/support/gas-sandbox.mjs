@@ -158,6 +158,7 @@ export function fetchStub(routes) {
     return {
       getResponseCode: () => (body && body.__status) || 200,
       getContentText: () => JSON.stringify(body && body.__status ? body.body : body),
+      getHeaders: () => (body && body.__headers) || {},
     };
   };
 }

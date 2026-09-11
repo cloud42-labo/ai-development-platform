@@ -426,6 +426,11 @@ function queryCurrentBlockedTasks_() {
   );
 }
 
+// Governed Actionable Human Queue definition (governance/ai-execution-constraints.md
+// "Human Queue WIP constraint", matching the Notion "Human Queue｜Actionable"
+// view): Assigned Agent = Human, Status in Ready/In Progress/Review. Note this
+// is by assignee, not Type=Human Request — a Human-assigned Bug/Task counts,
+// and Backlog is excluded (not yet Actionable).
 function queryCurrentOpenHumanRequests_() {
   return paginateNotionQuery_(
     '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
@@ -433,9 +438,9 @@ function queryCurrentOpenHumanRequests_() {
       page_size: MAX_PAGE_SIZE,
       filter: {
         and: [
-          { property: 'Type', select: { equals: 'Human Request' } },
+          { property: 'Assigned Agent', select: { equals: 'Human' } },
           {
-            or: ['Ready', 'In Progress', 'Review', 'Backlog'].map(function (s) {
+            or: ['Ready', 'In Progress', 'Review'].map(function (s) {
               return { property: 'Status', select: { equals: s } };
             }),
           },
@@ -617,11 +622,14 @@ function lookupProductForPr_(repo, number) {
   const needle = repo + '/pull/' + number;
   const result = notionRequest_('post', '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query', {
     page_size: 5,
+    // `contains` is a coarse pre-filter only (e.g. PR #4 also matches a URL
+    // containing /pull/42) — pullRequestUrlMatches_ below re-checks with a
+    // path boundary so a numeric prefix never misattributes the Product.
     filter: { property: 'Pull Request', url: { contains: needle } },
   });
   const matches = (result.results || []).filter(function (task) {
     const url = task.properties['Pull Request'] && task.properties['Pull Request'].url;
-    return typeof url === 'string' && url.indexOf(needle) !== -1;
+    return pullRequestUrlMatches_(url, needle);
   });
   if (matches.length !== 1) return null;
   const ids = relationIds_(matches[0].properties.Product);
@@ -631,6 +639,16 @@ function lookupProductForPr_(repo, number) {
   // a plain object keyed by product id to avoid re-fetching the same
   // Product repeatedly within one run.
   return resolveProductNameCached_(ids[0]);
+}
+
+// Requires `needle` (owner/repo/pull/NUMBER) to end at a path boundary in
+// `url`, so PR #4 cannot be matched by a Task URL for PR #42, #423, etc.
+function pullRequestUrlMatches_(url, needle) {
+  if (typeof url !== 'string') return false;
+  const idx = url.indexOf(needle);
+  if (idx === -1) return false;
+  const after = url.charAt(idx + needle.length);
+  return after === '' || after === '/' || after === '?' || after === '#';
 }
 
 const PRODUCT_NAME_CACHE_ = {};
@@ -807,7 +825,7 @@ function buildReportBlocks_(report) {
     '⚠️'
   ));
   blocks.push(textBlock_('paragraph', '現在Blocked件数（全Product合計）: ' + report.blocked.total +
-    ' ／ 現在Human Queue件数（全Product合計、Ready/In Progress/Review/Backlog）: ' + report.humanQueue.total));
+    ' ／ 現在Human Queue件数（全Product合計、Assigned Agent=Human かつ Status: Ready/In Progress/Review）: ' + report.humanQueue.total));
 
   blocks.push(textBlock_('heading_2', '5. データ欠損・Unknown/未分類の扱い'));
   blocks.push(textBlock_('paragraph',
@@ -884,6 +902,8 @@ function retrieveNotionPage_(pageId) {
   return notionRequest_('get', '/v1/pages/' + encodeURIComponent(pageId));
 }
 
+const NOTION_RATE_LIMIT_MAX_RETRIES = 5;
+
 function notionRequest_(method, path, body) {
   const token = PropertiesService.getScriptProperties().getProperty('NOTION_TOKEN');
   if (!token) throw new Error('NOTION_TOKEN is not configured in Apps Script Script Properties.');
@@ -901,13 +921,28 @@ function notionRequest_(method, path, body) {
     options.payload = JSON.stringify(body);
   }
 
-  const response = UrlFetchApp.fetch('https://api.notion.com' + path, options);
-  const code = response.getResponseCode();
-  const text = response.getContentText();
-  if (code < 200 || code >= 300) {
-    throw new Error('Notion API failed: ' + method.toUpperCase() + ' ' + path + ' HTTP ' + code + ' ' + text);
+  // Notion rate-limits at ~3 req/s; at this integration's monthly PR/attribution
+  // volume (200+ per-PR lookups) a 429 is expected, not exceptional. Honor
+  // Retry-After (falling back to exponential backoff if absent) instead of
+  // treating the first 429 as fatal and aborting the whole monthly run.
+  for (let attempt = 0; attempt <= NOTION_RATE_LIMIT_MAX_RETRIES; attempt++) {
+    const response = UrlFetchApp.fetch('https://api.notion.com' + path, options);
+    const code = response.getResponseCode();
+    const text = response.getContentText();
+    if (code === 429 && attempt < NOTION_RATE_LIMIT_MAX_RETRIES) {
+      const retryAfterHeader = response.getHeaders()['Retry-After'] || response.getHeaders()['retry-after'];
+      const retryAfterSec = parseInt(retryAfterHeader, 10);
+      const waitMs = (isNaN(retryAfterSec) ? Math.pow(2, attempt) : retryAfterSec) * 1000;
+      Logger.log('notionRequest_ got 429 for ' + method.toUpperCase() + ' ' + path + ', retrying in ' + waitMs + 'ms (attempt ' + (attempt + 1) + '/' + NOTION_RATE_LIMIT_MAX_RETRIES + ')');
+      Utilities.sleep(waitMs);
+      continue;
+    }
+    if (code < 200 || code >= 300) {
+      throw new Error('Notion API failed: ' + method.toUpperCase() + ' ' + path + ' HTTP ' + code + ' ' + text);
+    }
+    return text ? JSON.parse(text) : {};
   }
-  return text ? JSON.parse(text) : {};
+  throw new Error('Notion API failed: ' + method.toUpperCase() + ' ' + path + ' — exhausted retries on HTTP 429');
 }
 
 const QUERY_PAGE_SAFETY_LIMIT = 50;

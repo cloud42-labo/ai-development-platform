@@ -86,3 +86,40 @@ test('lookupProductForPr_ attributes a PR to its matching Task\'s single Product
   assert.equal(sandbox.lookupProductForPr_('acme/widgets', 42), 'ADP');
   assert.equal(sandbox.lookupProductForPr_('acme/widgets', 99), null);
 });
+
+test('lookupProductForPr_ does not attribute PR #4 to a Task whose URL is actually for PR #42 (numeric-prefix collision)', () => {
+  const routes = {
+    // Notion's `contains` filter is a coarse substring pre-filter: querying
+    // for PR #4 (needle "acme/widgets/pull/4") also surfaces this Task,
+    // whose Pull Request is really #42. The exact/boundary check inside
+    // lookupProductForPr_ must reject it rather than misattribute Product.
+    'POST /v1/data_sources/tasks-ds/query': () => ({
+      results: [{
+        properties: {
+          'Pull Request': { url: 'https://github.com/acme/widgets/pull/42' },
+          Product: { type: 'relation', relation: [{ id: 'prod-A' }] },
+        },
+      }],
+      has_more: false,
+    }),
+    'GET /v1/pages/prod-A': () => ({ properties: { Name: { type: 'title', title: [{ plain_text: 'ADP' }] } } }),
+  };
+  const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub(routes) });
+
+  assert.equal(
+    sandbox.lookupProductForPr_('acme/widgets', 4),
+    null,
+    'PR #4 must not be attributed via a Task that actually references PR #42'
+  );
+});
+
+test('pullRequestUrlMatches_ requires a path boundary right after the PR number', () => {
+  const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub({}) });
+  const needle = 'acme/widgets/pull/4';
+
+  assert.equal(sandbox.pullRequestUrlMatches_('https://github.com/acme/widgets/pull/4', needle), true);
+  assert.equal(sandbox.pullRequestUrlMatches_('https://github.com/acme/widgets/pull/42', needle), false);
+  assert.equal(sandbox.pullRequestUrlMatches_('https://github.com/acme/widgets/pull/423', needle), false);
+  assert.equal(sandbox.pullRequestUrlMatches_('https://github.com/acme/widgets/pull/4/files', needle), true);
+  assert.equal(sandbox.pullRequestUrlMatches_(null, needle), false);
+});
