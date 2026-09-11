@@ -1,0 +1,31 @@
+name: KPI Monthly Report
+
+on:
+  pull_request:
+    paths:
+      - 'integrations/kpi-monthly-report/**'
+      - '.github/workflows/kpi-monthly-report.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'integrations/kpi-monthly-report/**'
+      - '.github/workflows/kpi-monthly-report.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Run Apps Script report-generator tests
+        working-directory: integrations/kpi-monthly-report
+        run: node --test test/*.test.mjs
