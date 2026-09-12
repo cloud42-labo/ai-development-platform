@@ -3601,21 +3601,39 @@ function appendNote_(existingNote, marker, maxLength) {
   // Write= joins this protected set (docs/review-fix-state-model.md §4,
   // failure #29): losing it silently downgrades an event back to the
   // legacy best-effort tie-break heuristic, the exact regression this field
-  // exists to retire. Note this protects only the newest Write= segment
-  // from eviction the same way it protects the newest Execution=/Boundary=/
-  // Task Origin= — it does not make Write= immutable the way Task Origin=
-  // is (stampExecutionBoundary_ deliberately appends a fresh Write=
-  // rather than preserving the original close's, per its own comment).
-  const isProtectedIdentitySegment = function (segment) {
+  // exists to retire. Unlike Execution=/Boundary=/Task Origin= — each of
+  // which this codebase only ever writes once per event, so "protect any
+  // segment with this prefix" and "protect only the newest one" coincide —
+  // Write= is deliberately re-appended on every close/stamp (last-
+  // occurrence-wins, per buildNote_), so a closed-then-retroactively-
+  // stamped event can carry more than one Write= segment at once. Only the
+  // segment noteField_ would actually return (the LAST Write= occurrence —
+  // or none at all, if the marker being appended right now already carries
+  // a fresher one of its own) needs protecting; an older, already-
+  // superseded Write= is exactly as disposable as any ordinary segment,
+  // and must not out-rank a Result Fingerprint= for survival the way a
+  // genuinely current identity marker does (Codex review, PR #49).
+  const isWriteSegment = function (segment) {
+    return segment.trim().indexOf('Write=') === 0;
+  };
+  const markerHasWrite = clippedMarker.split(separator).some(isWriteSegment);
+  const isProtectedIdentitySegment = function (segment, index, allSegments) {
     const trimmed = segment.trim();
-    return trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0
-      || trimmed.indexOf('Task Origin=') === 0 || trimmed.indexOf('Write=') === 0;
+    if (trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0
+      || trimmed.indexOf('Task Origin=') === 0) {
+      return true;
+    }
+    if (!isWriteSegment(segment) || markerHasWrite) return false;
+    for (let i = allSegments.length - 1; i > index; i--) {
+      if (isWriteSegment(allSegments[i])) return false;
+    }
+    return true;
   };
   const segments = existingNote.split(separator);
   let combined = segments.concat([clippedMarker]).join(separator);
   while (segments.length && combined.length > maxLength) {
-    let dropIndex = segments.findIndex(function (segment) {
-      return !isFingerprintSegment(segment) && !isProtectedIdentitySegment(segment);
+    let dropIndex = segments.findIndex(function (segment, index) {
+      return !isFingerprintSegment(segment) && !isProtectedIdentitySegment(segment, index, segments);
     });
     if (dropIndex < 0) dropIndex = segments.findIndex(isFingerprintSegment);
     if (dropIndex < 0) dropIndex = 0;

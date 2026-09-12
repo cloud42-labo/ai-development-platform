@@ -531,6 +531,53 @@ test('appendNote_ evicts non-fingerprint segments before ever touching an older 
   assert.equal(combined.indexOf('Snapshot='), -1, 'the non-fingerprint segment should have been dropped instead');
 });
 
+test('appendNote_ protects only the newest Write= occurrence, evicting a superseded older one before ever touching a Result Fingerprint (ADP-051-B, Codex review PR #49)', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // A closed-then-retroactively-stamped event can carry two Write=
+  // segments at once (stampExecutionBoundary_ appends a fresh one rather
+  // than replacing the close's own) — unlike Execution=/Boundary=/Task
+  // Origin=, which this codebase only ever writes once per event. Only the
+  // LAST Write= is what noteField_ would ever return; the first is already
+  // superseded and must not out-rank a fingerprint for survival.
+  const staleWrite = 'Write=1000000000000';
+  const freshWrite = 'Write=1000000600000';
+  const fingerprint = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+  const existingNote = [staleWrite, freshWrite, fingerprint].join(' | ');
+  // A marker with no Write= of its own (e.g. an ordinary Result Fingerprint
+  // stamp) — small enough that the stale Write= alone isn't enough room,
+  // forcing the eviction loop to actually choose between it and the
+  // fingerprint.
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v2');
+  const maxLength = freshWrite.length + fingerprint.length + newMarker.length + 20;
+
+  const combined = sandbox.appendNote_(existingNote, newMarker, maxLength);
+
+  assert.ok(combined.length <= maxLength);
+  assert.ok(combined.indexOf(freshWrite) >= 0, 'the newest Write= must survive the eviction');
+  assert.ok(combined.indexOf(fingerprint) >= 0, 'the existing fingerprint must survive the eviction, ahead of a stale Write=');
+  assert.equal(combined.indexOf(staleWrite), -1, 'the superseded, older Write= should have been dropped instead');
+  assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
+});
+
+test('appendNote_ protects no existing Write= when the freshly written marker already carries its own fresher one', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const existingWrite = 'Write=1000000000000';
+  const fingerprint = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+  const existingNote = [existingWrite, fingerprint].join(' | ');
+  // The marker itself is a close carrying a fresher Write= — the existing
+  // one is superseded the instant this append happens, so it needs no
+  // protection at all, even ahead of the fingerprint.
+  const newMarker = sandbox.buildNote_({ endStatus: 'Review', write: 1000000600000 });
+  const maxLength = newMarker.length + fingerprint.length + 10;
+
+  const combined = sandbox.appendNote_(existingNote, newMarker, maxLength);
+
+  assert.ok(combined.length <= maxLength);
+  assert.ok(combined.indexOf(fingerprint) >= 0, 'the existing fingerprint must survive ahead of the now-superseded Write=');
+  assert.equal(combined.indexOf(existingWrite), -1, 'the old Write= should have been dropped, since the marker already carries a fresher one');
+  assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
+});
+
 test('appendNote_ evicts an older Result Fingerprint before ever touching Execution=/Boundary=', () => {
   const { sandbox } = harnessWithNotionStub();
   // Execution=/Boundary= identify which execution an event belongs to and
