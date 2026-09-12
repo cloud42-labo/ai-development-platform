@@ -2718,7 +2718,13 @@ function markResultValidated_(eventPage, result) {
 // two cases apart) has an existing, tested hook to call into.
 function stampExecutionBoundary_(eventPage, executionId) {
   const existingNote = propertyText_(eventPage.properties.Note);
-  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId });
+  // Always a fresh Date.now() here, deliberately overwriting (in the
+  // last-occurrence-wins sense noteField_ already applies — see buildNote_)
+  // any Write= the original close left. That original Write= timestamps the
+  // stale close being retroactively corrected, not the discovery of the
+  // boundary; §3 step 1 / §4 need the discovery time to order this
+  // candidate against other evidence (docs/review-fix-state-model.md).
+  const marker = buildNote_({ boundary: 'left_in_progress', execution: executionId, write: Date.now() });
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
     properties: {
       Note: { rich_text: [{ type: 'text', text: { content: appendNote_(existingNote, marker, 1800) } }] },
@@ -2793,6 +2799,10 @@ function closeNotionTimeEvent_(eventPage, endStatus, changedBy, snapshotId, when
     reason: reason,
     snapshotId: snapshotId,
     changedBy: changedBy,
+    // This close's own Apps-Script write time, for §4's minute-tie
+    // breaking only — see buildNote_'s comment. Not a substitute for
+    // `when` (the transition-side timestamp actually stored in Ended At).
+    write: Date.now(),
   });
 
   notionRequest_('patch', '/v1/pages/' + encodeURIComponent(eventPage.id), {
@@ -3098,6 +3108,19 @@ function buildNote_(fields) {
   if (fields.endStatus) parts.push('End Status=' + fields.endStatus);
   if (fields.reason) parts.push('Reason=' + fields.reason);
   if (fields.boundary) parts.push('Boundary=' + fields.boundary);
+  // The Apps Script process's own Date.now() (millisecond precision) at the
+  // moment this specific write happens — never a capture of the real-world
+  // status-transition moment. Exists solely to break a same-Notion-minute
+  // tie between two candidate boundaries/rows that Notion's own minute-
+  // granular timestamps cannot resolve (see docs/review-fix-state-model.md
+  // §4). A fresh Write= is appended on every write that needs one (never
+  // mutated in place); noteField_'s last-occurrence lookup naturally
+  // returns the newest one. `0` is a real (if practically impossible)
+  // Date.now() value, so this must not use a plain truthy check — but
+  // `fields.write` is only ever populated with `Date.now()` by this
+  // codebase's own callers, so a strict undefined/null check is enough
+  // without over-engineering for a value this field's producers never emit.
+  if (fields.write !== undefined && fields.write !== null && fields.write !== '') parts.push('Write=' + fields.write);
   if (fields.execution) parts.push('Execution=' + fields.execution);
   if (fields.snapshotId) parts.push('Snapshot=' + fields.snapshotId);
   // Stamped ONLY at creation (see createNotionTimeEvent_), never again by
@@ -3139,6 +3162,15 @@ function parseNoteMeta_(note) {
     // legacy Reason/Boundary/tie heuristic whenever it's present (absent
     // only on data from before this field existed).
     execution: noteField_(note, 'Execution'),
+    // The most recent Write= on this event: the Apps Script process's own
+    // Date.now() at the moment of that write, as a string. Used only to
+    // break a same-Notion-minute tie between two candidate boundaries/rows
+    // (docs/review-fix-state-model.md §4) — never to answer "when did the
+    // real transition happen," which this field structurally cannot
+    // capture (see buildNote_). Empty on legacy events written before this
+    // field existed; callers must fall back to the documented best-effort
+    // heuristic in that case, never treat an absent Write= as `0`.
+    write: noteField_(note, 'Write'),
     // The MOST RECENT snapshot to touch this event at all — creation, a
     // close, a reassignment, anything. Used where "what last happened to
     // this event" is the actual question (e.g. the Sheet projection's own
@@ -3239,7 +3271,12 @@ function hasProcessedSnapshot_(snapshotId, taskId) {
 // column only ever being populated with a genuine, current Type observation.
 function logSnapshot_(id, source, taskId, status, receivedAt, outcome, taskType) {
   const sheet = ensureSyncLogSheet_();
-  sheet.appendRow([id || '', source || '', taskId || '', status || '', receivedAt || new Date(), outcome || '', taskType || '']);
+  // 8th column: this write's own Date.now(), computed here rather than
+  // accepted as a caller-supplied argument — every call site logs "now",
+  // by construction, so there is nothing for a caller to decide. See the
+  // 'Write' header comment in ensureSyncLogSheet_ and
+  // docs/review-fix-state-model.md §4.
+  sheet.appendRow([id || '', source || '', taskId || '', status || '', receivedAt || new Date(), outcome || '', taskType || '', Date.now()]);
 }
 
 // True if this Task page's MOST RECENT Sync Log observation as Type=Story
@@ -3477,8 +3514,14 @@ function ensureSyncLogSheet_() {
     sheet = ss.insertSheet(DEFAULTS.SYNC_LOG_SHEET);
     sheet.hideSheet();
   }
-  sheet.getRange(1, 1, 1, 7).setValues([[
-    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome', 'Type'
+  sheet.getRange(1, 1, 1, 8).setValues([[
+    // 'Write' (8th column, added for ADP-051-B): the Apps Script process's
+    // own Date.now() at the moment this row was appended — see
+    // logSnapshot_ and docs/review-fix-state-model.md §4. A row appended
+    // before this column existed simply has no 8th cell (getRange reads
+    // '' for it — see hasProcessedSnapshot_/FakeSheet._cell), the same
+    // legacy-data gap Write= already has on Time Event Notes.
+    'Snapshot ID', 'Source', 'Task ID', 'Status', 'Reconciled At', 'Outcome', 'Type', 'Write'
   ]]);
   return sheet;
 }
@@ -3555,10 +3598,18 @@ function appendNote_(existingNote, marker, maxLength) {
   // flip an event's own current/prior classification, or its Task-era
   // provenance, outright. Protected even more than fingerprints: evicted
   // only once every fingerprint segment is already gone.
+  // Write= joins this protected set (docs/review-fix-state-model.md §4,
+  // failure #29): losing it silently downgrades an event back to the
+  // legacy best-effort tie-break heuristic, the exact regression this field
+  // exists to retire. Note this protects only the newest Write= segment
+  // from eviction the same way it protects the newest Execution=/Boundary=/
+  // Task Origin= — it does not make Write= immutable the way Task Origin=
+  // is (stampExecutionBoundary_ deliberately appends a fresh Write=
+  // rather than preserving the original close's, per its own comment).
   const isProtectedIdentitySegment = function (segment) {
     const trimmed = segment.trim();
     return trimmed.indexOf('Execution=') === 0 || trimmed.indexOf('Boundary=') === 0
-      || trimmed.indexOf('Task Origin=') === 0;
+      || trimmed.indexOf('Task Origin=') === 0 || trimmed.indexOf('Write=') === 0;
   };
   const segments = existingNote.split(separator);
   let combined = segments.concat([clippedMarker]).join(separator);

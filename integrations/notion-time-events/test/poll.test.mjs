@@ -1048,8 +1048,14 @@ test('a wall-clock cutoff landing inside a tied-timestamp Done cohort resumes pa
   // A fake clock advancing 1 simulated minute per no-arg Date call, shared
   // across every pollTaskChanges() call below (not reset between them) —
   // each run's own runStartedAt is whatever the clock reads when that run
-  // begins, so every run independently gets ~3 Tasks in before its own
-  // MAX_RUN_DURATION_MS (4 minutes) elapses.
+  // begins, so every run independently gets a handful of Tasks in before
+  // its own MAX_RUN_DURATION_MS (4 minutes) elapses. Exactly how many Tasks
+  // that is per run depends on how many no-arg Date()/Date.now() calls
+  // reconcileTaskPage_'s own internals happen to make per Task (ADP-051-B's
+  // `Write=` field added one more, at closeNotionTimeEvent_/logSnapshot_) —
+  // this test asserts the tie is drained correctly and completely, not any
+  // particular run count, so the loop bound below is deliberately generous
+  // rather than tuned to today's exact per-Task call count.
   let ticks = 0;
   const now = () => {
     ticks += 1;
@@ -1068,7 +1074,7 @@ test('a wall-clock cutoff landing inside a tied-timestamp Done cohort resumes pa
   };
 
   let reachedTail = false;
-  for (let run = 0; run < 6 && !reachedTail; run++) {
+  for (let run = 0; run < 20 && !reachedTail; run++) {
     const summary = sandbox.pollTaskChanges();
     if (summary.outcomes.includes('no_change:Ready')) reachedTail = true;
   }
@@ -2023,7 +2029,12 @@ test('backfillResultFingerprints_ bails out on wall-clock time within a single p
   // A fake clock advancing 30 simulated seconds on every no-arg `new Date()`
   // / `Date.now()` call, so MAX_RUN_DURATION_MS (4 minutes) is crossed well
   // before all 8 Tasks are processed regardless of how many internal Date()
-  // reads reconcileTaskPage_ itself makes per Task.
+  // reads reconcileTaskPage_ itself makes per Task. Exactly how many Tasks
+  // fit in one call before that bail-out — and so exactly how many resume
+  // calls it then takes to drain the rest — depends on that same per-Task
+  // call count (ADP-051-B's `Write=` field added one more, at
+  // closeNotionTimeEvent_/logSnapshot_): this test asserts the bail-out and
+  // resume are correct and complete, not any particular call count.
   let ticks = 0;
   const now = () => {
     ticks += 1;
@@ -2044,11 +2055,20 @@ test('backfillResultFingerprints_ bails out on wall-clock time within a single p
   assert.ok(resumeCursor, 'expected a resume checkpoint to be persisted after a wall-clock bail-out');
   assert.equal(resumeCursor, tasks[summary.scanned - 1].last_edited_time);
 
-  // A second, unstubbed-clock call must resume past exactly what the first
-  // call already processed and drain the rest — never restart from scratch,
-  // and never skip the tail.
-  const secondRun = sandbox.backfillResultFingerprints_();
-  assert.equal(secondRun.scanned, taskCount - summary.scanned);
+  // Further calls (on the same, never-reset clock) must resume past exactly
+  // what came before and eventually drain the rest — never restart from
+  // scratch, never skip the tail, and never spin forever making no
+  // progress. The loop bound is deliberately generous, not tuned to
+  // today's exact per-Task call count.
+  let totalScanned = summary.scanned;
+  let runs = 1;
+  while (scriptProps.get('BACKFILL_RESUME_CURSOR') && runs < 20) {
+    const nextRun = sandbox.backfillResultFingerprints_();
+    assert.ok(nextRun.scanned > 0, 'expected each resume call to make forward progress');
+    totalScanned += nextRun.scanned;
+    runs++;
+  }
+  assert.equal(totalScanned, taskCount);
   assert.equal(scriptProps.get('BACKFILL_RESUME_CURSOR'), '');
 });
 
@@ -2547,6 +2567,26 @@ test('reconciling back to an identical earlier snapshot within one minute is not
     third.outcomes[0], /^duplicate:/,
     'expected the Story detour in between to prevent this from being masked as a duplicate of the original Task observation'
   );
+});
+
+test('ensureSyncLogSheet_ declares an 8th Write column, and logSnapshot_ stamps it with the write-time clock (ADP-051-B)', () => {
+  // docs/review-fix-state-model.md §4: the Sync Log needs a writer-controlled,
+  // higher-resolution clock (the Apps Script process's own Date.now()) to
+  // break a same-Notion-minute tie between two candidate rows — Notion's own
+  // `Reconciled At` column is only minute-granular. This is the append-only
+  // sibling of the Time Event Note's `Write=` field (see the buildNote_/
+  // parseNoteMeta_/appendNote_ tests below).
+  let fakeNow = 1234500000000;
+  const { sandbox } = harness({ now: () => fakeNow });
+
+  const sheet = sandbox.ensureSyncLogSheet_();
+  const headers = sheet.getRange(1, 1, 1, 8).getValues()[0];
+  assert.equal(headers[7], 'Write', 'expected an 8th header column named Write');
+
+  sandbox.logSnapshot_('snap-1', 'notion_poll', 'task-1', 'In Progress', new Date('2026-08-30T05:10:00.000Z'), 'opened:evt-1');
+
+  const row = sheet.getRange(2, 1, 1, 8).getValues()[0];
+  assert.equal(row[7], fakeNow, 'expected the appended row\'s 8th cell to be this write\'s own Date.now()');
 });
 
 test('backfillStoryExclusion_ queries every Type=Story page regardless of Status, and archives stray open events', () => {
