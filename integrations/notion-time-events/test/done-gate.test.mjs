@@ -531,6 +531,53 @@ test('appendNote_ evicts non-fingerprint segments before ever touching an older 
   assert.equal(combined.indexOf('Snapshot='), -1, 'the non-fingerprint segment should have been dropped instead');
 });
 
+test('appendNote_ protects only the newest Write= occurrence, evicting a superseded older one before ever touching a Result Fingerprint (ADP-051-B, Codex review PR #49)', () => {
+  const { sandbox } = harnessWithNotionStub();
+  // A closed-then-retroactively-stamped event can carry two Write=
+  // segments at once (stampExecutionBoundary_ appends a fresh one rather
+  // than replacing the close's own) — unlike Execution=/Boundary=/Task
+  // Origin=, which this codebase only ever writes once per event. Only the
+  // LAST Write= is what noteField_ would ever return; the first is already
+  // superseded and must not out-rank a fingerprint for survival.
+  const staleWrite = 'Write=1000000000000';
+  const freshWrite = 'Write=1000000600000';
+  const fingerprint = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+  const existingNote = [staleWrite, freshWrite, fingerprint].join(' | ');
+  // A marker with no Write= of its own (e.g. an ordinary Result Fingerprint
+  // stamp) — small enough that the stale Write= alone isn't enough room,
+  // forcing the eviction loop to actually choose between it and the
+  // fingerprint.
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped v2');
+  const maxLength = freshWrite.length + fingerprint.length + newMarker.length + 20;
+
+  const combined = sandbox.appendNote_(existingNote, newMarker, maxLength);
+
+  assert.ok(combined.length <= maxLength);
+  assert.ok(combined.indexOf(freshWrite) >= 0, 'the newest Write= must survive the eviction');
+  assert.ok(combined.indexOf(fingerprint) >= 0, 'the existing fingerprint must survive the eviction, ahead of a stale Write=');
+  assert.equal(combined.indexOf(staleWrite), -1, 'the superseded, older Write= should have been dropped instead');
+  assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
+});
+
+test('appendNote_ protects no existing Write= when the freshly written marker already carries its own fresher one', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const existingWrite = 'Write=1000000000000';
+  const fingerprint = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+  const existingNote = [existingWrite, fingerprint].join(' | ');
+  // The marker itself is a close carrying a fresher Write= — the existing
+  // one is superseded the instant this append happens, so it needs no
+  // protection at all, even ahead of the fingerprint.
+  const newMarker = sandbox.buildNote_({ endStatus: 'Review', write: 1000000600000 });
+  const maxLength = newMarker.length + fingerprint.length + 10;
+
+  const combined = sandbox.appendNote_(existingNote, newMarker, maxLength);
+
+  assert.ok(combined.length <= maxLength);
+  assert.ok(combined.indexOf(fingerprint) >= 0, 'the existing fingerprint must survive ahead of the now-superseded Write=');
+  assert.equal(combined.indexOf(existingWrite), -1, 'the old Write= should have been dropped, since the marker already carries a fresher one');
+  assert.ok(combined.endsWith(newMarker), 'the freshly written marker must survive intact');
+});
+
 test('appendNote_ evicts an older Result Fingerprint before ever touching Execution=/Boundary=', () => {
   const { sandbox } = harnessWithNotionStub();
   // Execution=/Boundary= identify which execution an event belongs to and
@@ -573,6 +620,63 @@ test('appendNote_ evicts Execution=/Boundary= only as an absolute last resort, o
   const combined = sandbox.appendNote_(execution, newMarker, newMarker.length + 2);
 
   assert.equal(combined, newMarker);
+});
+
+test('buildNote_/parseNoteMeta_ round-trip Write=, and omit it when absent (ADP-051-B)', () => {
+  const { sandbox } = harnessWithNotionStub();
+
+  const withWrite = sandbox.buildNote_({ endStatus: 'Review', write: 1234500000000 });
+  assert.match(withWrite, /Write=1234500000000/);
+  assert.equal(sandbox.parseNoteMeta_(withWrite).write, '1234500000000');
+
+  const withoutWrite = sandbox.buildNote_({ endStatus: 'Review' });
+  assert.equal(withoutWrite.indexOf('Write='), -1, 'Write= must not appear when no write time was given');
+  assert.equal(sandbox.parseNoteMeta_(withoutWrite).write, '', 'a legacy/absent Write= must read back empty, not a fabricated value');
+});
+
+test('appendNote_ protects the newest Write= from eviction, same as Execution=/Boundary=/Task Origin= (ADP-051-B, docs/review-fix-state-model.md §4 failure #29)', () => {
+  const { sandbox } = harnessWithNotionStub();
+  const write = 'Write=1234500000000';
+  const newMarker = 'Result Fingerprint=' + sandbox.resultFingerprint_('shipped');
+
+  // A maxLength barely larger than the freshly written marker forces every
+  // existing segment, Write= included, to be a candidate for eviction —
+  // proving Write= is protected the same way Execution=/Boundary=/Task
+  // Origin= already are, not merely coincidentally surviving because
+  // nothing forced its eviction.
+  const combined = sandbox.appendNote_(write, newMarker, newMarker.length + write.length + 10);
+
+  assert.ok(combined.indexOf(write) >= 0, 'Write= must survive the eviction alongside the freshly written marker');
+  assert.ok(combined.endsWith(newMarker));
+});
+
+test('closeNotionTimeEvent_ stamps a fresh Write=, and stampExecutionBoundary_ later overwrites it (last-occurrence wins) rather than preserving the stale close-time value (ADP-051-B, docs/review-fix-state-model.md §3 step 1)', () => {
+  let fakeNow = 1000000000000;
+  const { sandbox, fetchLog } = loadCodeGsSandbox({
+    scriptProperties: { NOTION_TOKEN: 'test-notion-token' },
+    fetch() {
+      return { getResponseCode: () => 200, getContentText: () => '{}' };
+    },
+    now: () => fakeNow,
+  });
+  const event = eventPage('evt-write', { startedAt: '2026-08-29T03:00:00.000Z', note: '' });
+
+  sandbox.closeNotionTimeEvent_(event, 'Review', 'user:1', 'snap-1', new Date('2026-08-29T03:45:00.000Z'), 'left_in_progress');
+  const closePatchBody = JSON.parse(fetchLog[fetchLog.length - 1].options.payload);
+  const closedNote = closePatchBody.properties.Note.rich_text[0].text.content;
+  assert.equal(sandbox.parseNoteMeta_(closedNote).write, String(fakeNow), 'expected the close to stamp its own current Write=');
+
+  // The retroactive boundary stamp runs later, on a genuinely later poll —
+  // its own Write= (the boundary's *discovery* time) must win over the
+  // stale close-time value already on the event, per §3 step 1's
+  // "retroactively stamped" case: the original close's Write= times the
+  // stale close, not the discovery of the boundary.
+  fakeNow = 1000000600000; // 10 simulated minutes later
+  event.properties.Note = { type: 'rich_text', rich_text: [{ plain_text: closedNote }] };
+  sandbox.stampExecutionBoundary_(event, '');
+  const boundaryPatchBody = JSON.parse(fetchLog[fetchLog.length - 1].options.payload);
+  const boundaryNote = boundaryPatchBody.properties.Note.rich_text[0].text.content;
+  assert.equal(sandbox.parseNoteMeta_(boundaryNote).write, String(fakeNow), 'expected the later boundary stamp\'s own Write= to be the one parseNoteMeta_ now returns');
 });
 
 test('Done passes when multiple events close simultaneously on first observing the Task leaving In Progress', () => {
