@@ -1,6 +1,6 @@
 # State Transition Pre-check Regression Cases
 
-These cases verify the current-gate relevance check in the `Human gate pre-flight` (`ai-execution-constraints.md`) and Operating Guide section 11.8. They are distinct from `authority-stop-gate-regression-cases.md`, which verifies the *AI-to-AI* stop gate pre-flight (who has authority to act) rather than this check (whether a genuinely Human-only criterion belongs to the transition currently being evaluated).
+These cases verify the current-gate relevance check in the `Human gate pre-flight` (`ai-execution-constraints.md`) under the current R02/R03 authority and approval regulations. They are distinct from `authority-stop-gate-regression-cases.md`, which verifies the *AI-to-AI* stop gate pre-flight (who has authority to act) rather than this check (whether a genuinely Human-only criterion belongs to the transition currently being evaluated).
 
 Source incident: Postmortem PM-8, "Human AcceptanceをPR Merge Gateへ誤昇格し2件をHuman待ちにした" (2026-09-01).
 
