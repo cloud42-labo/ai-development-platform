@@ -12,6 +12,17 @@ import crypto from 'node:crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CODE_GS_PATH = path.join(__dirname, '..', '..', 'Code.gs');
 
+// A-Z-only column-letter -> 1-based index (e.g. 'A' -> 1, 'H' -> 8). Code.gs
+// only ever builds single-letter columns for the Sync Log's 8 columns, so
+// multi-letter (>26 column) support is deliberately not implemented here.
+function columnLetterToIndex_(letters) {
+  let index = 0;
+  for (let i = 0; i < letters.length; i++) {
+    index = index * 26 + (letters.charCodeAt(i) - 64);
+  }
+  return index;
+}
+
 function toSignedBytes(buffer) {
   // Apps Script's Utilities.compute*Signature/computeDigest return Java-style
   // signed bytes (-128..127), not the 0..255 Node normally works with, and
@@ -35,6 +46,13 @@ class FakeSheet {
     // only match positions, the cheaper operation these counts exist to
     // distinguish from.
     this.getValuesCallCount = 0;
+    // Finding A (ADP-051-B2/B3 fixup round 2): total ROWS actually
+    // transferred across every getValues() call, not just the call count —
+    // a bounded call count alone doesn't prove a fix stopped materializing
+    // unrelated rows if any one of those calls still spans the whole sheet.
+    // A test proving getRangeList's per-run bounding must assert on this,
+    // not only on getValuesCallCount.
+    this.getValuesRowCount = 0;
   }
 
   hideSheet() {
@@ -63,11 +81,36 @@ class FakeSheet {
     return target;
   }
 
+  // Finding A (ADP-051-B2/B3 fixup round 2): stand-in for
+  // `Sheet#getRangeList(a1Notations)` — Code.gs's readSyncLogRowsForTask_
+  // uses this to fetch several discontiguous, bounded row runs in a few
+  // service calls without ever transferring the unrelated rows between
+  // them. Only the plain `A5:H7` column-letter/row-number form is
+  // supported, since that's the only shape Code.gs ever builds.
+  getRangeList(a1Notations) {
+    const sheet = this;
+    const ranges = a1Notations.map(function (a1) {
+      const match = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(a1);
+      if (!match) throw new Error('FakeSheet.getRangeList: unsupported A1 notation "' + a1 + '"');
+      const startCol = columnLetterToIndex_(match[1]);
+      const startRow = parseInt(match[2], 10);
+      const endCol = columnLetterToIndex_(match[3]);
+      const endRow = parseInt(match[4], 10);
+      return sheet.getRange(startRow, startCol, endRow - startRow + 1, endCol - startCol + 1);
+    });
+    return {
+      getRanges() {
+        return ranges;
+      },
+    };
+  }
+
   getRange(row, column, numRows = 1, numColumns = 1) {
     const sheet = this;
     return {
       getValues() {
         sheet.getValuesCallCount++;
+        sheet.getValuesRowCount += numRows;
         const result = [];
         for (let rowOffset = 0; rowOffset < numRows; rowOffset++) {
           const source = sheet.rows[row - 1 + rowOffset] || [];

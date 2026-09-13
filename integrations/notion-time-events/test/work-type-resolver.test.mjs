@@ -216,6 +216,29 @@ test('failure #46: a done_gate_rejected:...:rollback=<Status> row is read by its
   assert.equal(candidate.status, 'Review', 'must read the parsed rollback status, not the raw Status=Done the row was logged with');
 });
 
+test('Finding C (P2, ADP-051-B2/B3 fixup round 2): a done_gate_rejected:...:rollback=In Progress row is read by its FULL multi-word rollback status, never truncated at the first space (docs/review-fix-state-model.md §3 step 2)', () => {
+  const { sandbox } = harness();
+  // An older, genuine Review row this rollback row must not mask.
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T08:00:00.000Z' });
+  // enforceDoneGate_ rejects an invalid Done attempt with an open Time
+  // Event and rolls back to DEFAULTS.START_STATUS ('In Progress') — a real,
+  // reachable multi-word rollback value, not a hypothetical.
+  logRow(sandbox, { status: 'Done', receivedAt: '2026-08-01T09:00:00.000Z', outcome: 'done_gate_rejected:missing_result:rollback=In Progress' });
+
+  const candidate = sandbox.resolveSyncLogCandidate_(TASK_ID, []);
+
+  // A `/rollback=(\S+)/` capture would have extracted only 'In', which
+  // matches neither DEFAULTS.START_STATUS ('In Progress', so the row is
+  // never skipped as an In-Progress row) nor any real status — the buggy
+  // regressed behavior returns 'In' itself as the (nonsense) candidate
+  // status. The fix must recognize the row as the full 'In Progress'
+  // rollback, skip it as an In-Progress row, and continue the scan back to
+  // the real preceding Review row instead.
+  assert.ok(candidate);
+  assert.equal(candidate.status, 'Review', 'the rollback=In Progress row must be recognized (and skipped) as In Progress IN FULL, letting the scan continue to the actual preceding Review row rather than stopping on a truncated "In"');
+  assert.equal(candidate.timestamp.toISOString(), '2026-08-01T08:00:00.000Z');
+});
+
 test('failure #8: an intermediate unmapped-actor In Progress row is explicitly skipped, never misread as "the" preceding status (docs/review-fix-state-model.md §3 step 2)', () => {
   const { sandbox } = harness();
   logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T08:00:00.000Z' });
@@ -536,6 +559,39 @@ test('Finding 3 (ADP-051-B2/B3 fixup, P2): a Sync Log row that ties with the Typ
   assert.equal(result.reasonCode, 'synclog_candidate_cutoff_tie_ambiguous');
 });
 
+test('Finding B (P2, ADP-051-B2/B3 fixup round 2): a cutoff tie stays ambiguous even when every row that survives the tie-exclusion is itself In Progress and gets skipped by the loop below it — the ambiguous-cutoff-tie sentinel must propagate through this all-In-Progress fall-through too, not collapse to a confident Initial Work default (docs/review-fix-state-model.md §3 step 2, §4, failure #28 principle)', () => {
+  let fakeNow = 5000;
+  const { sandbox } = harness({ now: () => fakeNow });
+
+  // The Story cutoff.
+  fakeNow = 5000;
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T09:00:10.000Z', type: 'Story' });
+
+  // Ties with the cutoff at the same Notion minute AND the same Write= —
+  // compareInstants_ returns a genuine, unresolvable 0. Excluded from
+  // `eligible` by the tie check, but sets cutoffTieExists = true.
+  fakeNow = 5000;
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T09:00:10.000Z', type: 'Task' });
+
+  // Definitely AFTER the cutoff (later Notion minute, later Write=), so it
+  // IS eligible — but it is itself `In Progress`, so the backward scan for
+  // "the first non-In-Progress status" skips it, runs out of eligible rows,
+  // and falls through to the `i < 0` branch this finding fixes. Before the
+  // fix, that branch returned plain `null` here, discarding the fact that
+  // an unresolvable tie exists earlier in this same history.
+  fakeNow = 9000;
+  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T09:05:00.000Z', type: 'Task' });
+
+  const candidate = sandbox.resolveSyncLogCandidate_(TASK_ID, []);
+  assert.ok(candidate, 'the all-In-Progress fall-through must not collapse an unresolvable cutoff tie into "no candidate at all" (null)');
+  assert.equal(candidate.ambiguousCutoffTie, true);
+
+  const result = sandbox.resolveWorkType_(TASK_ID, []);
+  assert.equal(result.unresolved, true, 'a newer In Progress row must not let a genuinely unresolvable cutoff tie default to a confident Initial Work classification');
+  assert.equal(result.classification, null);
+  assert.equal(result.reasonCode, 'synclog_candidate_cutoff_tie_ambiguous');
+});
+
 // ---------------------------------------------------------------------------
 // Performance (failure #16)
 // ---------------------------------------------------------------------------
@@ -580,6 +636,52 @@ test('Finding 2 (P1, ADP-051-B2/B3 fixup): a mature Task with hundreds of matche
 
   assert.equal(rows.length, ROW_COUNT, 'every matched row for this Task must still be returned');
   assert.equal(syncLogSheet.getValuesCallCount, 1, 'a mature Task\'s ' + ROW_COUNT + ' matched rows must cost exactly one bulk row-data transfer, never one per matched row (Codex P1: hundreds/thousands of rows must not risk a platform hard timeout before the event is opened)');
+});
+
+test('Finding A (P1, ADP-051-B2/B3 fixup round 2): matches near both the beginning and end of a large Sync Log, with an unrelated Task\'s rows between them, transfer only the matched rows\' own bounded runs — never the untouched middle a single min..max bulk range would have pulled in (docs/review-fix-state-model.md §3 step 2)', () => {
+  const { sandbox, spreadsheet } = harness();
+  const MIDDLE_COUNT = 400;
+
+  // Three CONTIGUOUS rows for this Task near the very beginning of the log.
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T00:00:00.000Z' });
+  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T00:05:00.000Z' });
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T00:10:00.000Z' });
+
+  // A long run of an UNRELATED Task's own observations between this Task's
+  // two clusters — this is the untouched middle the round-1 fix's single
+  // `getRange(minRow, 1, maxRow-minRow+1, 8)` bulk read still transferred,
+  // and this fix must not.
+  for (let i = 0; i < MIDDLE_COUNT; i++) {
+    logRow(sandbox, { taskId: 'unrelated-task', status: 'Review', receivedAt: '2026-08-01T01:00:00.000Z' });
+  }
+
+  // Three more CONTIGUOUS rows for THIS Task near the very end of the log.
+  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T09:00:00.000Z' });
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T09:05:00.000Z' });
+  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T09:10:00.000Z' });
+
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  syncLogSheet.getValuesCallCount = 0;
+  syncLogSheet.getValuesRowCount = 0;
+
+  const rows = sandbox.readSyncLogRowsForTask_(TASK_ID);
+
+  assert.equal(rows.length, 6, 'every matched row for this Task must still be returned, correctly, from both clusters');
+  assert.equal(rows[0].rawStatus, 'Review');
+  assert.equal(rows[0].receivedAt.toISOString(), '2026-08-01T00:00:00.000Z');
+  assert.equal(rows[5].rawStatus, 'In Progress');
+  assert.equal(rows[5].receivedAt.toISOString(), '2026-08-01T09:10:00.000Z');
+
+  // This is the actual claim Codex is challenging: bound the ROWS
+  // transferred, not merely the correctness of the returned data. Two
+  // bounded runs of 3 rows each must cost exactly 2 getValues() calls
+  // (one per contiguous run) and exactly 6 transferred rows in total —
+  // never the MIDDLE_COUNT (400) unrelated rows sitting between them, which
+  // a single min..max bulk range spanning both clusters would have pulled
+  // in as collateral.
+  assert.equal(syncLogSheet.getValuesCallCount, 2, 'expected exactly one getValues() call per contiguous matched-row run (2 runs here), got ' + syncLogSheet.getValuesCallCount);
+  assert.equal(syncLogSheet.getValuesRowCount, 6, 'expected exactly the 6 matched rows\' own data to be transferred, got ' + syncLogSheet.getValuesRowCount + ' rows');
+  assert.ok(syncLogSheet.getValuesRowCount < MIDDLE_COUNT, 'the ' + MIDDLE_COUNT + ' unrelated rows between this Task\'s two clusters must never be transferred just to reach both ends');
 });
 
 // ---------------------------------------------------------------------------

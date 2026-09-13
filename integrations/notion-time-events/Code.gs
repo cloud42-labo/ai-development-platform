@@ -3675,20 +3675,22 @@ function mostRecentBoundaryCandidate_(allEvents) {
 // never appeared in the log costs one inexpensive round trip regardless of
 // how large the log has grown, rather than materializing the whole sheet.
 //
-// Finding 2 (ADP-051-B2 fixup): the matched rows' actual data is
-// transferred with exactly ONE `getRange(...).getValues()` call spanning
-// every matched row's min..max row number, not one call per matched row.
-// A mature Task can carry hundreds or thousands of Sync Log observations,
-// and classification runs before createNotionTimeEvent_ opens the event —
-// one Spreadsheet-service round trip per historical row can exhaust the
-// Apps Script execution window before the event is ever opened, with no
-// way for the surrounding try/catch to recover from that kind of platform
-// hard timeout. Matched rows for one Task are overwhelmingly contiguous or
-// near-contiguous in practice (this codebase never interleaves unrelated
-// Tasks' rows within one poll's own writes), so one bulk range covering
-// the whole matched span, indexed in memory per match, is the simple,
-// correct fix — not a poll-wide cached projection, which this Task-scoped
-// pure resolver has no natural place to hold between calls.
+// Finding A (ADP-051-B2/B3 fixup round 2, corrects Finding 2's round-1
+// fix): a single `getRange(minRow, 1, maxRow-minRow+1, 8).getValues()`
+// bulk read still transfers every row BETWEEN this Task's matched rows,
+// not only the matched rows themselves — for a long-lived Task with
+// matches near both the beginning and end of a large append-only log
+// (other Tasks' observations between them), that "span" is nearly the
+// whole sheet, reintroducing the same full-log scaling problem the round-1
+// fix was meant to retire. The correct fix groups matched row numbers into
+// CONTIGUOUS RUNS (matched rows for one Task are overwhelmingly contiguous
+// or near-contiguous in practice, since this codebase never interleaves
+// unrelated Tasks' rows within one poll's own writes — but distant runs do
+// happen across separate polls, which is exactly this finding's scenario)
+// and fetches each run with its own bounded `getRangeList` range, never
+// one range spanning distant runs. This keeps the service-call count low
+// (one call per contiguous run, not one per matched row) WITHOUT ever
+// transferring the unrelated rows in between.
 function readSyncLogRowsForTask_(taskId) {
   if (!taskId) return [];
   const sheet = ensureSyncLogSheet_();
@@ -3700,11 +3702,38 @@ function readSyncLogRowsForTask_(taskId) {
     .findAll();
   if (!matches.length) return [];
   const matchedRows = matches.map(function (match) { return match.getRow(); });
-  const minRow = Math.min.apply(null, matchedRows);
-  const maxRow = Math.max.apply(null, matchedRows);
-  const block = sheet.getRange(minRow, 1, maxRow - minRow + 1, 8).getValues();
+
+  // Group into contiguous runs: consecutive matched row numbers with no
+  // gap become one run (e.g. rows 5,6,7 -> one run 5..7); a matched row
+  // that isn't adjacent to the previous run starts a new one (e.g. row 200
+  // alone -> its own run).
+  const runs = [];
+  matchedRows.forEach(function (row) {
+    const currentRun = runs[runs.length - 1];
+    if (currentRun && row === currentRun.endRow + 1) {
+      currentRun.endRow = row;
+    } else {
+      runs.push({ startRow: row, endRow: row });
+    }
+  });
+
+  const ranges = runs.map(function (run) {
+    return 'A' + run.startRow + ':H' + run.endRow;
+  });
+  const rangeBlocks = sheet.getRangeList(ranges).getRanges().map(function (range) {
+    return range.getValues();
+  });
+
+  const rowsByNumber = {};
+  runs.forEach(function (run, index) {
+    const block = rangeBlocks[index];
+    for (let row = run.startRow; row <= run.endRow; row++) {
+      rowsByNumber[row] = block[row - run.startRow];
+    }
+  });
+
   return matchedRows.map(function (row) {
-    const values = block[row - minRow];
+    const values = rowsByNumber[row];
     return {
       row: row,
       snapshotId: String(values[0] || ''),
@@ -3729,9 +3758,22 @@ function readSyncLogRowsForTask_(taskId) {
 // reading `rawStatus` directly, so the rollback is never hidden behind a
 // `Done` value this model was never meant to see as a candidate at all
 // (`Done` is a terminal gate result, out of scope per §1).
+//
+// Finding C (ADP-051-B2/B3 fixup round 2): `enforceDoneGate_` builds this
+// outcome as `'done_gate_rejected:' + failures.join('+') + ':rollback=' +
+// rollbackStatus`, with `rollback=` appended at the very end of the
+// outcome string. `rollbackStatus` is `DEFAULTS.START_STATUS` ('In
+// Progress') or `DEFAULTS.REVIEW_STATUS` ('Review') — a multi-word value
+// is a real, reachable case, not a hypothetical. A `\S+` capture stops at
+// the first whitespace and would extract only 'In' from 'In Progress',
+// leaving that row un-recognized as the DEFAULTS.START_STATUS rollback it
+// actually is (so it isn't skipped by the `In Progress`-row check in
+// resolveSyncLogCandidate_) and misclassifying later executions. Since the
+// rollback value runs to the end of the outcome string, capture everything
+// after `rollback=` rather than stopping at the first non-whitespace run.
 function effectiveSyncLogStatus_(row) {
-  const match = /rollback=(\S+)/.exec(row.outcome || '');
-  return match ? match[1] : row.rawStatus;
+  const match = /rollback=(.+)$/.exec(row.outcome || '');
+  return match ? match[1].trim() : row.rawStatus;
 }
 
 // docs/review-fix-state-model.md §3 step 2's hard history cutoff: the most
@@ -3818,7 +3860,23 @@ function resolveSyncLogCandidate_(taskId, allEvents) {
 
   let i = eligible.length - 1;
   while (i >= 0 && effectiveSyncLogStatus_(eligible[i]) === DEFAULTS.START_STATUS) i--;
-  if (i < 0) return null;
+  if (i < 0) {
+    // Finding B (ADP-051-B2/B3 fixup round 2): every eligible row turned
+    // out to be `In Progress` and got skipped above, so there is no
+    // non-`In Progress` status left to return from THIS candidate list —
+    // but that is not the same thing as "no history at all" when
+    // `cutoffTieExists` is also true. A row tied with the cutoff was
+    // excluded from `eligible` for having a genuinely unknowable order
+    // relative to it (see above) — it could just as easily be a `Review`
+    // row that landed AFTER the cutoff as one that predates it, and this
+    // all-`In Progress` fall-through must not silently discard that
+    // possibility by returning plain `null`, which resolveWorkType_ reads
+    // as "no candidate, confidently Initial Work" (§3 step 4). Propagate
+    // the same ambiguous-cutoff-tie sentinel used above, not a second,
+    // disconnected ambiguity flag, so resolveWorkType_ still surfaces
+    // `unresolved` here too.
+    return cutoffTieExists ? { ambiguousCutoffTie: true } : null;
+  }
 
   const status = effectiveSyncLogStatus_(eligible[i]);
   let runStart = i;
