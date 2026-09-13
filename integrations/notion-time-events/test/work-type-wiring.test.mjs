@@ -38,16 +38,20 @@ function taskPage(id, {
   };
 }
 
-function eventPage(id, { actor, startedAt, endedAt = null, note = '' } = {}) {
+function eventPage(id, { actor, startedAt, endedAt = null, note = '', workType } = {}) {
+  const properties = {
+    Actor: { type: 'select', select: { name: actor } },
+    'Started At': { type: 'date', date: { start: startedAt } },
+    'Ended At': { type: 'date', date: endedAt ? { start: endedAt } : null },
+    Note: { type: 'rich_text', rich_text: note ? [{ plain_text: note }] : [] },
+  };
+  if (workType !== undefined) {
+    properties['Work Type'] = { type: 'select', select: workType ? { name: workType } : null };
+  }
   return {
     object: 'page',
     id,
-    properties: {
-      Actor: { type: 'select', select: { name: actor } },
-      'Started At': { type: 'date', date: { start: startedAt } },
-      'Ended At': { type: 'date', date: endedAt ? { start: endedAt } : null },
-      Note: { type: 'rich_text', rich_text: note ? [{ plain_text: note }] : [] },
-    },
+    properties,
   };
 }
 
@@ -216,4 +220,118 @@ test('(c) polling idempotency is unaffected by Work Type wiring — a leaving-In
   const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
   assert.equal(creates.length, 0, 'leaving In Progress must never create a new Time Event, Work Type wiring included');
   assert.match(summary.outcomes[0], /closed_duplicate:/);
+});
+
+test('Finding 1a (ADP-051-B2/B3 fixup, P1): churn inheritance reaches across polls — an assignee cleared in one poll and reassigned only in a LATER poll still inherits Work Type from the already-closed outgoing event (docs/review-fix-state-model.md §6, failure #6)', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-cross-poll-churn', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // newly (re)assigned THIS poll
+      lastEdited: '2026-08-30T10:00:00.000Z',
+      startedAt: '2026-08-01T00:00:00.000Z', // stale/original — must not be trusted as this reopen's own start
+    })],
+    events: [eventPage('evt-cross-poll-outgoing', {
+      actor: 'Chris',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      // Already closed — by an EARLIER poll, when the assignee was cleared
+      // (`otherActor` was non-empty THEN; it is empty THIS poll, since
+      // there is nothing left open to close).
+      endedAt: '2026-08-30T09:00:00.000Z',
+      note: 'Reason=reassignment | End Status=In Progress | Write=1000',
+      workType: 'Review Fix',
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /^opened:/);
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.equal(created.properties['Work Type'].select.name, 'Review Fix', 'must inherit from the outgoing event closed by an EARLIER poll — otherActorEvents is empty this poll, so this only works when the resolver also consults allEvents\' own most recently closed event');
+});
+
+test('Finding 1b (ADP-051-B2/B3 fixup, P1): a same-poll reassignment inherits Work Type from the outgoing event even though closeNotionTimeEvent_ never mutates the in-memory event object before classification runs (docs/review-fix-state-model.md §6)', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-same-poll-churn', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // reassigned TO this actor, THIS SAME poll
+      lastEdited: '2026-08-30T10:00:00.000Z',
+      startedAt: '2026-08-01T00:00:00.000Z',
+    })],
+    events: [eventPage('evt-same-poll-outgoing', {
+      actor: 'Chris', // the OUTGOING actor — still open when this poll starts
+      startedAt: '2026-08-01T00:00:00.000Z',
+      endedAt: null, // this poll is what closes it, via reassignment
+      note: '', // no Reason= yet — that only gets written BY this poll's own close
+      workType: 'Review Fix', // this execution's already-established classification
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /closed_reassigned:evt-same-poll-outgoing/);
+  assert.match(summary.outcomes[0], /opened:/);
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.equal(created.properties['Work Type'].select.name, 'Review Fix', 'must inherit from the outgoing event this same poll is reassigning away from, even though its in-memory Note is stale until the close PATCH is separately applied');
+
+  const patches = requestsTo(fetchLog, 'PATCH', '/v1/pages/evt-same-poll-outgoing');
+  assert.equal(patches.length, 1);
+  assert.match(
+    JSON.parse(patches[0].options.payload).properties.Note.rich_text[0].text.content,
+    /Reason=reassignment/,
+    'sanity check: the outgoing event really was closed with Reason=reassignment this same poll'
+  );
+});
+
+test('Finding 1 adversarial follow-up (ADP-051-B2/B3 fixup): a same-poll ambiguous_provenance_restart close must ALSO block the cross-poll churn fallback — it is its own hard cutoff (§6) and must never let an unrelated, older reassignment close from before it get inherited instead (docs/review-fix-state-model.md §6, failure #26/#27 principle)', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-ambiguous-restart-cutoff', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // maps to 'Claude' — the SAME actor as the ambiguous open event below
+      lastEdited: '2026-08-30T10:00:00.000Z',
+    })],
+    events: [
+      // An older, already-finished, UNRELATED execution's own internal
+      // churn — its Work Type must never be reachable from the other side
+      // of the restart cutoff below.
+      eventPage('evt-old-unrelated-reassignment', {
+        actor: 'Chris',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        endedAt: '2026-01-01T05:00:00.000Z',
+        note: 'Reason=reassignment | End Status=In Progress | Write=1000',
+        workType: 'Review Fix',
+      }),
+      // The current, still-open, ambiguous-provenance event for the SAME
+      // actor as this poll's own Assigned Agent — triggers the
+      // ambiguousOpenEvent restart path (self-restart, not a reassignment).
+      eventPage('evt-ambiguous-open', {
+        actor: 'Claude',
+        startedAt: '2026-08-01T00:00:00.000Z',
+        endedAt: null,
+        note: 'Task Origin=ambiguous-pre-upgrade',
+      }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /closed_ambiguous_provenance_restart:evt-ambiguous-open/);
+  assert.match(summary.outcomes[0], /opened:/);
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.notEqual(
+    created.properties['Work Type'] && created.properties['Work Type'].select.name,
+    'Review Fix',
+    'must never inherit the older, unrelated execution\'s Work Type past this same-poll ambiguous_provenance_restart cutoff'
+  );
+  assert.equal(created.properties['Work Type'].select.name, 'Initial Work', 'with no genuine boundary and no Sync Log history on the near side of the restart, this is a fresh, unclassified-history execution');
 });

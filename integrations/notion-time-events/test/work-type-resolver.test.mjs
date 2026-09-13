@@ -483,11 +483,64 @@ test('failures #36/#40: an actually-observed intervening row with a DIFFERENT st
   assert.equal(result.reasonCode, 'same_status_intervening_row_confirms_distinct_periods');
 });
 
+test('Finding 4 (ADP-051-B2/B3 fixup, P2): an intervening different-status row is detected via the same timestamp+Write= ordering §4 uses everywhere else, not raw receivedAt milliseconds — a boundary, the intervening row, and the later same-status run all tied within one Notion minute must still be recognized (docs/review-fix-state-model.md §3 step 3, §4)', () => {
+  let fakeNow = 1000;
+  const { sandbox } = harness({ now: () => fakeNow });
+
+  // All three timestamps below round to the SAME Notion minute (10:00) —
+  // only their Write= values (in the order the test writes them) establish
+  // the true sequence: boundary close, then the intervening In Progress
+  // row, then the second Review period's own start.
+  const boundaryEvent = eventPage('evt-finding4', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T10:00:50.000Z',
+    note: note('Reason=left_in_progress', 'End Status=Review', 'Write=' + fakeNow),
+  });
+
+  fakeNow = 2000;
+  // Raw receivedAt (10:00:05) is EARLIER than the Sync Log run's own start
+  // below (10:00:10) and earlier than the boundary's Ended At (10:00:50) —
+  // a raw-millisecond comparison would wrongly exclude this row as outside
+  // the [boundary, syncLog] span. Its Write=2000 correctly places it AFTER
+  // the boundary's Write=1000.
+  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T10:00:05.000Z' });
+
+  fakeNow = 3000;
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T10:00:10.000Z' });
+
+  const result = sandbox.resolveWorkType_(TASK_ID, [boundaryEvent]);
+
+  assert.equal(result.unresolved, false, 'the intervening row must be recognized despite all three timestamps sharing one Notion minute — a raw-millisecond comparison loses it and wrongly reports this unresolved');
+  assert.equal(result.classification, 'Review Fix');
+  assert.equal(result.reasonCode, 'same_status_intervening_row_confirms_distinct_periods');
+});
+
+test('Finding 3 (ADP-051-B2/B3 fixup, P2): a Sync Log row that ties with the Type=Story cutoff at the same Notion minute, with no way to break the tie, is surfaced as unresolved — never silently discarded into a confident Initial Work default (docs/review-fix-state-model.md §3 step 2, §4, failure #28 principle)', () => {
+  const fakeNow = 5000;
+  const { sandbox } = harness({ now: () => fakeNow });
+  // The Story cutoff and the only otherwise-eligible row land in the same
+  // Notion minute (09:00) AND carry the identical Write= (both logged
+  // under this test's fixed fake clock) — compareInstants_ returns a
+  // genuine, unresolvable 0, not proof this row is on either side of the
+  // cutoff.
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T09:00:10.000Z', type: 'Story' });
+  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T09:00:45.000Z', type: 'Task' });
+
+  const candidate = sandbox.resolveSyncLogCandidate_(TASK_ID, []);
+  assert.ok(candidate, 'an unresolvable cutoff tie must be surfaced distinctly from "no eligible row at all" (null)');
+  assert.equal(candidate.ambiguousCutoffTie, true);
+
+  const result = sandbox.resolveWorkType_(TASK_ID, []);
+  assert.equal(result.unresolved, true, 'must never silently fall through to a confident Initial Work default when the only candidate\'s order relative to the cutoff is genuinely unknowable');
+  assert.equal(result.classification, null);
+  assert.equal(result.reasonCode, 'synclog_candidate_cutoff_tie_ambiguous');
+});
+
 // ---------------------------------------------------------------------------
 // Performance (failure #16)
 // ---------------------------------------------------------------------------
 
-test('failure #16: Sync Log candidate resolution costs one row read per MATCHED row for this Task, never scaling with unrelated log size, and nothing at all for a Task with no rows on file (docs/review-fix-state-model.md §3 step 2, performance)', () => {
+test('failure #16 / Finding 2 (ADP-051-B2/B3 fixup): Sync Log candidate resolution costs exactly ONE bulk row-data transfer for this Task\'s matched rows, never one getValues() call per matched row, and nothing at all for a Task with no rows on file (docs/review-fix-state-model.md §3 step 2, performance)', () => {
   const { sandbox, spreadsheet } = harness();
   for (let i = 0; i < 50; i++) {
     logRow(sandbox, { taskId: 'unrelated-task-' + i, status: 'Review', receivedAt: '2026-08-01T00:00:00.000Z' });
@@ -501,12 +554,32 @@ test('failure #16: Sync Log candidate resolution costs one row read per MATCHED 
   const candidate = sandbox.resolveSyncLogCandidate_(TASK_ID, []);
 
   assert.ok(candidate);
-  assert.equal(syncLogSheet.getValuesCallCount, 2, 'expected exactly one row-data transfer per matched row for this Task (2 rows), not one per row in the whole log');
+  assert.equal(syncLogSheet.getValuesCallCount, 1, 'expected exactly ONE bulk row-data transfer spanning this Task\'s matched rows, never one getValues() call per matched row');
 
   syncLogSheet.getValuesCallCount = 0;
   const noneCandidate = sandbox.resolveSyncLogCandidate_('task-never-seen', []);
   assert.equal(noneCandidate, null);
   assert.equal(syncLogSheet.getValuesCallCount, 0, 'a Task ID that has never appeared in the log must cost zero row-data transfers, however large the log has grown');
+});
+
+test('Finding 2 (P1, ADP-051-B2/B3 fixup): a mature Task with hundreds of matched Sync Log observations still costs exactly ONE row-data transfer, never one per matched row — the exact cost shape Codex flagged as able to exhaust the Apps Script execution window before the event is ever opened (docs/review-fix-state-model.md §3 step 2)', () => {
+  const { sandbox, spreadsheet } = harness();
+  const ROW_COUNT = 500;
+  for (let i = 0; i < ROW_COUNT; i++) {
+    const minute = i % 2 === 0 ? '08' : '09';
+    logRow(sandbox, {
+      status: i % 2 === 0 ? 'Review' : 'In Progress',
+      receivedAt: '2026-08-01T' + minute + ':' + String(i % 60).padStart(2, '0') + ':00.000Z',
+    });
+  }
+
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  syncLogSheet.getValuesCallCount = 0;
+
+  const rows = sandbox.readSyncLogRowsForTask_(TASK_ID);
+
+  assert.equal(rows.length, ROW_COUNT, 'every matched row for this Task must still be returned');
+  assert.equal(syncLogSheet.getValuesCallCount, 1, 'a mature Task\'s ' + ROW_COUNT + ' matched rows must cost exactly one bulk row-data transfer, never one per matched row (Codex P1: hundreds/thousands of rows must not risk a platform hard timeout before the event is opened)');
 });
 
 // ---------------------------------------------------------------------------
