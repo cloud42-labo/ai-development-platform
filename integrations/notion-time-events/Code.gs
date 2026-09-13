@@ -2055,7 +2055,18 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const executionId = otherActor.length
         ? outgoingExecutionId
         : startAt.toISOString();
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType);
+      // ADP-051-B3: classify this newly-opened event's Work Type
+      // (Initial Work / Review Fix), non-blocking. resolveNewTimeEvent
+      // WorkTypeSafely_ never throws and never returns anything but a
+      // definite classification string or '' (unclassified) — a reassignment
+      // continuation (otherActor.length) inherits from whichever outgoing
+      // event it genuinely continues (docs/review-fix-state-model.md §6);
+      // a genuinely new execution is classified fresh via resolveWorkType_
+      // (§3). Either way this must never prevent or delay opening the Time
+      // Event itself: an unresolved/failed classification simply leaves the
+      // event unclassified, exactly as if this call were never made.
+      const workType = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActor);
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, workType);
       actions.push('opened:' + created.id);
     }
   } else if (openEvents.length) {
@@ -2742,7 +2753,7 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, taskType) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, taskType, workType) {
   const note = buildNote_({
     source: 'notion_reconcile',
     execution: executionId,
@@ -2774,23 +2785,34 @@ function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId,
     changedBy: changedBy,
   });
 
+  const properties = {
+    Event: {
+      title: [{ type: 'text', text: { content: clip_(actor + '｜' + taskTitle, 300) } }],
+    },
+    Actor: { select: { name: actor } },
+    State: { select: { name: 'Active' } },
+    'Started At': { date: { start: when.toISOString() } },
+    Task: { relation: [{ id: taskId }] },
+    Note: {
+      rich_text: [{ type: 'text', text: { content: clip_(note, 1800) } }],
+    },
+  };
+  // ADP-051-B3: only ever set when resolveNewTimeEventWorkTypeSafely_ (the
+  // sole caller passing a non-empty value) returned a definite
+  // classification — an unresolved/failed resolver call passes '' here and
+  // this property is simply omitted, leaving the event unclassified rather
+  // than writing a guessed value. Schema options are exactly 'Initial Work'
+  // / 'Review Fix' (docs/review-fix-state-model.md §3).
+  if (workType) {
+    properties['Work Type'] = { select: { name: workType } };
+  }
+
   return notionRequest_('post', '/v1/pages', {
     parent: {
       type: 'data_source_id',
       data_source_id: timeEventsDataSourceId_(),
     },
-    properties: {
-      Event: {
-        title: [{ type: 'text', text: { content: clip_(actor + '｜' + taskTitle, 300) } }],
-      },
-      Actor: { select: { name: actor } },
-      State: { select: { name: 'Active' } },
-      'Started At': { date: { start: when.toISOString() } },
-      Task: { relation: [{ id: taskId }] },
-      Note: {
-        rich_text: [{ type: 'text', text: { content: clip_(note, 1800) } }],
-      },
-    },
+    properties: properties,
   });
 }
 
