@@ -159,7 +159,7 @@ Taskを分割・置換する場合は、DoneではなくSupersededを用いる�
 4. 後工程だけのHuman-only条件を、現在の開発・Review・mergeを止める理由にしない。
 5. Human Gateは定期的に再評価し、証拠が到着したら速やかに解除する。
 6. Human Queueは高コストな例外処理としてWIPを管理し、AIで縮小できる準備・代替作業を優先する。
-7. Blockerの原因となるTaskまたは条件が解消した場合、後続TaskのBlockerとDefinition of Readyを速やかに再評価する。解消済みBlockerの文言だけを残し、Backlog / Blockedへ滞留させてはならない。
+7. Blockerの原因となるTaskまたは条件が解消した場合、`Backlog / Blocked` にある後続TaskのBlocker、Definition of ReadyおよびApproachを速やかに再評価する。Blocked解除時は `task-approach-review` のFinalizeを再実行し、fresh `Approved` とDoRを満たした場合だけReadyへ遷移する。既に `Ready / In Progress / Review / Done / Superseded` 等へ進んだTaskを補償処理でReadyへ巻き戻してはならない。
 
 ## 第14条 Definition of Done
 
@@ -181,14 +181,14 @@ TaskをDoneまたはSuperseded等のterminal状態へ遷移させたActorは、�
 
 ## 第14条の2 Task / Story State Reconciliation
 
-1. **Dependency Release** — terminalになったTaskに依存する後続Taskについて、状態名だけではなく成果・置換関係・依存条件の実質を確認する。依存が解消し、他のBlockerがなく、Definition of Readyと必要なApproach Reviewを満たす場合は、Blockerを解消し `Status = Ready` へ遷移する。
+1. **Dependency Release** — terminalになったTaskに依存する後続Taskについて、状態名だけではなく成果・置換関係・依存条件の実質を確認する。Readyへの遷移対象は `Backlog / Blocked` のTaskに限る。依存が解消した場合は `task-approach-review` をFinalize modeで再実行し、他のBlockerがなく、fresh `Approach Review = Approved`、Definition of Ready、必要なExecution Prompt / Human Action Instructionを満たす場合だけ、Blockerを解消し `Status = Ready` へ遷移する。既にReady以降へ進んだTaskは状態を後退させない。
 2. Superseded / ReplacedはDependency充足と同義ではない。置換先Taskを追跡し、依存条件が既に満たされたのか、置換先へ移ったのかを確認する。
 3. **Story Completion Roll-up** — terminalになったTaskのParent Storyについて、Required child work、置換関係、Human / 外部作業、Story自身のAcceptance Criteriaを評価する。
 4. StoryをDoneとするには、Story Outcomeに必要なRequired workがすべてterminalで置換関係が収束し、Story Acceptance Criteriaを成果証拠に照らして満たし、Story Outcomeに必要なHuman / 外部作業が残っていないことを要する。
 5. StoryをDoneとする場合は、`Status = Done`、`Closure Reason = Done`、`Completed At`、`Result`のStory Outcomeと主要証拠を記録する。StoryはTask Time Eventを持つ実行単位ではないため、TaskのTime Event完了条件をそのまま適用しない。
 6. Story Acceptance Criteriaが未達の場合、子Task件数だけを根拠にStoryをDoneとしてはならない。不足AC、Active child、未解消Blockerまたはmissing workを明示する。
 7. missing workが新たに必要な場合は、第2条の新規Task受付原則に従い `MISC｜... / Backlog` として起票し、Backlog Refinementへ渡す。
-8. State ReconciliationはTask terminal transition直後を原則とし、Daily CloseおよびWeekly Sprintで補償的に再実行する。詳細手順は `cloud42-labo/skills` の `task-state-reconcile` を正本とする。
+8. State ReconciliationはTask terminal transition直後を原則とする。Daily CloseおよびWeekly Sprintでは遷移日ではなく、terminal Dependencyを参照するwaiting Taskやterminal childを持つopen Story等の**未reconcile状態**を基準に補償的に再実行する。詳細手順は `cloud42-labo/skills` の `task-state-reconcile` を正本とする。
 
 ## 第15条 Time Eventと管理計測
 
