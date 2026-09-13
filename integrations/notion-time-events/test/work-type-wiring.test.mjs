@@ -623,3 +623,64 @@ test('Finding J (P1, ADP-051-B2/B3 fixup round 6, no-regression check): a genuin
   const startedAtValue = created.properties['Started At'].date.start;
   assert.match(noteContent, new RegExp('Execution=' + startedAtValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:\\s|\\||$)'));
 });
+
+// ---------------------------------------------------------------------------
+// Finding K (ADP-051-B2/B3 fixup round 7): round 6's own fix above
+// (`workTypeResolution.inheritedExecutionId || executionId`) conflated TWO
+// different empty-`inheritedExecutionId` cases — "inherited from a legacy
+// no-Execution= candidate" (must stamp NOTHING) and "no inheritance at all"
+// (must stamp the call's own fresh `executionId`, exactly the no-regression
+// test just above). This is the former: a legacy churn candidate.
+// ---------------------------------------------------------------------------
+
+test('Finding K (P1, ADP-051-B2/B3 fixup round 7): the CREATED event\'s Execution= is left EMPTY/ABSENT when Work Type is inherited from a legacy candidate with no Execution= marker at all — round 6\'s `inheritedExecutionId || executionId` fallback wrongly stamped the manufactured startAt/when-derived value here instead (docs/review-fix-state-model.md §6, L566-570: a legacy reassignment replacement must stay identity-free, never backfilled)', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-finding-k', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // newly (re)assigned THIS poll, replacing the cleared assignee
+      lastEdited: '2026-08-30T10:00:00.000Z',
+      // Stale/original Started At — predates the outgoing event's own
+      // close, so it does NOT look fresh and is not trusted as this
+      // reopen's own start. This is exactly what makes `startAt` (and thus
+      // the manufactured `executionId`) fall through to `when`
+      // (2026-08-30T10:00:00.000Z) — the same setup as the Finding H/J
+      // tests above, so this test isolates ONLY the legacy-identity
+      // difference.
+      startedAt: '2026-08-01T00:00:00.000Z',
+    })],
+    events: [eventPage('evt-finding-k-legacy', {
+      actor: 'Chris',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      // Already closed — by an EARLIER poll (otherActor is empty THIS
+      // poll, so this only reaches the new event via the cross-poll
+      // fallback, exactly Finding H/J's scenario) — but UNLIKE those
+      // tests, this Note carries NO Execution= at all: legacy data
+      // predating the field, matched only via the §6 Reason/Boundary
+      // heuristic (Reason=reassignment, not itself an execution boundary).
+      endedAt: '2026-08-30T09:00:00.000Z',
+      note: 'Reason=reassignment | End Status=In Progress | Write=1000',
+      workType: 'Review Fix',
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /^opened:/);
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+
+  // Work Type inheritance itself (§6 legacy heuristic) must still hold.
+  assert.equal(created.properties['Work Type'].select.name, 'Review Fix');
+
+  const noteContent = created.properties.Note.rich_text[0].text.content;
+  assert.doesNotMatch(
+    noteContent, /Execution=/,
+    'the winning churn candidate is legacy (no Execution= to give) — L566-570 requires this replacement stay identity-free. The pre-fix `inheritedExecutionId || executionId` fallback would wrongly fall through to the manufactured executionId and stamp ONE anyway.'
+  );
+  assert.doesNotMatch(
+    noteContent, /Execution=2026-08-30T10:00:00\.000Z/,
+    'must specifically never stamp the manufactured (when-derived) executionId here — the exact bug Finding K reports: round 6 could not distinguish this legacy-inherited case from "no inheritance at all", where that same manufactured value IS correct (see the no-regression test above)'
+  );
+});

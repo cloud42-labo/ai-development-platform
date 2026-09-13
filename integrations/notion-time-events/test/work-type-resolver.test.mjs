@@ -360,6 +360,64 @@ test('failure #27 (required regression test): an empty churn candidate set after
 
   assert.equal(result.workType, 'Review Fix', 'must be freshly resolved from oldExecution\'s own End Status=Review via §3, never its unrelated stored Work Type=Initial Work property');
   assert.equal(result.inheritedExecutionId, '', 'Finding J (round 6): no inheritance happened here (a fresh §3 classification), so there must be no identity to adopt — the call site keeps its own freshly-computed executionId');
+  assert.equal(result.inherited, false, 'Finding K (round 7): this empty inheritedExecutionId means "no inheritance happened at all" — the call site must tell this apart from an inherited-but-legacy-identity-free candidate, which also has an empty inheritedExecutionId but a DIFFERENT correct call-site behavior');
+});
+
+// ---------------------------------------------------------------------------
+// Finding K (ADP-051-B2/B3 fixup round 7): resolveNewTimeEventWorkTypeSafely_
+// must return a THIRD signal (`inherited`) distinguishing "inherited from a
+// legacy no-Execution= candidate" (inheritedExecutionId === '', inherited ===
+// true) from "no inheritance happened at all" (inheritedExecutionId === '',
+// inherited === false) — round 6's `inheritedExecutionId || executionId`
+// fallback at the call site could not tell these apart and wrongly
+// manufactured an identity for the former (docs/review-fix-state-model.md
+// §6, L566-570).
+// ---------------------------------------------------------------------------
+
+test('Finding K (P1, ADP-051-B2/B3 fixup round 7, case a — no regression): resolveNewTimeEventWorkTypeSafely_ returns inherited:true with the REAL Execution= identity when a same-call reassignment genuinely inherits from a modern candidate that has one (docs/review-fix-state-model.md §6)', () => {
+  const { sandbox } = harness();
+  const outgoing = eventPage('evt-k-real-identity', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T05:00:00.000Z',
+    note: 'Reason=reassignment | Execution=2026-08-01T00:00:00.000Z',
+    workType: 'Review Fix',
+  });
+
+  const result = sandbox.resolveNewTimeEventWorkTypeSafely_(
+    TASK_ID, [outgoing], [{ event: outgoing, closeReason: 'reassignment' }]
+  );
+
+  assert.equal(result.workType, 'Review Fix');
+  assert.equal(result.inherited, true, 'inheritance genuinely happened via the same-call reassignment step (step 2)');
+  assert.equal(result.inheritedExecutionId, '2026-08-01T00:00:00.000Z', 'must hand back the winning candidate\'s own real Execution= identity — this is Finding J\'s case, must not regress');
+});
+
+test('Finding K (P1, ADP-051-B2/B3 fixup round 7, case b — the actual bug): resolveNewTimeEventWorkTypeSafely_ returns inherited:true but an EMPTY inheritedExecutionId when the winning churn candidate is a legacy event with no Execution= marker at all — this must be told apart from "no inheritance happened" so the call site never falls back to a manufactured identity (docs/review-fix-state-model.md §6, L566-570)', () => {
+  const { sandbox } = harness();
+  const legacyOutgoing = eventPage('evt-k-legacy-identity-free', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T05:00:00.000Z',
+    note: 'Reason=duplicate_reconciliation', // no Execution= at all — legacy data
+    workType: 'Initial Work',
+  });
+
+  const result = sandbox.resolveNewTimeEventWorkTypeSafely_(
+    TASK_ID, [legacyOutgoing], [{ event: legacyOutgoing, closeReason: 'duplicate_reconciliation' }]
+  );
+
+  assert.equal(result.workType, 'Initial Work');
+  assert.equal(result.inherited, true, 'genuine churn inheritance happened via the legacy Reason/Boundary heuristic (§6 L566-570) — this must NOT collapse into "no inheritance at all" just because there is no identity to report');
+  assert.equal(result.inheritedExecutionId, '', 'the legacy candidate has no Execution= to give — L566-570 requires the replacement stay identity-free, never manufacture one at the call site');
+});
+
+test('Finding K (P1, ADP-051-B2/B3 fixup round 7, case c — no regression): resolveNewTimeEventWorkTypeSafely_ returns inherited:false for a genuinely new execution with no churn candidate at all, so its own empty inheritedExecutionId is never mistaken for case b\'s (docs/review-fix-state-model.md §6)', () => {
+  const { sandbox } = harness();
+
+  const result = sandbox.resolveNewTimeEventWorkTypeSafely_(TASK_ID, [], []);
+
+  assert.equal(result.workType, 'Initial Work', 'no boundary and no Sync Log history at all — §3 step 4\'s confident default');
+  assert.equal(result.inherited, false, 'no churn candidate matched at all (step 4) — the call site must keep computing its own fresh executionId');
+  assert.equal(result.inheritedExecutionId, '');
 });
 
 test('failure #33: a legacy outgoing event with no Execution= marker at all still inherits via the Reason/Boundary legacy heuristic (docs/review-fix-state-model.md §6)', () => {
@@ -469,6 +527,85 @@ test('failure #41: Write= never overrides a real difference in Notion minute —
   const laterMinuteTinyWrite = { timestamp: new Date('2026-08-01T03:05:00.000Z'), write: '1' };
 
   assert.equal(sandbox.compareInstants_(earlierMinuteHugeWrite, laterMinuteTinyWrite), -1, 'the earlier Notion minute must still lose despite an enormous Write=, and the later minute must still win despite a tiny one');
+});
+
+// ---------------------------------------------------------------------------
+// Finding M (ADP-051-B2/B3 fixup round 7): mostRecentBoundaryCandidate_'s own
+// tie-handling. `compareInstants_` returning `0` for two same-minute
+// boundary candidates lacking `Write=` means "unknowable ordering"
+// (docs/review-fix-state-model.md L320-327), not "keep whichever the query
+// happened to return first". A conflicting tie (disagreeing End Status=)
+// must surface as an explicit ambiguous sentinel; a tie that happens to
+// agree on End Status= has no real disagreement to hide and must still
+// classify normally.
+// ---------------------------------------------------------------------------
+
+test('Finding M (P2, ADP-051-B2/B3 fixup round 7): two boundary candidates tied at the same Notion minute with DIFFERING End Status= and no Write= to break the tie surface an explicit ambiguous outcome, never a silent pick of whichever the query returned first (docs/review-fix-state-model.md §4, L320-327)', () => {
+  const { sandbox } = harness();
+  const boundaryA = eventPage('evt-m-a', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=left_in_progress', 'End Status=Review'),
+  });
+  const boundaryB = eventPage('evt-m-b', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:30.000Z', // same Notion minute as A; neither side carries Write=
+    note: note('Reason=left_in_progress', 'End Status=Backlog'),
+  });
+
+  const result = sandbox.resolveWorkType_(TASK_ID, [boundaryA, boundaryB]);
+
+  assert.equal(result.unresolved, true, 'a genuine same-minute tie with disagreeing End Status= is not resolvable from Notion\'s own data (§4) — must never silently keep query order');
+  assert.equal(result.classification, null);
+  assert.equal(result.reasonCode, 'boundary_conflicting_tie_ambiguous');
+
+  // Order independence: swapping which event the (fake) query returns first
+  // must not change the outcome — a query-order-dependent result IS the bug
+  // Finding M reports.
+  const swapped = sandbox.resolveWorkType_(TASK_ID, [boundaryB, boundaryA]);
+  assert.equal(swapped.unresolved, true);
+  assert.equal(swapped.classification, null);
+  assert.equal(swapped.reasonCode, 'boundary_conflicting_tie_ambiguous');
+});
+
+test('Finding M (P2, ADP-051-B2/B3 fixup round 7, companion — no false positive): two boundary candidates tied at the same Notion minute with the SAME End Status= still classify normally — both possible orderings agree, so there is no actual ambiguity to surface (docs/review-fix-state-model.md §4, L320-327)', () => {
+  const { sandbox } = harness();
+  const boundaryA = eventPage('evt-m-same-a', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=left_in_progress', 'End Status=Review'),
+  });
+  const boundaryB = eventPage('evt-m-same-b', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:30.000Z', // same Notion minute, no Write=, SAME End Status
+    note: note('Reason=left_in_progress', 'End Status=Review'),
+  });
+
+  const result = sandbox.resolveWorkType_(TASK_ID, [boundaryA, boundaryB]);
+
+  assert.equal(result.unresolved, false, 'both tied candidates agree on End Status=Review — no actual disagreement in the answer, so this must not be flagged as ambiguous');
+  assert.equal(result.classification, 'Review Fix');
+  assert.equal(result.reasonCode, 'genuine_boundary_only');
+});
+
+test('Finding M (P2, ADP-051-B2/B3 fixup round 7, no-regression check): Write= still breaks an otherwise-tied boundary pair with differing End Status= — the conflicting-tie sentinel must only fire when Write= is genuinely unable to order them (docs/review-fix-state-model.md §4)', () => {
+  const { sandbox } = harness();
+  const boundaryA = eventPage('evt-m-write-a', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=left_in_progress', 'End Status=Review', 'Write=1000'),
+  });
+  const boundaryB = eventPage('evt-m-write-b', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:30.000Z', // same Notion minute as A, but Write= breaks the tie
+    note: note('Reason=left_in_progress', 'End Status=Backlog', 'Write=2000'),
+  });
+
+  const result = sandbox.resolveWorkType_(TASK_ID, [boundaryA, boundaryB]);
+
+  assert.equal(result.unresolved, false, 'Write=2000 unambiguously outranks Write=1000 within the same Notion minute — this is a resolvable order, not a conflicting tie');
+  assert.equal(result.classification, 'Initial Work', 'the later-Write= candidate (End Status=Backlog) must win outright');
+  assert.equal(result.reasonCode, 'genuine_boundary_only');
 });
 
 // ---------------------------------------------------------------------------
@@ -846,6 +983,88 @@ test('Finding I (P1, ADP-051-B2/B3 fixup round 6): a Task whose OWN eligible his
   const result = sandbox.resolveWorkType_(TASK_ID, []);
 
   assert.equal(result.unresolved, false, 'a bounded read must not manufacture ambiguity for a Task whose own evidence is fully visible within the window');
+  assert.equal(result.classification, 'Review Fix');
+});
+
+// ---------------------------------------------------------------------------
+// Finding L (ADP-051-B2/B3 fixup round 7): round 6 (Finding I) above already
+// covers the case where a Task's ONLY evidence falls entirely OUTSIDE the
+// bounded window (`eligible` ends up empty -> windowTruncatedAmbiguous
+// directly). This is a DIFFERENT case: `eligible` DOES have a candidate
+// (some of this Task's history IS inside the window), but the backward
+// same-status RUN-EXTENSION scan (resolveSyncLogCandidate_'s
+// `runStart`/`j` loop) walks all the way back to the earliest row this
+// resolver can see without ever finding the prior different-status row that
+// would genuinely establish where the run began — i.e. the visible run is a
+// RE-OBSERVATION of a run that may have started even earlier, before the
+// window.
+// ---------------------------------------------------------------------------
+
+test('Finding L (P1, ADP-051-B2/B3 fixup round 7): a same-status run whose visible portion is a RE-OBSERVATION reaching the truncated window\'s edge (no prior different-status row found) surfaces resolveSyncLogCandidate_\'s ambiguous sentinel, never a confident run-start timestamp (docs/review-fix-state-model.md §3 step 2, failure #28 principle)', () => {
+  const { sandbox, spreadsheet } = harness();
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  sandbox.ensureSyncLogSheet_();
+
+  // Old, unrelated rows entirely outside the eventual window — proves the
+  // sheet really is truncated, not merely that it happens to fit (same
+  // setup as the Finding I "own eligible history" test above).
+  const OLD_UNRELATED_ROWS = 3000;
+  for (let i = 0; i < OLD_UNRELATED_ROWS; i++) {
+    syncLogSheet.rows.push(['snap-old-' + i, 'test', 'unrelated-task', 'Backlog', '2026-01-01T00:00:00.000Z', '', 'Task', String(i)]);
+  }
+  // More recent, still-unrelated filler, so the target Task's own rows land
+  // deep inside the bounded window, not at its literal physical edge.
+  for (let i = 0; i < SYNC_LOG_PROJECTION_WINDOW_ROWS - 2; i++) {
+    syncLogSheet.rows.push(['snap-recent-' + i, 'test', 'unrelated-task', 'Backlog', '2026-06-01T00:00:00.000Z', '', 'Task', String(9000000 + i)]);
+  }
+  // Within the window: this Task has TWO `Review` observations — a genuine
+  // re-observation (the page stayed in Review across two separate polls,
+  // each logging its own Sync Log row) — with NO earlier row for this Task
+  // anywhere in the visible window to prove where the Review run actually
+  // began. The true start could be exactly here, or could be long before
+  // the window — this data cannot tell the two apart.
+  syncLogSheet.rows.push(['snap-target-review-1', 'test', TASK_ID, 'Review', '2026-08-01T09:00:00.000Z', '', 'Task', '900000000']);
+  syncLogSheet.rows.push(['snap-target-review-2', 'test', TASK_ID, 'Review', '2026-08-15T09:00:00.000Z', '', 'Task', '900000001']);
+
+  const projection = sandbox.loadSyncLogProjection_();
+  assert.equal(projection.truncated, true, 'sanity check: the sheet as a whole really is larger than the window');
+
+  const candidate = sandbox.resolveSyncLogCandidate_(TASK_ID, []);
+  assert.ok(candidate, 'must not be plain null — this is unresolvable, not "no history at all"');
+  assert.equal(candidate.windowTruncatedAmbiguous, true, 'the backward run-extension scan reached the visible window\'s edge without ever finding a prior different-status/In-Progress row to establish the run\'s true start');
+
+  const result = sandbox.resolveWorkType_(TASK_ID, []);
+  assert.equal(result.unresolved, true, 'must never trust the earliest VISIBLE row of a same-status run as its confident true start when older history beyond the window could extend (or terminate) that run');
+  assert.equal(result.classification, null);
+  assert.equal(result.reasonCode, 'synclog_candidate_window_truncated_ambiguous');
+});
+
+test('Finding L (P1, ADP-051-B2/B3 fixup round 7, companion — no false positive): a same-status run whose PRIOR different-status row is ALSO visible inside the truncated window classifies normally — the run boundary is genuinely established from visible data, not an artifact of the window\'s edge (docs/review-fix-state-model.md §3 step 2)', () => {
+  const { sandbox, spreadsheet } = harness();
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  sandbox.ensureSyncLogSheet_();
+
+  const OLD_UNRELATED_ROWS = 3000;
+  for (let i = 0; i < OLD_UNRELATED_ROWS; i++) {
+    syncLogSheet.rows.push(['snap-old-' + i, 'test', 'unrelated-task', 'Backlog', '2026-01-01T00:00:00.000Z', '', 'Task', String(i)]);
+  }
+  for (let i = 0; i < SYNC_LOG_PROJECTION_WINDOW_ROWS - 3; i++) {
+    syncLogSheet.rows.push(['snap-recent-' + i, 'test', 'unrelated-task', 'Backlog', '2026-06-01T00:00:00.000Z', '', 'Task', String(9000000 + i)]);
+  }
+  // This Task's own history, fully inside the window: a genuine `Backlog`
+  // row PRECEDES the two `Review` re-observations — the run's true start
+  // (the first Review row) is confidently established because something
+  // OTHER than Review is visibly there right before it, not because the
+  // window happened to end.
+  syncLogSheet.rows.push(['snap-target-backlog', 'test', TASK_ID, 'Backlog', '2026-07-01T09:00:00.000Z', '', 'Task', '899999999']);
+  syncLogSheet.rows.push(['snap-target-review-1', 'test', TASK_ID, 'Review', '2026-08-01T09:00:00.000Z', '', 'Task', '900000000']);
+  syncLogSheet.rows.push(['snap-target-review-2', 'test', TASK_ID, 'Review', '2026-08-15T09:00:00.000Z', '', 'Task', '900000001']);
+
+  const projection = sandbox.loadSyncLogProjection_();
+  assert.equal(projection.truncated, true, 'sanity check: the sheet as a whole really is larger than the window');
+
+  const result = sandbox.resolveWorkType_(TASK_ID, []);
+  assert.equal(result.unresolved, false, 'the run\'s true start is genuinely visible (a differing-status row precedes it) — window truncation elsewhere in the sheet must not manufacture ambiguity here');
   assert.equal(result.classification, 'Review Fix');
 });
 

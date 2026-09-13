@@ -2210,17 +2210,30 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // inconsistent identity for what §6 (L562-565) defines as the SAME
       // execution, which `enforceDoneGate_` treats as authoritative
       // elsewhere. Whenever inheritance genuinely happened AND the winning
-      // candidate actually had a real `Execution=` to give (never for a
-      // legacy no-Execution= candidate — `inheritedExecutionId` is `''`
-      // there, by design; see resolveNewTimeEventWorkTypeSafely_'s own
-      // comment for why that must keep going through the existing
-      // no-backfill fallback), adopt THAT identity for the event being
-      // created here instead of the independently-computed `executionId`.
-      // No inheritance (a genuinely new execution, a restart cutoff, or an
-      // unresolved case) leaves `inheritedExecutionId` empty, so
-      // `executionId`'s own freshly-computed value is used unchanged.
+      // candidate actually had a real `Execution=` to give, adopt THAT
+      // identity for the event being created here instead of the
+      // independently-computed `executionId`.
+      //
+      // Finding K (ADP-051-B2/B3 fixup round 7): round 6's fix here was
+      // `workTypeResolution.inheritedExecutionId || executionId` — which
+      // conflates TWO different empty-`inheritedExecutionId` cases: (b)
+      // inheritance genuinely happened, but from a LEGACY candidate with no
+      // `Execution=` at all to give (§6 L566-570 requires this replacement
+      // stay identity-free — no backfilled identity, ever), vs (c) no
+      // inheritance happened at all (a genuinely new execution correctly
+      // gets its OWN fresh `executionId`). The `||` fallback wrongly
+      // manufactured an identity for case (b) too, stamping a fabricated
+      // `startAt`/`when` value that can differ from the Task's unchanged
+      // `Started At` and cause `evaluateDoneEvidence_` to authoritatively
+      // exclude this replacement from the current execution. `inherited`
+      // (see resolveNewTimeEventWorkTypeSafely_'s own header comment) is
+      // the explicit signal that distinguishes them: only fall back to this
+      // call's own `executionId` when inheritance did NOT happen at all;
+      // when it did happen, use the inherited identity exactly as returned
+      // — including a genuinely empty one for case (b) — never substitute
+      // the manufactured value.
       const workType = workTypeResolution.workType;
-      const finalExecutionId = workTypeResolution.inheritedExecutionId || executionId;
+      const finalExecutionId = workTypeResolution.inherited ? workTypeResolution.inheritedExecutionId : executionId;
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, finalExecutionId, taskType, workType);
       actions.push('opened:' + created.id);
     }
@@ -3770,24 +3783,56 @@ function classifyWorkTypeStatus_(status) {
 //     case.
 // Ties across more than one boundary-tagged close are resolved by
 // compareInstants_ (Ended At, then Write=), matching §4.
+//
+// Finding M (ADP-051-B2/B3 fixup round 7): when two boundary candidates tie
+// at Notion-minute granularity with `Write=` missing on one or both sides,
+// `compareInstants_` returns `0` — genuinely unknowable ordering, not "keep
+// whichever was seen first" (docs/review-fix-state-model.md L320-327: "A
+// same-Notion-minute tie ... is not resolvable from Notion's own data").
+// The `> 0`-only update below already preserves that: a `0` never replaces
+// `best`, so the FIRST candidate encountered (arbitrary Notion query order)
+// silently wins whenever nothing later strictly outranks it. That is fine
+// when every tied candidate agrees on `endStatus` — there is no actual
+// disagreement to hide. It is wrong when they disagree: returning `best` as
+// if it were a confident answer lets Work Type be decided by query order.
+// So every boundary-tagged event is collected first, the same `> 0`
+// tie-preserving scan then picks `best` exactly as before, and only
+// afterward do we check whether any OTHER candidate is exactly tied with
+// `best` (via `compareInstants_` returning `0` against it) yet disagrees on
+// `endStatus` — a genuine conflicting tie. Only then is the ambiguous
+// sentinel returned; a same-`endStatus` tie (including more than two
+// candidates all agreeing) still resolves normally, matching every other
+// `ambiguousCutoffTie`/`windowTruncatedAmbiguous` sentinel already
+// established in this file.
 function mostRecentBoundaryCandidate_(allEvents) {
-  let best = null;
+  const candidates = [];
   (allEvents || []).forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
     if (!endedAt) return;
     const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
     if (!isExecutionBoundary_(meta)) return;
-    const candidate = {
+    candidates.push({
       kind: meta.reason === 'left_in_progress' ? 'genuine' : 'retroactive',
       event: eventPage,
       endStatus: meta.endStatus || '',
       endedAt: endedAt,
       write: meta.write,
-    };
-    if (!best || compareInstants_({ timestamp: endedAt, write: meta.write }, { timestamp: best.endedAt, write: best.write }) > 0) {
+    });
+  });
+  if (!candidates.length) return null;
+  let best = candidates[0];
+  for (let idx = 1; idx < candidates.length; idx++) {
+    const candidate = candidates[idx];
+    if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) > 0) {
       best = candidate;
     }
+  }
+  const conflictingTie = candidates.some(function (candidate) {
+    if (candidate === best) return false;
+    if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) !== 0) return false;
+    return candidate.endStatus !== best.endStatus;
   });
+  if (conflictingTie) return { conflictingTie: true };
   return best;
 }
 
@@ -4119,6 +4164,51 @@ function resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, re
     j--;
   }
 
+  // Finding L (ADP-051-B2/B3 fixup round 7): round 6 (Finding I) correctly
+  // caught the case where a Task's evidence falls ENTIRELY outside the
+  // bounded window (no candidate at all -> windowTruncatedAmbiguous). This
+  // is a DIFFERENT case: `eligible` DOES have a candidate, so the checks
+  // above never trigger, but the backward RUN-EXTENSION scan just above ran
+  // off the near end of `eligible` (`j` fell below 0, ending with
+  // `runStart === 0`) WITHOUT ever finding the prior different-status row
+  // that would genuinely terminate this run. When `windowTruncated` is also
+  // true, `eligible[0]` is not proof the run started there — it may be a
+  // mere RE-OBSERVATION of a run that began even earlier, outside the
+  // window (older Sync Log history for this Task, before the window, was
+  // never read at all and could easily continue the exact same status
+  // further back). Trusting `eligible[0]` as the run's start hands
+  // `resolveWorkType_` a fabricated, too-late-relative-to-truth timestamp
+  // that can make a stale Sync Log status silently outrank a genuine Time
+  // Event boundary in the "more_recent_wins_different_status" comparison
+  // below.
+  //
+  // `i > 0` gates this to cases where the extension loop actually walked
+  // backward at least once (`runStart` moved from a starting index `i > 0`
+  // down to `0`) — i.e. there genuinely IS a re-observation inside the
+  // window whose earlier bound the scan could not establish. This is
+  // deliberately narrower than "runStart === 0 && windowTruncated" alone:
+  // when `i` is ALREADY `0` (this Task's single, most-recent non-`In
+  // Progress` row has no other eligible row before it in `eligible` at
+  // all — the extension loop's own `while (j >= 0 ...)` never even runs),
+  // there is no "run" to have been cut short in the first place — that row
+  // is simply the only evidence this Task's classification ever needed,
+  // exactly the case round 6's own "own eligible history sits fully inside
+  // the bounded window" regression test establishes must keep classifying
+  // normally. Requiring `i > 0` is what keeps these two truncation-adjacent
+  // cases distinct instead of collapsing round 6's accepted case into this
+  // new ambiguity. The defensive `eligible[0].row !== 2` check confirms
+  // this is genuinely the window's artificial edge, not the sheet's real
+  // row 2 — though `windowTruncated` (round 6's `.truncated` flag) already
+  // guarantees row 2 was never read when true, so this can never be false
+  // when the outer condition holds; kept explicit rather than relying on
+  // that invariant silently. Reuse the same
+  // `windowTruncatedAmbiguous`/`ambiguousCutoffTie` sentinel pattern
+  // Finding I already established, so `resolveWorkType_` surfaces
+  // `unresolved` here exactly as it does for that sibling case.
+  if (runStart === 0 && i > 0 && windowTruncated && eligible[0].row !== 2) {
+    return noCandidate(cutoffTieExists);
+  }
+
   const startRow = eligible[runStart];
   return {
     status: status,
@@ -4193,7 +4283,15 @@ function hasInterveningDifferentStatusRow_(eligibleRows, excludeStatus, fromInst
 // `unresolved` here rather than guessed — the conservative direction
 // consistent with failure #28's own principle.
 function resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride) {
-  const boundary = mostRecentBoundaryCandidate_(allEvents);
+  const rawBoundary = mostRecentBoundaryCandidate_(allEvents);
+  // Finding M (ADP-051-B2/B3 fixup round 7): `{ conflictingTie: true }` is
+  // the same shape of non-usable sentinel as the two `syncLog` ones just
+  // below, for a genuine same-minute disagreement between two Time Event
+  // boundary candidates that `compareInstants_` cannot order
+  // (docs/review-fix-state-model.md L320-327) — unwrap it to `null` here
+  // too, and remember that it happened.
+  const boundaryConflictingTie = Boolean(rawBoundary && rawBoundary.conflictingTie);
+  const boundary = boundaryConflictingTie ? null : rawBoundary;
   const rawSyncLog = resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride);
   // Finding 3 (ADP-051-B3 fixup): `{ ambiguousCutoffTie: true }` is not a
   // usable candidate (no status/timestamp) — unwrap it to `null` for every
@@ -4212,6 +4310,15 @@ function resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCut
   }
   function resolved(status, reasonCode) {
     return { classification: classifyWorkTypeStatus_(status), unresolved: false, reasonCode: reasonCode, evidence: { boundary: boundary, syncLog: syncLog } };
+  }
+
+  // Finding M (ADP-051-B2/B3 fixup round 7): a conflicting boundary tie is
+  // a genuine ambiguity in the Time-Event-side evidence itself, independent
+  // of whatever the Sync Log side shows — surface it immediately, the same
+  // "never silently default on ambiguous evidence" principle §3 step 4
+  // below already applies to the Sync Log sentinels.
+  if (boundaryConflictingTie) {
+    return unresolved('boundary_conflicting_tie_ambiguous');
   }
 
   // §3 step 4: "no candidate at all" classifies as Initial Work, not
@@ -4472,11 +4579,20 @@ function churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId) {
 // never blocking or delaying that creation itself (see the call site's own
 // comment).
 //
-// Returns `{ workType, inheritedExecutionId }`:
+// Returns `{ workType, inheritedExecutionId, inherited }`:
 //   - `workType` is `''` (no classification written, event stays
 //     unclassified) on any resolver throw, an explicit `unresolved`
 //     outcome, or when there is genuinely nothing to classify yet;
 //     otherwise `'Initial Work'` or `'Review Fix'`.
+//   - `inherited` (Finding K, ADP-051-B2/B3 fixup round 7) is `true`
+//     whenever steps 2 or 3 below actually matched a churn candidate and
+//     inherited its Work Type — regardless of whether that candidate had
+//     a real `Execution=` to give — and `false` only for step 4 (no
+//     inheritance happened at all: a genuinely new execution, a restart
+//     cutoff, or an unresolved case). This is the call site's ONLY signal
+//     for whether inheritance happened; `inheritedExecutionId` alone
+//     cannot carry that (see below) because it is legitimately `''` in
+//     TWO different situations that the call site must treat oppositely.
 //   - `inheritedExecutionId` (Finding J, ADP-051-B2/B3 fixup round 6) is
 //     the winning churn candidate's OWN real `Execution=` value whenever
 //     steps 2 or 3 below actually inherited from one — `''` whenever no
@@ -4485,16 +4601,26 @@ function churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId) {
 //     (the §6 legacy no-Execution= case, which stays on the existing
 //     no-backfill fallback — see `outgoingExecutionId`'s own comment at
 //     the call site for why manufacturing an identity there is worse than
-//     none). This exists because Finding H (round 5) made inheritance
-//     itself work correctly for the cross-poll case even when the call
-//     site's own independently-computed `executionId` doesn't match the
-//     outgoing event's real identity, but never corrected THAT mismatch —
-//     the call site must stamp the newly-created event with this returned
-//     identity (when non-empty) instead of its own manufactured one, so
-//     the created event's `Execution=` stays consistent with the
-//     execution it just inherited Work Type from
-//     (docs/review-fix-state-model.md §6, L562-565's same-execution
-//     contract — see the call site's own comment for the full mechanics).
+//     none). Round 6 conflated these two empty-string cases by falling
+//     back to the call site's own manufactured `executionId` whenever this
+//     was falsy (Finding K) — wrongly stamping a fabricated identity onto
+//     a replacement that §6 (L566-570) requires stay identity-free. `inherited`
+//     above is what lets the call site tell them apart: when `inherited` is
+//     true and `inheritedExecutionId` is `''`, the call site must stamp
+//     NOTHING (empty `Execution=`), never fall back to its own manufactured
+//     value; when `inherited` is false, the call site's own fresh
+//     `executionId` is correct and unchanged. This exists because Finding H
+//     (round 5) made inheritance itself work correctly for the cross-poll
+//     case even when the call site's own independently-computed
+//     `executionId` doesn't match the outgoing event's real identity, but
+//     never corrected THAT mismatch — the call site must stamp the newly-
+//     created event with this returned identity (when inheritance happened)
+//     instead of its own manufactured one, so the created event's
+//     `Execution=` stays consistent with the execution it just inherited
+//     Work Type from (docs/review-fix-state-model.md §6, L562-565's
+//     same-execution contract, and L566-570's identity-free legacy
+//     replacement contract — see the call site's own comment for the full
+//     mechanics).
 //
 // docs/review-fix-state-model.md §6's full churn-inheritance precedence,
 // as implemented here (ADP-051-B2/B3 fixup round 4 restructuring — rounds
@@ -4587,7 +4713,7 @@ function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents,
         const options = isWrappedEntry && entry.closeReason ? { closeReason: entry.closeReason } : undefined;
         const churn = resolveChurnInheritedWorkType_(outgoingEvent, options);
         if (churn.inherits && churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId)) {
-          return { workType: churn.workType || '', inheritedExecutionId: inheritedIdentityOf(outgoingEvent) };
+          return { workType: churn.workType || '', inheritedExecutionId: inheritedIdentityOf(outgoingEvent), inherited: true };
         }
       }
       // Step 3: cross-poll fallback, identity-matched — only when nothing
@@ -4598,7 +4724,7 @@ function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents,
         if (crossPollCandidate) {
           const churn = resolveChurnInheritedWorkType_(crossPollCandidate);
           if (churn.inherits && churnCandidateExecutionMatches_(crossPollCandidate, expectedExecutionId)) {
-            return { workType: churn.workType || '', inheritedExecutionId: inheritedIdentityOf(crossPollCandidate) };
+            return { workType: churn.workType || '', inheritedExecutionId: inheritedIdentityOf(crossPollCandidate), inherited: true };
           }
         }
       }
@@ -4606,12 +4732,16 @@ function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents,
     // Step 4: fall through to §3's ordinary fresh classification below. No
     // inheritance happened, so there is no identity to hand back — the
     // call site must keep computing its own fresh, self-consistent
-    // executionId for a genuinely new execution.
+    // executionId for a genuinely new execution. `inherited: false` here
+    // (Finding K) is what tells the call site to do exactly that, rather
+    // than trying to infer "no inheritance" from `inheritedExecutionId`
+    // being empty — which is ALSO the correct value for a genuine
+    // inheritance from a legacy no-Execution= candidate (steps 2/3 above).
     const resolution = resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride);
-    if (resolution.unresolved || !resolution.classification) return { workType: '', inheritedExecutionId: '' };
-    return { workType: resolution.classification, inheritedExecutionId: '' };
+    if (resolution.unresolved || !resolution.classification) return { workType: '', inheritedExecutionId: '', inherited: false };
+    return { workType: resolution.classification, inheritedExecutionId: '', inherited: false };
   } catch (err) {
-    return { workType: '', inheritedExecutionId: '' };
+    return { workType: '', inheritedExecutionId: '', inherited: false };
   }
 }
 
