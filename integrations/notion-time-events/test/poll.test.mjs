@@ -4163,7 +4163,7 @@ test('storyConversionHappenedWhileInProgress_ still finds a Task\'s Sync Log row
   );
 });
 
-test('storyConversionHappenedWhileInProgress_ makes no Sync Log row-data transfer for a Task that has never appeared in it', () => {
+test('storyConversionHappenedWhileInProgress_ costs no Sync Log row-data transfer of its own for a Task that has never appeared in it -- the one transfer the whole poll makes is the poll-wide Work Type projection, read exactly once regardless of the unrelated log size', () => {
   // Codex-reported gap (P2, round 26), fixing the round-24 tail-chunk
   // implementation itself: the single most common caller of this function
   // is an ordinary Task's very first Time Event -- by definition a Task ID
@@ -4177,7 +4177,21 @@ test('storyConversionHappenedWhileInProgress_ makes no Sync Log row-data transfe
   // MAX_RUN_DURATION_MS comment). Round 26's fix (Range#createTextFinder's
   // findAll(), see the function's own comment) answers "does this Task ID
   // appear anywhere" via a server-side search returning match positions
-  // only, so it transfers no row data at all when there is nothing to find.
+  // only, so it transfers no row data at all when there is nothing to find
+  // -- storyConversionHappenedWhileInProgress_ itself still costs zero.
+  //
+  // ADP-051-B2/B3 fixup round 3 (Finding D) updates this test's own
+  // assertion, not its underlying claim: since this Task opens a fresh
+  // Time Event (mapped actor, In Progress, no prior history), the Work
+  // Type resolver now also runs and needs to know whether ANY Sync Log
+  // history exists for it -- unlike round 26's TextFinder-only search,
+  // the poll-wide projection (loadSyncLogProjection_/
+  // makeSyncLogProjectionLoader_) cannot answer "not present" without
+  // reading the sheet's data range once. That ONE read is exactly the cost
+  // this test now proves is bounded: it happens at most once for the
+  // WHOLE poll (not once per Task, and not scaling with the 500 unrelated
+  // rows below), and storyConversionHappenedWhileInProgress_'s own search
+  // contributes nothing further to it.
   const taskId = '3cafbd82-6f3b-8158-9622-d795b43dww01';
   const startedAt = '2026-08-30T05:00:00.000Z';
   const task = taskPage(taskId, {
@@ -4205,8 +4219,8 @@ test('storyConversionHappenedWhileInProgress_ makes no Sync Log row-data transfe
   sandbox.pollTaskChanges();
 
   assert.equal(
-    syncLogSheet.getValuesCallCount, 0,
-    'expected no Sync Log row-data transfer for a Task ID that has never appeared in the log, however large the log has grown'
+    syncLogSheet.getValuesCallCount, 1,
+    'expected exactly ONE Sync Log row-data transfer for the whole poll (the poll-wide Work Type projection, loaded at most once), never one per Task and never scaling with the 500 unrelated rows on file'
   );
   const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
   assert.equal(creates.length, 1);

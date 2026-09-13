@@ -593,10 +593,32 @@ test('Finding B (P2, ADP-051-B2/B3 fixup round 2): a cutoff tie stays ambiguous 
 });
 
 // ---------------------------------------------------------------------------
-// Performance (failure #16)
+// Performance (failure #16, and Finding D — ADP-051-B2/B3 fixup round 3)
 // ---------------------------------------------------------------------------
+//
+// Rounds 1 and 2's fixes (a single min..max bulk range, then getRangeList
+// grouped by contiguous matched-row runs) both bounded cost by trying to
+// read only THIS TASK's own rows, cheaply. Round 3's Codex finding proved
+// that strategy can never be bounded in the worst case: `Range#getValues()`
+// is one HTTP round-trip PER Range object, even when the Ranges came from
+// one `getRangeList()` call, so a Task whose matches are sparse/scattered
+// (every match its own isolated, non-contiguous run — e.g. one poll
+// interleaved with many other Tasks, repeated over hundreds of polls)
+// still cost one service call PER MATCHED ROW under round 2's fix. The
+// tests below regression-test round 3's actual fix instead: a poll-wide,
+// memoized, lazy Sync Log projection read AT MOST ONCE per poll,
+// regardless of match count, contiguity, or sparsity — the tests that used
+// to prove round 2's per-run bound (grouping into contiguous runs, and
+// "zero cost for a Task ID never seen") are retired here, since neither
+// claim is either meaningful or true under this architecture: there is no
+// more "run" to group (the whole sheet is read in one call, once), and
+// determining "this Task ID has no rows at all" now requires having read
+// the sheet at least once, exactly like determining anything else about
+// it — the fix trades that one-time, poll-wide cost for an unconditional,
+// never-worse-than-one bound against every match pattern, contiguous or
+// not.
 
-test('failure #16 / Finding 2 (ADP-051-B2/B3 fixup): Sync Log candidate resolution costs exactly ONE bulk row-data transfer for this Task\'s matched rows, never one getValues() call per matched row, and nothing at all for a Task with no rows on file (docs/review-fix-state-model.md §3 step 2, performance)', () => {
+test('failure #16 / Finding D (ADP-051-B2/B3 fixup round 3): a single resolveSyncLogCandidate_ call costs exactly ONE bulk row-data transfer for the whole Sync Log sheet, regardless of this Task\'s own match count, and a Task ID that has never appeared costs the identical one transfer — not zero, but never more than one either (docs/review-fix-state-model.md §3 step 2, performance)', () => {
   const { sandbox, spreadsheet } = harness();
   for (let i = 0; i < 50; i++) {
     logRow(sandbox, { taskId: 'unrelated-task-' + i, status: 'Review', receivedAt: '2026-08-01T00:00:00.000Z' });
@@ -610,15 +632,18 @@ test('failure #16 / Finding 2 (ADP-051-B2/B3 fixup): Sync Log candidate resoluti
   const candidate = sandbox.resolveSyncLogCandidate_(TASK_ID, []);
 
   assert.ok(candidate);
-  assert.equal(syncLogSheet.getValuesCallCount, 1, 'expected exactly ONE bulk row-data transfer spanning this Task\'s matched rows, never one getValues() call per matched row');
+  assert.equal(syncLogSheet.getValuesCallCount, 1, 'expected exactly ONE bulk row-data transfer for the whole Sync Log sheet, not one per matched row');
 
   syncLogSheet.getValuesCallCount = 0;
   const noneCandidate = sandbox.resolveSyncLogCandidate_('task-never-seen', []);
   assert.equal(noneCandidate, null);
-  assert.equal(syncLogSheet.getValuesCallCount, 0, 'a Task ID that has never appeared in the log must cost zero row-data transfers, however large the log has grown');
+  assert.equal(
+    syncLogSheet.getValuesCallCount, 1,
+    'a Task ID that has never appeared in the log still costs exactly one bulk transfer under the poll-wide-projection architecture (never determinable without reading the sheet at least once) — but never more than one, unlike per-match reads'
+  );
 });
 
-test('Finding 2 (P1, ADP-051-B2/B3 fixup): a mature Task with hundreds of matched Sync Log observations still costs exactly ONE row-data transfer, never one per matched row — the exact cost shape Codex flagged as able to exhaust the Apps Script execution window before the event is ever opened (docs/review-fix-state-model.md §3 step 2)', () => {
+test('Finding D (P1, ADP-051-B2/B3 fixup round 3): a mature Task with hundreds of matched Sync Log observations still costs exactly ONE row-data transfer, never one per matched row (docs/review-fix-state-model.md §3 step 2)', () => {
   const { sandbox, spreadsheet } = harness();
   const ROW_COUNT = 500;
   for (let i = 0; i < ROW_COUNT; i++) {
@@ -635,53 +660,74 @@ test('Finding 2 (P1, ADP-051-B2/B3 fixup): a mature Task with hundreds of matche
   const rows = sandbox.readSyncLogRowsForTask_(TASK_ID);
 
   assert.equal(rows.length, ROW_COUNT, 'every matched row for this Task must still be returned');
-  assert.equal(syncLogSheet.getValuesCallCount, 1, 'a mature Task\'s ' + ROW_COUNT + ' matched rows must cost exactly one bulk row-data transfer, never one per matched row (Codex P1: hundreds/thousands of rows must not risk a platform hard timeout before the event is opened)');
+  assert.equal(syncLogSheet.getValuesCallCount, 1, 'a mature Task\'s ' + ROW_COUNT + ' matched rows must cost exactly one bulk row-data transfer, never one per matched row');
 });
 
-test('Finding A (P1, ADP-051-B2/B3 fixup round 2): matches near both the beginning and end of a large Sync Log, with an unrelated Task\'s rows between them, transfer only the matched rows\' own bounded runs — never the untouched middle a single min..max bulk range would have pulled in (docs/review-fix-state-model.md §3 step 2)', () => {
+test('Finding D (P1, ADP-051-B2/B3 fixup round 3, THE actual Codex reproduction): 500 rows alternating between this Task and an unrelated Task — every one of this Task\'s 250 matches its own isolated, non-contiguous run — still costs exactly ONE getValues() call for the whole task resolution, never one per matched row/run the way round 2\'s getRangeList fix did (docs/review-fix-state-model.md §3 step 2, performance)', () => {
   const { sandbox, spreadsheet } = harness();
-  const MIDDLE_COUNT = 400;
+  const ROW_COUNT = 500;
 
-  // Three CONTIGUOUS rows for this Task near the very beginning of the log.
-  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T00:00:00.000Z' });
-  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T00:05:00.000Z' });
-  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T00:10:00.000Z' });
-
-  // A long run of an UNRELATED Task's own observations between this Task's
-  // two clusters — this is the untouched middle the round-1 fix's single
-  // `getRange(minRow, 1, maxRow-minRow+1, 8)` bulk read still transferred,
-  // and this fix must not.
-  for (let i = 0; i < MIDDLE_COUNT; i++) {
-    logRow(sandbox, { taskId: 'unrelated-task', status: 'Review', receivedAt: '2026-08-01T01:00:00.000Z' });
+  // Sparse, adversarial interleaving: THIS Task and an UNRELATED Task
+  // alternate row-for-row, so under round 2's contiguous-run grouping every
+  // single matched row for THIS Task is its own isolated run (no two
+  // adjacent rows share this Task's ID) — exactly Codex's own reproduction
+  // ("500 alternating matched/unrelated rows -> 500 value-fetch calls").
+  for (let i = 0; i < ROW_COUNT; i++) {
+    const minute = String(Math.floor(i / 60)).padStart(2, '0');
+    const second = String(i % 60).padStart(2, '0');
+    const receivedAt = '2026-08-01T00:' + minute + ':' + second + '.000Z';
+    if (i % 2 === 0) {
+      logRow(sandbox, { status: i % 4 === 0 ? 'Review' : 'In Progress', receivedAt: receivedAt });
+    } else {
+      logRow(sandbox, { taskId: 'unrelated-task', status: 'Review', receivedAt: receivedAt });
+    }
   }
-
-  // Three more CONTIGUOUS rows for THIS Task near the very end of the log.
-  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T09:00:00.000Z' });
-  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T09:05:00.000Z' });
-  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T09:10:00.000Z' });
 
   const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
   syncLogSheet.getValuesCallCount = 0;
-  syncLogSheet.getValuesRowCount = 0;
 
   const rows = sandbox.readSyncLogRowsForTask_(TASK_ID);
+  assert.equal(rows.length, ROW_COUNT / 2, 'every one of this Task\'s alternating matches must still be returned');
+  assert.equal(
+    syncLogSheet.getValuesCallCount, 1,
+    'expected exactly ONE getValues() call for the whole task resolution regardless of 250 scattered, non-contiguous matches — round 2\'s getRangeList fix would have cost one call PER matched row/run here'
+  );
 
-  assert.equal(rows.length, 6, 'every matched row for this Task must still be returned, correctly, from both clusters');
-  assert.equal(rows[0].rawStatus, 'Review');
-  assert.equal(rows[0].receivedAt.toISOString(), '2026-08-01T00:00:00.000Z');
-  assert.equal(rows[5].rawStatus, 'In Progress');
-  assert.equal(rows[5].receivedAt.toISOString(), '2026-08-01T09:10:00.000Z');
+  // The same bound holds going through the full resolver chain, not only
+  // the raw row read — this is what actually runs during reconciliation.
+  syncLogSheet.getValuesCallCount = 0;
+  const candidate = sandbox.resolveSyncLogCandidate_(TASK_ID, []);
+  assert.ok(candidate);
+  assert.equal(syncLogSheet.getValuesCallCount, 1, 'resolveSyncLogCandidate_ itself must cost exactly one getValues() call against this sparse/alternating pattern');
+});
 
-  // This is the actual claim Codex is challenging: bound the ROWS
-  // transferred, not merely the correctness of the returned data. Two
-  // bounded runs of 3 rows each must cost exactly 2 getValues() calls
-  // (one per contiguous run) and exactly 6 transferred rows in total —
-  // never the MIDDLE_COUNT (400) unrelated rows sitting between them, which
-  // a single min..max bulk range spanning both clusters would have pulled
-  // in as collateral.
-  assert.equal(syncLogSheet.getValuesCallCount, 2, 'expected exactly one getValues() call per contiguous matched-row run (2 runs here), got ' + syncLogSheet.getValuesCallCount);
-  assert.equal(syncLogSheet.getValuesRowCount, 6, 'expected exactly the 6 matched rows\' own data to be transferred, got ' + syncLogSheet.getValuesRowCount + ' rows');
-  assert.ok(syncLogSheet.getValuesRowCount < MIDDLE_COUNT, 'the ' + MIDDLE_COUNT + ' unrelated rows between this Task\'s two clusters must never be transferred just to reach both ends');
+test('Finding D (ADP-051-B2/B3 fixup round 3): a poll-wide loader (makeSyncLogProjectionLoader_) memoizes the bulk read — a second, third, ... Task resolved against the SAME loader within one poll costs ZERO additional Sync Log transfers', () => {
+  const { sandbox, spreadsheet } = harness();
+  for (let i = 0; i < 500; i++) {
+    logRow(sandbox, {
+      taskId: i % 3 === 0 ? TASK_ID : (i % 3 === 1 ? 'task-b' : 'task-c'),
+      status: i % 2 === 0 ? 'Review' : 'In Progress',
+      receivedAt: '2026-08-01T00:' + String(Math.floor(i / 60)).padStart(2, '0') + ':' + String(i % 60).padStart(2, '0') + '.000Z',
+    });
+  }
+
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  syncLogSheet.getValuesCallCount = 0;
+  const loader = sandbox.makeSyncLogProjectionLoader_();
+
+  const first = sandbox.resolveSyncLogCandidate_(TASK_ID, [], loader);
+  const second = sandbox.resolveSyncLogCandidate_('task-b', [], loader);
+  const third = sandbox.resolveSyncLogCandidate_('task-c', [], loader);
+  const fourth = sandbox.resolveSyncLogCandidate_('task-never-seen', [], loader);
+
+  assert.ok(first);
+  assert.ok(second);
+  assert.ok(third);
+  assert.equal(fourth, null);
+  assert.equal(
+    syncLogSheet.getValuesCallCount, 1,
+    'four Tasks resolved against the SAME poll-wide loader must share exactly ONE underlying Sync Log transfer, not one each'
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -188,6 +188,19 @@ function pollTaskChanges() {
   return withPollLock_(function () {
     const props = PropertiesService.getScriptProperties();
     const runStartedAt = new Date();
+    // Finding D (ADP-051-B2/B3 fixup round 3): one memoized, lazy loader
+    // for the Sync Log sheet's entire data range, built ONCE here and
+    // threaded through every reconcileTaskPage_ call this run makes (both
+    // the stale-completion retry loop and the ordinary tasksToProcess loop
+    // below) — never a fresh loader per Task. The underlying
+    // `getValues()` call only actually happens the first time some Task
+    // this run needs Sync Log history at all (if any), and never more
+    // than once regardless of how many Tasks need it after that. See
+    // makeSyncLogProjectionLoader_/loadSyncLogProjection_'s own comments
+    // for why no per-task read strategy can bound this cost against a
+    // sparse/scattered match pattern, and why this loader is scoped to
+    // THIS run only (never persisted across separate trigger firings).
+    const syncLogProjectionLoader = makeSyncLogProjectionLoader_();
     const cursor = props.getProperty('LAST_SYNC_CURSOR');
     const isBootstrap = !cursor;
     const sinceMs = (cursor ? parseTimestamp_(cursor).getTime() : runStartedAt.getTime() - INITIAL_LOOKBACK_MS)
@@ -271,7 +284,7 @@ function pollTaskChanges() {
       } catch (e) {
         continue;
       }
-      if (page && page.id) retryOutcomeById[id] = reconcileTaskPage_(page);
+      if (page && page.id) retryOutcomeById[id] = reconcileTaskPage_(page, { syncLogProjectionLoader: syncLogProjectionLoader });
     }
 
     // A capped run (MAX_TASKS_PER_RUN or MAX_RUN_DURATION_MS) can stop
@@ -321,7 +334,7 @@ function pollTaskChanges() {
       (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
     ) {
       const task = tasksToProcess[iterated];
-      const outcome = reconcileTaskPage_(task);
+      const outcome = reconcileTaskPage_(task, { syncLogProjectionLoader: syncLogProjectionLoader });
       outcomes.push(outcome);
       lastScannedEdit = String(task.last_edited_time || '');
       iterated++;
@@ -676,6 +689,17 @@ function reconcileTaskPage_(task, options) {
   // an extra, harmless re-check, never a different outcome for unchanged
   // data.
   const bypassDedup = Boolean(options && options.bypassDedup);
+  // Finding D (ADP-051-B2/B3 fixup round 3): the poll-wide, memoized, lazy
+  // Sync Log loader (see `makeSyncLogProjectionLoader_`) a top-level entry
+  // point reconciling more than one Task (pollTaskChanges) builds ONCE for
+  // this whole run and threads through every Task it reconciles — never a
+  // fresh loader, and never a fresh spreadsheet read, per Task.
+  // `undefined` when a caller has none to share (a single-Task entry point
+  // like reconcileTaskById, or a Task that never reaches the resolver at
+  // all) — reconcileAuthoritativeTimeEvents_'s own resolver call falls
+  // back to a one-off, unmemoized load in that case, never to the old
+  // per-match-row cost.
+  const syncLogProjectionLoader = options && options.syncLogProjectionLoader;
 
   const pageId = task.id;
   const currentStatus = propertyText_(task.properties.Status);
@@ -756,7 +780,8 @@ function reconcileTaskPage_(task, options) {
         desiredActor,
         changedBy,
         snapshotId,
-        when
+        when,
+        syncLogProjectionLoader
       );
 
   syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
@@ -1724,7 +1749,7 @@ function isFreeOutcome_(outcome) {
   });
 }
 
-function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
+function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when, syncLogProjectionLoader) {
   const taskId = task.id;
   const taskTitle = propertyText_(task.properties.Title) || taskId;
   const taskType = propertyText_(task.properties.Type);
@@ -2096,7 +2121,27 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // or delay opening the Time Event itself: an unresolved/failed
       // classification simply leaves the event unclassified, exactly as if
       // this call were never made.
-      const workType = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorClosedThisCall);
+      //
+      // Finding E (ADP-051-B2/B3 fixup round 3): when this same call closed
+      // an `ambiguous_provenance_restart` (in either the otherActor loop
+      // above, or the same-actor ambiguousOpenEvent branch), `allEvents`
+      // still shows that event with no `Ended At` — it was fetched before
+      // this call's own PATCH — so resolveWorkType_'s Sync Log cutoff scan
+      // (syncLogScanCutoff_) cannot recognize it as a cutoff from
+      // `allEvents` alone, and could otherwise reach past it to reuse a
+      // stale pre-restart `Review` Sync Log row. `restartCutoffOverride`
+      // hands the resolver this call's own restart boundary directly —
+      // `when` (this reconciliation's observed transition instant) paired
+      // with a fresh `Write=`-style `Date.now()` millisecond value, so it
+      // always outranks any pre-existing Sync Log data at the same Notion
+      // minute — as an unconditional hard cutoff, regardless of what the
+      // stale snapshot shows. `null` when no same-call restart happened,
+      // so ordinary (non-restart) classification is completely unaffected.
+      const sameCallRestartHappened = otherActorClosedThisCall.some(function (entry) {
+        return entry.closeReason === 'ambiguous_provenance_restart';
+      });
+      const restartCutoffOverride = sameCallRestartHappened ? { timestamp: when, write: Date.now() } : null;
+      const workType = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorClosedThisCall, syncLogProjectionLoader, restartCutoffOverride);
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, workType);
       actions.push('opened:' + created.id);
     }
@@ -3667,75 +3712,61 @@ function mostRecentBoundaryCandidate_(allEvents) {
   return best;
 }
 
-// Reads every Sync Log row ever logged for `taskId`, in the log's own
-// append-only (ascending) order, including the 8th `Write` column
-// ADP-051-B added. `Range#createTextFinder(...).findAll()` runs the search
-// on Sheets' own servers (the same mechanism storyConversionHappenedWhile
-// InProgress_/hasProcessedSnapshot_ already use), so a Task ID that has
-// never appeared in the log costs one inexpensive round trip regardless of
-// how large the log has grown, rather than materializing the whole sheet.
+// Finding D (ADP-051-B2/B3 fixup round 3, corrects round 2's `getRangeList`
+// fix — this is the THIRD review round on this exact performance issue):
+// round 1's bulk `getRange(minRow..maxRow)` read transferred every
+// UNRELATED row between a Task's first and last match. Round 2's fix
+// (`getRangeList` grouped by contiguous row runs) stopped transferring
+// unrelated rows, but `Range#getValues()` is one HTTP round-trip PER Range
+// object, even when the Ranges came from one `getRangeList()` call —
+// `getRangeList` only batches range *construction* (a client-side
+// convenience), never value *retrieval*. When a mature Task's matched rows
+// are sparse/scattered — interleaved with other Tasks' rows across many
+// separate polls, so every match is its own isolated, non-contiguous run —
+// round 2's fix still costs one `getValues()` service call PER MATCHED
+// ROW, restoring the exact Apps Script timeout risk round 1 already fixed
+// once (Codex's reproduction: 500 alternating matched/unrelated rows ->
+// 500 value-fetch calls). No per-task read strategy (one bulk range, or
+// grouped contiguous runs) can bound service-call count against an
+// adversarially sparse match pattern, because in the worst case every
+// match is isolated with no way to know that ahead of cheaply reading it.
 //
-// Finding A (ADP-051-B2/B3 fixup round 2, corrects Finding 2's round-1
-// fix): a single `getRange(minRow, 1, maxRow-minRow+1, 8).getValues()`
-// bulk read still transfers every row BETWEEN this Task's matched rows,
-// not only the matched rows themselves — for a long-lived Task with
-// matches near both the beginning and end of a large append-only log
-// (other Tasks' observations between them), that "span" is nearly the
-// whole sheet, reintroducing the same full-log scaling problem the round-1
-// fix was meant to retire. The correct fix groups matched row numbers into
-// CONTIGUOUS RUNS (matched rows for one Task are overwhelmingly contiguous
-// or near-contiguous in practice, since this codebase never interleaves
-// unrelated Tasks' rows within one poll's own writes — but distant runs do
-// happen across separate polls, which is exactly this finding's scenario)
-// and fetches each run with its own bounded `getRangeList` range, never
-// one range spanning distant runs. This keeps the service-call count low
-// (one call per contiguous run, not one per matched row) WITHOUT ever
-// transferring the unrelated rows in between.
-function readSyncLogRowsForTask_(taskId) {
-  if (!taskId) return [];
+// The actual fix does not read per-task at all: `loadSyncLogProjection_`
+// reads the Sync Log sheet's ENTIRE data range in ONE bulk call, and every
+// Task's rows are filtered out of that single in-memory array. This makes
+// Sync Log cost exactly ONE spreadsheet read TOTAL per poll invocation,
+// regardless of how many Tasks are reconciled or how sparse/scattered
+// their matches are — the only shape that actually bounds the cost Codex
+// keeps (correctly) flagging.
+//
+// `makeSyncLogProjectionLoader_` wraps that one-shot read in a memoized,
+// LAZY zero-arg loader: the actual `getValues()` call only ever happens on
+// the loader's first invocation (if any), and every later call within the
+// same poll reuses the same in-memory result — never a second read, and
+// never a read at all for a poll where nothing ends up needing Sync Log
+// history (e.g. every reconciled Task's own history is served entirely by
+// a genuine Time-Event-side boundary, or no Task opens a new execution
+// this run at all). A top-level entry point that reconciles more than one
+// Task (pollTaskChanges) builds ONE loader at the start of that call and
+// threads it down through reconcileTaskPage_ ->
+// reconcileAuthoritativeTimeEvents_ -> resolveNewTimeEventWorkTypeSafely_
+// -> resolveWorkType_ -> resolveSyncLogCandidate_ -> here, as an explicit
+// parameter — never a persistent cross-poll cache (Apps Script script
+// instances are not guaranteed to persist state between trigger firings,
+// and a genuinely stale cross-poll cache would be its own correctness
+// bug: this loader's memoized result is scoped to, and discarded with,
+// the single poll invocation that created it). A caller reconciling only
+// one Task (reconcileTaskById, an isolated test) may omit the loader
+// entirely; `readSyncLogRowsForTask_` then falls back to a one-off,
+// unmemoized load for that single call — still exactly one bulk read,
+// never the old per-match-row cost this fix retires.
+function loadSyncLogProjection_() {
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
-  const matches = sheet.getRange(2, 3, lastRow - 1, 1)
-    .createTextFinder(String(taskId))
-    .matchEntireCell(true)
-    .findAll();
-  if (!matches.length) return [];
-  const matchedRows = matches.map(function (match) { return match.getRow(); });
-
-  // Group into contiguous runs: consecutive matched row numbers with no
-  // gap become one run (e.g. rows 5,6,7 -> one run 5..7); a matched row
-  // that isn't adjacent to the previous run starts a new one (e.g. row 200
-  // alone -> its own run).
-  const runs = [];
-  matchedRows.forEach(function (row) {
-    const currentRun = runs[runs.length - 1];
-    if (currentRun && row === currentRun.endRow + 1) {
-      currentRun.endRow = row;
-    } else {
-      runs.push({ startRow: row, endRow: row });
-    }
-  });
-
-  const ranges = runs.map(function (run) {
-    return 'A' + run.startRow + ':H' + run.endRow;
-  });
-  const rangeBlocks = sheet.getRangeList(ranges).getRanges().map(function (range) {
-    return range.getValues();
-  });
-
-  const rowsByNumber = {};
-  runs.forEach(function (run, index) {
-    const block = rangeBlocks[index];
-    for (let row = run.startRow; row <= run.endRow; row++) {
-      rowsByNumber[row] = block[row - run.startRow];
-    }
-  });
-
-  return matchedRows.map(function (row) {
-    const values = rowsByNumber[row];
+  return sheet.getRange(2, 1, lastRow - 1, 8).getValues().map(function (values, index) {
     return {
-      row: row,
+      row: index + 2,
       snapshotId: String(values[0] || ''),
       source: String(values[1] || ''),
       taskId: String(values[2] || ''),
@@ -3746,6 +3777,33 @@ function readSyncLogRowsForTask_(taskId) {
       write: (values[7] === '' || values[7] === undefined || values[7] === null) ? '' : String(values[7]),
     };
   });
+}
+
+function makeSyncLogProjectionLoader_() {
+  let loaded = false;
+  let cached = null;
+  return function () {
+    if (!loaded) {
+      cached = loadSyncLogProjection_();
+      loaded = true;
+    }
+    return cached;
+  };
+}
+
+// Every Sync Log row ever logged for `taskId`, in the log's own append-only
+// (ascending) order, filtered out of the array `syncLogProjectionLoader`
+// (see `makeSyncLogProjectionLoader_` above) returns — a poll-wide,
+// memoized, lazily-loaded projection shared across every Task this same
+// poll reconciles, rather than a fresh spreadsheet read per Task. When
+// `syncLogProjectionLoader` is not supplied (a caller reconciling only this
+// one Task, or a test exercising this resolver in isolation), a one-off,
+// unmemoized projection is loaded for this call alone.
+function readSyncLogRowsForTask_(taskId, syncLogProjectionLoader) {
+  if (!taskId) return [];
+  const rows = syncLogProjectionLoader ? syncLogProjectionLoader() : loadSyncLogProjection_();
+  const wanted = String(taskId);
+  return rows.filter(function (row) { return row.taskId === wanted; });
 }
 
 // docs/review-fix-state-model.md §3 step 2 (failure #46): a
@@ -3777,13 +3835,31 @@ function effectiveSyncLogStatus_(row) {
 }
 
 // docs/review-fix-state-model.md §3 step 2's hard history cutoff: the most
-// recent of (a) a Type=Story Sync Log observation for this Task, or (b) a
-// Time-Event-side `ambiguous_provenance_restart` close — whichever is more
-// recent. The same-status-run scan in resolveSyncLogCandidate_ below must
-// never cross this cutoff under any circumstances, even when the filtered
+// recent of (a) a Type=Story Sync Log observation for this Task, (b) a
+// Time-Event-side `ambiguous_provenance_restart` close already visible in
+// `allEvents`, or (c) `restartCutoffOverride` — whichever is more recent.
+// The same-status-run scan in resolveSyncLogCandidate_ below must never
+// cross this cutoff under any circumstances, even when the filtered
 // candidate set on the near side of it is empty (failures #27/#45/#48/#51).
-// Returns null when this Task's history carries neither kind of cutoff.
-function syncLogScanCutoff_(rows, allEvents) {
+// Returns null when this Task's history carries none of the three.
+//
+// Finding E (ADP-051-B2/B3 fixup round 3): `allEvents` is fetched once, at
+// the very top of reconcileAuthoritativeTimeEvents_'s call, BEFORE that
+// same call's own PATCHes — closeNotionTimeEvent_ only ever mutates
+// Notion, never the in-memory `eventPage` object it was given (the same
+// staleness resolveChurnInheritedWorkType_'s `closeReason` override
+// already exists to work around). When this poll closes an ambiguous-
+// provenance event and immediately opens its replacement, `allEvents`
+// still shows that just-closed event with no `Ended At` at all, so this
+// function's own (b) scan can never recognize it as a cutoff — the
+// boundary genuinely happened THIS call, but nothing in `allEvents`
+// reflects it yet. `restartCutoffOverride` is how the call site
+// (reconcileAuthoritativeTimeEvents_) tells this resolver "a same-call
+// restart just happened, treat it as cutoff regardless of what the stale
+// snapshot shows" — an explicit instant, never re-derived from re-reading
+// `allEvents`, exactly the same pattern round 1's `closeReason` override
+// already uses for the identical staleness problem in churn inheritance.
+function syncLogScanCutoff_(rows, allEvents, restartCutoffOverride) {
   let cutoff = null;
   rows.forEach(function (row) {
     if (row.type !== 'Story') return;
@@ -3798,6 +3874,9 @@ function syncLogScanCutoff_(rows, allEvents) {
     const instant = { timestamp: endedAt, write: meta.write };
     if (!cutoff || compareInstants_(instant, cutoff) > 0) cutoff = instant;
   });
+  if (restartCutoffOverride && (!cutoff || compareInstants_(restartCutoffOverride, cutoff) > 0)) {
+    cutoff = restartCutoffOverride;
+  }
   return cutoff;
 }
 
@@ -3820,10 +3899,10 @@ function syncLogScanCutoff_(rows, allEvents) {
 // runs, e.g. `Review → Backlog → ... → In Progress` or
 // `Review → In Progress → Review → In Progress`, must never be coalesced
 // into one).
-function resolveSyncLogCandidate_(taskId, allEvents) {
-  const allRows = readSyncLogRowsForTask_(taskId);
+function resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride) {
+  const allRows = readSyncLogRowsForTask_(taskId, syncLogProjectionLoader);
   if (!allRows.length) return null;
-  const cutoff = syncLogScanCutoff_(allRows, allEvents);
+  const cutoff = syncLogScanCutoff_(allRows, allEvents, restartCutoffOverride);
   // Finding 3 (ADP-051-B3 fixup): a row that TIES with the cutoff at
   // Notion-minute granularity, with `Write=` missing on one or both sides
   // to break it, has a genuinely UNKNOWABLE order relative to that cutoff
@@ -3959,9 +4038,9 @@ function hasInterveningDifferentStatusRow_(eligibleRows, excludeStatus, fromInst
 // legacy tie with no `Write=` on either side is therefore surfaced as
 // `unresolved` here rather than guessed — the conservative direction
 // consistent with failure #28's own principle.
-function resolveWorkType_(taskId, allEvents) {
+function resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride) {
   const boundary = mostRecentBoundaryCandidate_(allEvents);
-  const rawSyncLog = resolveSyncLogCandidate_(taskId, allEvents);
+  const rawSyncLog = resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride);
   // Finding 3 (ADP-051-B3 fixup): `{ ambiguousCutoffTie: true }` is not a
   // usable candidate (no status/timestamp) — unwrap it to `null` for every
   // ordinary use below, but remember that it happened so "no candidate at
@@ -4190,7 +4269,22 @@ function mostRecentlyClosedEvent_(allEvents) {
 // an ambiguous-provenance restart or execution boundary — does this fall
 // through to resolveWorkType_'s ordinary §3 classification of a genuinely
 // new execution.
-function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents) {
+//
+// `syncLogProjectionLoader` (Finding D, ADP-051-B2/B3 fixup round 3): the
+// poll-wide, memoized, lazy Sync Log loader (see
+// `makeSyncLogProjectionLoader_`) threaded straight through to
+// resolveWorkType_ — never re-derived here.
+//
+// `restartCutoffOverride` (Finding E, same round): when the call site just
+// closed a same-call `ambiguous_provenance_restart` (checked via
+// `closedThisCall`'s own `closeReason`, not by re-reading `allEvents`,
+// which is stale until the close PATCH is re-fetched), that restart is a
+// hard cutoff resolveWorkType_'s Sync Log scan must respect even though
+// the stale `allEvents` snapshot can't prove it happened. The caller
+// computes and passes this instant explicitly (see
+// reconcileAuthoritativeTimeEvents_'s call site) — this function only ever
+// forwards it, exactly like `closedThisCall`'s own `closeReason` override.
+function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents, syncLogProjectionLoader, restartCutoffOverride) {
   try {
     const closedThisCall = otherActorEvents || [];
     for (let i = 0; i < closedThisCall.length; i++) {
@@ -4208,7 +4302,7 @@ function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents)
         if (churn.inherits) return churn.workType || '';
       }
     }
-    const resolution = resolveWorkType_(taskId, allEvents);
+    const resolution = resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride);
     if (resolution.unresolved || !resolution.classification) return '';
     return resolution.classification;
   } catch (err) {

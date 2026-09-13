@@ -335,3 +335,57 @@ test('Finding 1 adversarial follow-up (ADP-051-B2/B3 fixup): a same-poll ambiguo
   );
   assert.equal(created.properties['Work Type'].select.name, 'Initial Work', 'with no genuine boundary and no Sync Log history on the near side of the restart, this is a fresh, unclassified-history execution');
 });
+
+test('Finding E (P1, ADP-051-B2/B3 fixup round 3): a same-poll ambiguous_provenance_restart close-then-reopen must not let classification reach past it to an older, pre-restart Review Sync Log row, even though allEvents still shows the just-closed event with no Ended At (docs/review-fix-state-model.md §3 step 2, §6, failure #51 principle applied to the SAME-CALL case)', () => {
+  const { sandbox, fetchLog, spreadsheet } = harness({
+    tasks: [taskPage('task-finding-e', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // maps to 'Claude' — the SAME actor as the ambiguous open event below
+      lastEdited: '2026-08-30T10:00:00.000Z',
+    })],
+    events: [
+      // The current, still-open, ambiguous-provenance event for the SAME
+      // actor as this poll's own Assigned Agent — triggers the
+      // ambiguousOpenEvent self-restart path THIS SAME call.
+      eventPage('evt-ambiguous-open-e', {
+        actor: 'Claude',
+        startedAt: '2026-08-01T00:00:00.000Z',
+        endedAt: null,
+        note: 'Task Origin=ambiguous-pre-upgrade',
+      }),
+    ],
+  });
+
+  // An older Sync Log row reporting Review, well BEFORE this poll's own
+  // restart — Codex's exact reproduction: "a stale open ambiguous event
+  // plus an older Review row returns Review Fix" without this fix, because
+  // allEvents (fetched before this call's own PATCH) still shows
+  // evt-ambiguous-open-e with no Ended At, so syncLogScanCutoff_ cannot
+  // recognize THIS call's own restart as a cutoff from allEvents alone.
+  sandbox.logSnapshot_(
+    'snap-finding-e', 'notion_poll', 'task-finding-e', 'Review',
+    new Date('2026-08-15T00:00:00.000Z'), 'no_change:Review'
+  );
+
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  syncLogSheet.getValuesCallCount = 0; // reset the setup-time appendRow call above
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /closed_ambiguous_provenance_restart:evt-ambiguous-open-e/);
+  assert.match(summary.outcomes[0], /opened:/);
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.notEqual(
+    created.properties['Work Type'] && created.properties['Work Type'].select.name,
+    'Review Fix',
+    'must never reach past this SAME-CALL restart to reuse the older, pre-restart Review Sync Log row — the restart is a hard cutoff even before allEvents itself reflects the close'
+  );
+  assert.equal(
+    created.properties['Work Type'].select.name, 'Initial Work',
+    'with the pre-restart Review row correctly cut off and no genuine boundary on the near side, this is a fresh, unclassified-history execution — exactly like the no-Sync-Log-at-all restart case'
+  );
+});
