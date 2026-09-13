@@ -2151,10 +2151,11 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const executionIdIsVerified = otherActor.length > 0 || Boolean(trustedTaskStart);
       // ADP-051-B3: classify this newly-opened event's Work Type
       // (Initial Work / Review Fix), non-blocking. resolveNewTimeEvent
-      // WorkTypeSafely_ never throws and never returns anything but a
-      // definite classification string or '' (unclassified) — a reassignment
-      // continuation (otherActorClosedThisCall.length) inherits from
-      // whichever outgoing event it genuinely continues
+      // WorkTypeSafely_ never throws and always returns a
+      // `{ workType, inheritedExecutionId }` object (Finding J, round 6 —
+      // see its own header comment for the full return contract) — a
+      // reassignment continuation (otherActorClosedThisCall.length)
+      // inherits from whichever outgoing event it genuinely continues
       // (docs/review-fix-state-model.md §6), reaching across polls when
       // nothing was closed THIS call (Finding 1: assignee cleared in one
       // poll, reassigned only in a later one — otherActorClosedThisCall is
@@ -2196,8 +2197,31 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // (the cross-poll reassignment-gap case) is passed through as `''`
       // instead, so the gate is skipped rather than wrongly rejecting a
       // legitimate continuation it cannot actually disprove.
-      const workType = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorClosedThisCall, syncLogProjectionLoader, restartCutoffOverride, executionIdIsVerified ? executionId : '');
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, workType);
+      const workTypeResolution = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorClosedThisCall, syncLogProjectionLoader, restartCutoffOverride, executionIdIsVerified ? executionId : '');
+      // Finding J (ADP-051-B2/B3 fixup round 6): Finding H (round 5) fixed
+      // the CLASSIFICATION for a legitimate cross-poll continuation (an
+      // empty otherActor + stale/untrusted Task Started At, so `executionId`
+      // above is the manufactured `startAt`/`when` fallback, not verified
+      // identity) by no longer letting the mismatch reject inheritance — but
+      // it never corrected the mismatch itself. The event about to be
+      // created below would still be stamped with `Execution=<manufactured
+      // value>` even though its own Work Type was just inherited from an
+      // outgoing event with a DIFFERENT, real `Execution=` — an internally
+      // inconsistent identity for what §6 (L562-565) defines as the SAME
+      // execution, which `enforceDoneGate_` treats as authoritative
+      // elsewhere. Whenever inheritance genuinely happened AND the winning
+      // candidate actually had a real `Execution=` to give (never for a
+      // legacy no-Execution= candidate — `inheritedExecutionId` is `''`
+      // there, by design; see resolveNewTimeEventWorkTypeSafely_'s own
+      // comment for why that must keep going through the existing
+      // no-backfill fallback), adopt THAT identity for the event being
+      // created here instead of the independently-computed `executionId`.
+      // No inheritance (a genuinely new execution, a restart cutoff, or an
+      // unresolved case) leaves `inheritedExecutionId` empty, so
+      // `executionId`'s own freshly-computed value is used unchanged.
+      const workType = workTypeResolution.workType;
+      const finalExecutionId = workTypeResolution.inheritedExecutionId || executionId;
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, finalExecutionId, taskType, workType);
       actions.push('opened:' + created.id);
     }
   } else if (openEvents.length) {
@@ -3815,13 +3839,53 @@ function mostRecentBoundaryCandidate_(allEvents) {
 // entirely; `readSyncLogRowsForTask_` then falls back to a one-off,
 // unmemoized load for that single call — still exactly one bulk read,
 // never the old per-match-row cost this fix retires.
+//
+// Finding I (ADP-051-B2/B3 fixup round 6, SIXTH review round on this exact
+// performance area): round 3's fix above bounds SERVICE-CALL COUNT to
+// exactly one per poll, but a single `getRange(2, 1, lastRow-1, 8)` over an
+// ever-growing, append-only sheet still transfers/holds an UNBOUNDED amount
+// of data — call count and data size are different things, and bounding one
+// says nothing about the other. `SYNC_LOG_PROJECTION_WINDOW_ROWS` fixes the
+// latter: only the most recent N rows are ever read, so both transfer size
+// and in-memory footprint are a constant, independent of how large the log
+// has grown. 5000 mirrors `QUERY_PAGE_SAFETY_LIMIT` (50 pages x 100/page,
+// ~line 3092) — this codebase's own existing convention for "how much of an
+// append-only/paginated source is reasonable to hold in memory at once,"
+// including that same function's `truncated: true` shape this constant's
+// own `truncated` flag below deliberately mirrors, rather than inventing an
+// unrelated bound. Kept as its own constant (not a reference to
+// QUERY_PAGE_SAFETY_LIMIT) so a future change to Notion-query pagination
+// cannot silently move this unrelated Sheet-read bound too.
+//
+// This is a documented, deliberate tradeoff, not a "read slightly less"
+// patch: a Task whose relevant history sits entirely outside this window is
+// NOT silently treated as "no history" (which `resolveWorkType_` reads as a
+// confident `Initial Work`) — `truncated` below tells
+// `resolveSyncLogCandidate_` that older, unread history may exist, so it
+// can route that case to the same `unresolved` outcome §3 step 4 already
+// uses for every other genuinely-unknowable case (failure #28's
+// principle), rather than inventing a new kind of silent default.
+const SYNC_LOG_PROJECTION_WINDOW_ROWS = 5000;
+
 function loadSyncLogProjection_() {
   const sheet = ensureSyncLogSheet_();
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return [];
-  return sheet.getRange(2, 1, lastRow - 1, 8).getValues().map(function (values, index) {
+  if (lastRow < 2) {
+    const empty = [];
+    empty.truncated = false;
+    return empty;
+  }
+  // Bounded tail window: read at most SYNC_LOG_PROJECTION_WINDOW_ROWS rows,
+  // ending at the sheet's current last row — never the full `2..lastRow`
+  // range a mature log would otherwise force. `truncated` is true whenever
+  // this window's start had to move past row 2, i.e. older history exists
+  // that this read did not load (see the header comment above for why
+  // callers must not treat that the same as "no history at all").
+  const startRow = Math.max(2, lastRow - SYNC_LOG_PROJECTION_WINDOW_ROWS + 1);
+  const rowCount = lastRow - startRow + 1;
+  const rows = sheet.getRange(startRow, 1, rowCount, 8).getValues().map(function (values, index) {
     return {
-      row: index + 2,
+      row: startRow + index,
       snapshotId: String(values[0] || ''),
       source: String(values[1] || ''),
       taskId: String(values[2] || ''),
@@ -3832,6 +3896,8 @@ function loadSyncLogProjection_() {
       write: (values[7] === '' || values[7] === undefined || values[7] === null) ? '' : String(values[7]),
     };
   });
+  rows.truncated = startRow > 2;
+  return rows;
 }
 
 function makeSyncLogProjectionLoader_() {
@@ -3854,11 +3920,25 @@ function makeSyncLogProjectionLoader_() {
 // `syncLogProjectionLoader` is not supplied (a caller reconciling only this
 // one Task, or a test exercising this resolver in isolation), a one-off,
 // unmemoized projection is loaded for this call alone.
+//
+// Finding I (ADP-051-B2/B3 fixup round 6): the returned array's own
+// `.truncated` property (mirroring `loadSyncLogProjection_`'s, see there)
+// is always propagated, even after `.filter()` — a filtered array is a new
+// array and would otherwise silently lose it. `resolveSyncLogCandidate_`
+// reads this to tell "this Task genuinely has no such history" apart from
+// "this Task has none WITHIN the bounded window; older history may exist
+// but was not read."
 function readSyncLogRowsForTask_(taskId, syncLogProjectionLoader) {
-  if (!taskId) return [];
+  if (!taskId) {
+    const empty = [];
+    empty.truncated = false;
+    return empty;
+  }
   const rows = syncLogProjectionLoader ? syncLogProjectionLoader() : loadSyncLogProjection_();
   const wanted = String(taskId);
-  return rows.filter(function (row) { return row.taskId === wanted; });
+  const filtered = rows.filter(function (row) { return row.taskId === wanted; });
+  filtered.truncated = Boolean(rows.truncated);
+  return filtered;
 }
 
 // docs/review-fix-state-model.md §3 step 2 (failure #46): a
@@ -3956,7 +4036,25 @@ function syncLogScanCutoff_(rows, allEvents, restartCutoffOverride) {
 // into one).
 function resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride) {
   const allRows = readSyncLogRowsForTask_(taskId, syncLogProjectionLoader);
-  if (!allRows.length) return null;
+  // Finding I (ADP-051-B2/B3 fixup round 6): `loadSyncLogProjection_`'s
+  // read is now a bounded tail window (SYNC_LOG_PROJECTION_WINDOW_ROWS),
+  // not the whole sheet — `allRows.truncated` (propagated through
+  // readSyncLogRowsForTask_) is true whenever older, unread history exists
+  // beyond that window. Every "no usable candidate" exit below must
+  // consult it the same way the existing `cutoffTieExists` tracking
+  // already does for the Type=Story/restart cutoff: "nothing eligible
+  // found" is only "no history at all" (safe to fall through to a
+  // confident `Initial Work` in resolveWorkType_'s §3 step 4) when the
+  // window was NOT truncated. When it was, the true answer is unknown,
+  // not absent — surfaced as `unresolved`, never guessed (failure #28's
+  // principle, extended to this new bounded-read tradeoff).
+  const windowTruncated = Boolean(allRows.truncated);
+  function noCandidate(cutoffTieExists) {
+    if (cutoffTieExists) return { ambiguousCutoffTie: true };
+    if (windowTruncated) return { windowTruncatedAmbiguous: true };
+    return null;
+  }
+  if (!allRows.length) return noCandidate(false);
   const cutoff = syncLogScanCutoff_(allRows, allEvents, restartCutoffOverride);
   // Finding 3 (ADP-051-B3 fixup): a row that TIES with the cutoff at
   // Notion-minute granularity, with `Write=` missing on one or both sides
@@ -3984,12 +4082,13 @@ function resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, re
     return order > 0;
   });
   if (!eligible.length) {
-    // `ambiguousCutoffTie` is a distinct, deliberately non-null sentinel —
-    // ordinary "no candidate" is `null`, this is "unresolvable, not
-    // absent". Callers that only check truthiness of the return value
-    // must not treat this as an ordinary usable candidate (it carries no
-    // `status`/`timestamp`); resolveWorkType_ unwraps it explicitly.
-    return cutoffTieExists ? { ambiguousCutoffTie: true } : null;
+    // `ambiguousCutoffTie`/`windowTruncatedAmbiguous` are distinct,
+    // deliberately non-null sentinels — ordinary "no candidate" is `null`,
+    // these are "unresolvable, not absent". Callers that only check
+    // truthiness of the return value must not treat either as an ordinary
+    // usable candidate (neither carries a `status`/`timestamp`);
+    // resolveWorkType_ unwraps both explicitly.
+    return noCandidate(cutoffTieExists);
   }
 
   let i = eligible.length - 1;
@@ -3999,17 +4098,17 @@ function resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, re
     // out to be `In Progress` and got skipped above, so there is no
     // non-`In Progress` status left to return from THIS candidate list —
     // but that is not the same thing as "no history at all" when
-    // `cutoffTieExists` is also true. A row tied with the cutoff was
-    // excluded from `eligible` for having a genuinely unknowable order
-    // relative to it (see above) — it could just as easily be a `Review`
-    // row that landed AFTER the cutoff as one that predates it, and this
-    // all-`In Progress` fall-through must not silently discard that
-    // possibility by returning plain `null`, which resolveWorkType_ reads
-    // as "no candidate, confidently Initial Work" (§3 step 4). Propagate
-    // the same ambiguous-cutoff-tie sentinel used above, not a second,
-    // disconnected ambiguity flag, so resolveWorkType_ still surfaces
-    // `unresolved` here too.
-    return cutoffTieExists ? { ambiguousCutoffTie: true } : null;
+    // `cutoffTieExists` (or, per Finding I, `windowTruncated`) is also
+    // true. A row tied with the cutoff was excluded from `eligible` for
+    // having a genuinely unknowable order relative to it (see above) — it
+    // could just as easily be a `Review` row that landed AFTER the cutoff
+    // as one that predates it, and this all-`In Progress` fall-through
+    // must not silently discard that possibility by returning plain
+    // `null`, which resolveWorkType_ reads as "no candidate, confidently
+    // Initial Work" (§3 step 4). Propagate the same ambiguous sentinels
+    // used above, not a second, disconnected ambiguity flag, so
+    // resolveWorkType_ still surfaces `unresolved` here too.
+    return noCandidate(cutoffTieExists);
   }
 
   const status = effectiveSyncLogStatus_(eligible[i]);
@@ -4100,8 +4199,13 @@ function resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCut
   // usable candidate (no status/timestamp) — unwrap it to `null` for every
   // ordinary use below, but remember that it happened so "no candidate at
   // all" can be told apart from "unresolvable ordering at the cutoff".
+  // Finding I (ADP-051-B2/B3 fixup round 6): `{ windowTruncatedAmbiguous:
+  // true }` is the same shape of non-usable sentinel, for the bounded
+  // Sync Log read window instead of the Type=Story/restart cutoff — see
+  // resolveSyncLogCandidate_'s own comments.
   const syncLogCutoffAmbiguous = Boolean(rawSyncLog && rawSyncLog.ambiguousCutoffTie);
-  const syncLog = syncLogCutoffAmbiguous ? null : rawSyncLog;
+  const syncLogWindowTruncatedAmbiguous = Boolean(rawSyncLog && rawSyncLog.windowTruncatedAmbiguous);
+  const syncLog = (syncLogCutoffAmbiguous || syncLogWindowTruncatedAmbiguous) ? null : rawSyncLog;
 
   function unresolved(reasonCode) {
     return { classification: null, unresolved: true, reasonCode: reasonCode, evidence: { boundary: boundary, syncLog: syncLog } };
@@ -4124,6 +4228,9 @@ function resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCut
     if (syncLogCutoffAmbiguous) {
       return unresolved('synclog_candidate_cutoff_tie_ambiguous');
     }
+    if (syncLogWindowTruncatedAmbiguous) {
+      return unresolved('synclog_candidate_window_truncated_ambiguous');
+    }
     return resolved(null, 'no_candidate');
   }
 
@@ -4137,7 +4244,9 @@ function resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCut
     if (!syncLog) {
       return unresolved(syncLogCutoffAmbiguous
         ? 'retroactive_boundary_synclog_cutoff_tie_ambiguous'
-        : 'retroactive_boundary_no_synclog_candidate');
+        : (syncLogWindowTruncatedAmbiguous
+          ? 'retroactive_boundary_synclog_window_truncated_ambiguous'
+          : 'retroactive_boundary_no_synclog_candidate'));
     }
     const order = compareWriteOnly_(syncLog.write, boundary.write);
     if (order === null) {
@@ -4361,9 +4470,31 @@ function churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId) {
 // ADP-051-B3: decides, and safely resolves, the Work Type to stamp on a
 // Time Event `reconcileAuthoritativeTimeEvents_` is ABOUT TO CREATE —
 // never blocking or delaying that creation itself (see the call site's own
-// comment). Returns `''` (no classification written, event stays
-// unclassified) on any resolver throw, an explicit `unresolved` outcome,
-// or when there is genuinely nothing to classify yet.
+// comment).
+//
+// Returns `{ workType, inheritedExecutionId }`:
+//   - `workType` is `''` (no classification written, event stays
+//     unclassified) on any resolver throw, an explicit `unresolved`
+//     outcome, or when there is genuinely nothing to classify yet;
+//     otherwise `'Initial Work'` or `'Review Fix'`.
+//   - `inheritedExecutionId` (Finding J, ADP-051-B2/B3 fixup round 6) is
+//     the winning churn candidate's OWN real `Execution=` value whenever
+//     steps 2 or 3 below actually inherited from one — `''` whenever no
+//     inheritance happened (step 4, a genuinely new execution) AND
+//     whenever the winning candidate itself had no `Execution=` to give
+//     (the §6 legacy no-Execution= case, which stays on the existing
+//     no-backfill fallback — see `outgoingExecutionId`'s own comment at
+//     the call site for why manufacturing an identity there is worse than
+//     none). This exists because Finding H (round 5) made inheritance
+//     itself work correctly for the cross-poll case even when the call
+//     site's own independently-computed `executionId` doesn't match the
+//     outgoing event's real identity, but never corrected THAT mismatch —
+//     the call site must stamp the newly-created event with this returned
+//     identity (when non-empty) instead of its own manufactured one, so
+//     the created event's `Execution=` stays consistent with the
+//     execution it just inherited Work Type from
+//     (docs/review-fix-state-model.md §6, L562-565's same-execution
+//     contract — see the call site's own comment for the full mechanics).
 //
 // docs/review-fix-state-model.md §6's full churn-inheritance precedence,
 // as implemented here (ADP-051-B2/B3 fixup round 4 restructuring — rounds
@@ -4426,6 +4557,13 @@ function churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId) {
 // reconcileAuthoritativeTimeEvents_'s call site) — this function only ever
 // forwards it, exactly like `closedThisCall`'s own `closeReason` override.
 function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents, syncLogProjectionLoader, restartCutoffOverride, expectedExecutionId) {
+  // Finding J (ADP-051-B2/B3 fixup round 6): the winning candidate's own
+  // real `Execution=` (may be `''`, e.g. a legacy no-Execution= outgoing
+  // event — see this function's own header comment for why that must
+  // never be treated the same as "an identity to adopt").
+  const inheritedIdentityOf = function (outgoingEvent) {
+    return parseNoteMeta_(propertyText_(outgoingEvent.properties.Note)).execution || '';
+  };
   try {
     const closedThisCall = otherActorEvents || [];
     const entryCloseReason = function (entry) {
@@ -4449,7 +4587,7 @@ function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents,
         const options = isWrappedEntry && entry.closeReason ? { closeReason: entry.closeReason } : undefined;
         const churn = resolveChurnInheritedWorkType_(outgoingEvent, options);
         if (churn.inherits && churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId)) {
-          return churn.workType || '';
+          return { workType: churn.workType || '', inheritedExecutionId: inheritedIdentityOf(outgoingEvent) };
         }
       }
       // Step 3: cross-poll fallback, identity-matched — only when nothing
@@ -4460,17 +4598,20 @@ function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents,
         if (crossPollCandidate) {
           const churn = resolveChurnInheritedWorkType_(crossPollCandidate);
           if (churn.inherits && churnCandidateExecutionMatches_(crossPollCandidate, expectedExecutionId)) {
-            return churn.workType || '';
+            return { workType: churn.workType || '', inheritedExecutionId: inheritedIdentityOf(crossPollCandidate) };
           }
         }
       }
     }
-    // Step 4: fall through to §3's ordinary fresh classification below.
+    // Step 4: fall through to §3's ordinary fresh classification below. No
+    // inheritance happened, so there is no identity to hand back — the
+    // call site must keep computing its own fresh, self-consistent
+    // executionId for a genuinely new execution.
     const resolution = resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride);
-    if (resolution.unresolved || !resolution.classification) return '';
-    return resolution.classification;
+    if (resolution.unresolved || !resolution.classification) return { workType: '', inheritedExecutionId: '' };
+    return { workType: resolution.classification, inheritedExecutionId: '' };
   } catch (err) {
-    return '';
+    return { workType: '', inheritedExecutionId: '' };
   }
 }
 

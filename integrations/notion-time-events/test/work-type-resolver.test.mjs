@@ -356,9 +356,10 @@ test('failure #27 (required regression test): an empty churn candidate set after
   // side of the restart is empty) — resolveNewTimeEventWorkTypeSafely_ must
   // fall through to a genuinely fresh §3 classification, never reach past
   // the restart to `oldExecution`'s own stored Work Type.
-  const workType = sandbox.resolveNewTimeEventWorkTypeSafely_(TASK_ID, [oldExecution], []);
+  const result = sandbox.resolveNewTimeEventWorkTypeSafely_(TASK_ID, [oldExecution], []);
 
-  assert.equal(workType, 'Review Fix', 'must be freshly resolved from oldExecution\'s own End Status=Review via §3, never its unrelated stored Work Type=Initial Work property');
+  assert.equal(result.workType, 'Review Fix', 'must be freshly resolved from oldExecution\'s own End Status=Review via §3, never its unrelated stored Work Type=Initial Work property');
+  assert.equal(result.inheritedExecutionId, '', 'Finding J (round 6): no inheritance happened here (a fresh §3 classification), so there must be no identity to adopt — the call site keeps its own freshly-computed executionId');
 });
 
 test('failure #33: a legacy outgoing event with no Execution= marker at all still inherits via the Reason/Boundary legacy heuristic (docs/review-fix-state-model.md §6)', () => {
@@ -728,6 +729,124 @@ test('Finding D (ADP-051-B2/B3 fixup round 3): a poll-wide loader (makeSyncLogPr
     syncLogSheet.getValuesCallCount, 1,
     'four Tasks resolved against the SAME poll-wide loader must share exactly ONE underlying Sync Log transfer, not one each'
   );
+});
+
+// ---------------------------------------------------------------------------
+// Boundedness (Finding I — ADP-051-B2/B3 fixup round 6, the SIXTH review
+// round on this exact performance area)
+// ---------------------------------------------------------------------------
+//
+// Round 3's fix above (Finding D) bounded SERVICE-CALL COUNT to exactly one
+// bulk read per poll, but a single `getRange(2, 1, lastRow-1, 8)` over an
+// ever-growing, append-only sheet still transfers/holds an UNBOUNDED amount
+// of DATA as the log matures — call count and data size are different
+// things, and bounding one says nothing about the other. The tests below
+// regression-test round 6's actual fix: a bounded tail window
+// (`SYNC_LOG_PROJECTION_WINDOW_ROWS`), independent of total sheet size, with
+// an explicit `unresolved` outcome — never a silent guess — whenever a
+// Task's relevant history falls entirely outside that window.
+
+const SYNC_LOG_PROJECTION_WINDOW_ROWS = 5000; // mirrors Code.gs's own constant
+
+test('Finding I (P1, ADP-051-B2/B3 fixup round 6): loadSyncLogProjection_ reads a BOUNDED tail window of the Sync Log sheet — never the full 2..lastRow range — regardless of total sheet size, and marks the result truncated when older history was left unread (docs/review-fix-state-model.md §3 step 2, performance)', () => {
+  const { sandbox, spreadsheet } = harness();
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  sandbox.ensureSyncLogSheet_(); // writes the header at row 1 before we push raw data rows below
+  const TOTAL_ROWS = 20000; // far more than the window, and more than round 3's own largest test
+
+  for (let i = 0; i < TOTAL_ROWS; i++) {
+    syncLogSheet.rows.push([
+      'snap-' + i, 'test', 'unrelated-task-' + i, 'Review',
+      '2026-01-01T00:00:00.000Z', '', 'Task', String(1000 + i),
+    ]);
+  }
+
+  const originalGetRange = syncLogSheet.getRange.bind(syncLogSheet);
+  let capturedNumRows = null;
+  syncLogSheet.getRange = function (row, column, numRows, numColumns) {
+    // Distinguish the projection read from ensureSyncLogSheet_'s own
+    // header write (also column 1, 8 columns, but always row 1/numRows 1).
+    if (row > 1 && column === 1 && numColumns === 8) capturedNumRows = numRows;
+    return originalGetRange(row, column, numRows, numColumns);
+  };
+
+  const rows = sandbox.loadSyncLogProjection_();
+
+  assert.ok(capturedNumRows !== null, 'expected the 8-column projection range to be read');
+  assert.equal(
+    capturedNumRows, SYNC_LOG_PROJECTION_WINDOW_ROWS,
+    'the read range height must be capped at the fixed window constant (' + SYNC_LOG_PROJECTION_WINDOW_ROWS + '), never lastRow-1 (' + TOTAL_ROWS + ') — a mature log must not make the read grow with total sheet size'
+  );
+  assert.equal(rows.length, SYNC_LOG_PROJECTION_WINDOW_ROWS);
+  assert.equal(rows.truncated, true, 'older history beyond the window exists and must be flagged, so callers never mistake "not read" for "does not exist"');
+  // Sanity: the window is the TAIL of the sheet (most recent rows), not an
+  // arbitrary slice — the last row loaded must be the sheet's actual last
+  // row.
+  assert.equal(rows[rows.length - 1].taskId, 'unrelated-task-' + (TOTAL_ROWS - 1));
+});
+
+test('Finding I (P1, ADP-051-B2/B3 fixup round 6): loadSyncLogProjection_ is NOT truncated when the whole Sync Log fits within the window (docs/review-fix-state-model.md §3 step 2)', () => {
+  const { sandbox } = harness();
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T09:00:00.000Z' });
+  logRow(sandbox, { status: 'In Progress', receivedAt: '2026-08-01T09:30:00.000Z' });
+
+  const rows = sandbox.loadSyncLogProjection_();
+
+  assert.equal(rows.length, 2);
+  assert.equal(rows.truncated, false);
+});
+
+test('Finding I (P1, ADP-051-B2/B3 fixup round 6): a Task whose ONLY Sync Log history falls entirely OUTSIDE the bounded window surfaces resolveSyncLogCandidate_\'s distinct ambiguous sentinel, never plain null ("no history at all") (docs/review-fix-state-model.md §3 step 2, failure #28 principle)', () => {
+  const { sandbox, spreadsheet } = harness();
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  sandbox.ensureSyncLogSheet_();
+
+  // Row 2: this Task's ONLY Sync Log observation ever — a genuine Review
+  // row that, if seen, would classify the next execution as Review Fix.
+  syncLogSheet.rows.push(['snap-target', 'test', TASK_ID, 'Review', '2026-01-01T00:00:00.000Z', '', 'Task', '500']);
+  // Exactly WINDOW more (unrelated) rows push the bounded tail window to
+  // start strictly after row 2, excluding the target Task's only row.
+  for (let i = 0; i < SYNC_LOG_PROJECTION_WINDOW_ROWS; i++) {
+    syncLogSheet.rows.push(['snap-' + i, 'test', 'unrelated-task', 'Review', '2026-06-01T00:00:00.000Z', '', 'Task', String(1000 + i)]);
+  }
+
+  const candidate = sandbox.resolveSyncLogCandidate_(TASK_ID, []);
+  assert.ok(candidate, 'a Task whose only history fell outside the bounded window must surface a distinct ambiguous sentinel, never plain null ("no history at all")');
+  assert.equal(candidate.windowTruncatedAmbiguous, true);
+
+  const result = sandbox.resolveWorkType_(TASK_ID, []);
+  assert.equal(result.unresolved, true, 'must never silently guess Initial Work when older history existed outside the bounded window and may have been Review');
+  assert.equal(result.classification, null);
+  assert.equal(result.reasonCode, 'synclog_candidate_window_truncated_ambiguous');
+});
+
+test('Finding I (P1, ADP-051-B2/B3 fixup round 6): a Task whose OWN eligible history sits fully INSIDE the bounded window still classifies normally, even though the sheet as a whole is truncated — truncation only matters for evidence this Task\'s classification actually needed but could not see (docs/review-fix-state-model.md §3 step 2)', () => {
+  const { sandbox, spreadsheet } = harness();
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  sandbox.ensureSyncLogSheet_();
+
+  // Old, unrelated rows entirely outside the eventual window — proves the
+  // sheet really is truncated, not merely that it happens to fit.
+  const OLD_UNRELATED_ROWS = 3000;
+  for (let i = 0; i < OLD_UNRELATED_ROWS; i++) {
+    syncLogSheet.rows.push(['snap-old-' + i, 'test', 'unrelated-task', 'Backlog', '2026-01-01T00:00:00.000Z', '', 'Task', String(i)]);
+  }
+  // More recent, still-unrelated filler, so the target Task's own rows land
+  // as the SHEET'S LAST TWO rows — deep inside the bounded window.
+  for (let i = 0; i < SYNC_LOG_PROJECTION_WINDOW_ROWS - 2; i++) {
+    syncLogSheet.rows.push(['snap-recent-' + i, 'test', 'unrelated-task', 'Review', '2026-06-01T00:00:00.000Z', '', 'Task', String(9000000 + i)]);
+  }
+  // Within the window: this Task's own real history.
+  syncLogSheet.rows.push(['snap-target-review', 'test', TASK_ID, 'Review', '2026-08-01T09:00:00.000Z', '', 'Task', '900000000']);
+  syncLogSheet.rows.push(['snap-target-inprog', 'test', TASK_ID, 'In Progress', '2026-08-01T09:30:00.000Z', '', 'Task', '900000001']);
+
+  const projection = sandbox.loadSyncLogProjection_();
+  assert.equal(projection.truncated, true, 'sanity check: the sheet as a whole really is larger than the window');
+
+  const result = sandbox.resolveWorkType_(TASK_ID, []);
+
+  assert.equal(result.unresolved, false, 'a bounded read must not manufacture ambiguity for a Task whose own evidence is fully visible within the window');
+  assert.equal(result.classification, 'Review Fix');
 });
 
 // ---------------------------------------------------------------------------

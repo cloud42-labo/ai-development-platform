@@ -524,3 +524,102 @@ test('Finding H (P1, ADP-051-B2/B3 fixup round 5): a legitimate cross-poll reass
     'must inherit the outgoing event\'s Work Type — its explicit Execution= genuinely continues across this cross-poll reassignment gap, so round 4\'s identity gate must not reject it merely because the new event\'s own manufactured executionId (from `when`, an unverified fallback) does not equal it'
   );
 });
+
+// ---------------------------------------------------------------------------
+// Finding J (ADP-051-B2/B3 fixup round 6): the created event's OWN
+// Execution= must match the outgoing candidate's real identity whenever
+// continuity was established, not just its Work Type.
+// ---------------------------------------------------------------------------
+
+test('Finding J (P1, ADP-051-B2/B3 fixup round 6): the CREATED event\'s own Execution= is corrected to the outgoing candidate\'s real identity, not left as the manufactured startAt/when-derived value Finding H\'s fix only stopped comparing against (docs/review-fix-state-model.md §6, L562-565\'s same-execution contract — same scenario as the Finding H test above)', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-finding-j', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // newly (re)assigned THIS poll, replacing the cleared assignee
+      lastEdited: '2026-08-30T10:00:00.000Z',
+      // Stale/original Started At — predates the outgoing event's own
+      // close, so it does NOT look fresh and is not trusted as this
+      // reopen's own start. This is exactly what makes `startAt` (and thus
+      // the ORIGINAL, pre-Finding-J `executionId`) fall through to `when`
+      // instead of the outgoing event's own real identity.
+      startedAt: '2026-08-01T00:00:00.000Z',
+    })],
+    events: [eventPage('evt-finding-j-outgoing', {
+      actor: 'Chris',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      // Already closed — by an EARLIER poll (otherActor is empty THIS
+      // poll, so this only reaches the new event via the cross-poll
+      // fallback, exactly Finding H's scenario). Its own Execution= is
+      // explicit and genuinely continues into this reassignment.
+      endedAt: '2026-08-30T09:00:00.000Z',
+      note: 'Reason=reassignment | End Status=In Progress | Write=1000 | Execution=2026-08-01T00:00:00.000Z',
+      workType: 'Review Fix',
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /^opened:/);
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+
+  // Work Type inheritance (Finding H) must still hold.
+  assert.equal(created.properties['Work Type'].select.name, 'Review Fix');
+
+  const noteContent = created.properties.Note.rich_text[0].text.content;
+  assert.match(
+    noteContent, /Execution=2026-08-01T00:00:00\.000Z(?:\s|\||$)/,
+    'the CREATED event\'s own Execution= must be overwritten to the outgoing candidate\'s real identity (2026-08-01T00:00:00.000Z) once continuity was established, not left as the manufactured startAt/when-derived value — Finding H only stopped that mismatch from wrongly REJECTING inheritance, it never corrected the mismatch itself'
+  );
+  assert.doesNotMatch(
+    noteContent, /Execution=2026-08-30T10:00:00\.000Z/,
+    'must never keep stamping the manufactured (when-derived) executionId once its Work Type was inherited from a DIFFERENT, real Execution= — that leaves the created event internally inconsistent with the execution it just inherited from'
+  );
+});
+
+test('Finding J (P1, ADP-051-B2/B3 fixup round 6, no-regression check): a genuinely NEW execution — no churn inheritance at all — still gets its own fresh, self-consistent Execution=, never the mismatched outgoing candidate\'s identity (docs/review-fix-state-model.md §6; same setup as the Finding G test above, where identity mismatch correctly blocks inheritance)', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-finding-j-no-regression', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // newly (re)assigned — a genuinely NEW execution B
+      lastEdited: '2026-09-10T10:00:00.000Z',
+      // Execution B's own fresh Started At — well after execution A's own
+      // Execution= identity below, so it IS trusted as this reopen's own
+      // start (unlike the Finding H/J scenario above).
+      startedAt: '2026-09-10T10:00:00.000Z',
+    })],
+    events: [eventPage('evt-finding-j-mismatch', {
+      actor: 'Chris',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      endedAt: '2026-08-01T05:00:00.000Z',
+      note: 'Reason=reassignment | End Status=In Progress | Write=1000 | Execution=2026-08-01T00:00:00.000Z',
+      workType: 'Review Fix',
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /^opened:/);
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+
+  // No inheritance happens here (identity mismatch — see the Finding G
+  // test above); Work Type is freshly (re)classified.
+  assert.equal(created.properties['Work Type'].select.name, 'Initial Work');
+
+  const noteContent = created.properties.Note.rich_text[0].text.content;
+  assert.doesNotMatch(
+    noteContent, /Execution=2026-08-01T00:00:00\.000Z/,
+    'a genuinely new execution must never adopt the OLD, mismatched candidate\'s Execution= just because Finding J now propagates identity on a genuine match — no match happened here'
+  );
+  // Self-consistency invariant: for a genuinely new execution, the created
+  // event's own Execution= always equals its own Started At (both derive
+  // from the same freshly-computed `startAt`) — proving Finding J's fix
+  // left this untouched rather than routing some OTHER value through.
+  const startedAtValue = created.properties['Started At'].date.start;
+  assert.match(noteContent, new RegExp('Execution=' + startedAtValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:\\s|\\||$)'));
+});
