@@ -485,3 +485,42 @@ test('Finding G (P1, ADP-051-B2/B3 fixup round 4): a cross-poll churn candidate 
     'execution A\'s Reason=reassignment close is not itself a genuine boundary, but with its Execution= correctly rejected as a mismatch and no Sync Log history at all, this is a fresh, unclassified-history execution'
   );
 });
+
+test('Finding H (P1, ADP-051-B2/B3 fixup round 5): a legitimate cross-poll reassignment continuation must still inherit Work Type even though the outgoing event carries an explicit `Execution=` — round 4\'s own `churnCandidateExecutionMatches_` gate must not reject it merely because the new event\'s independently-manufactured `executionId` (derived from `startAt`, which falls back to this reassignment\'s own `when` since the Task\'s Started At predates the outgoing close) does not happen to equal that `Execution=` value (docs/review-fix-state-model.md §6, lines 562-565: identity continuity holds "regardless of which poll observed the close/reopen" — this is a genuine continuation of the SAME execution across the reassignment gap, not a different one)', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-finding-h', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // newly (re)assigned THIS poll, replacing the cleared assignee
+      lastEdited: '2026-08-30T10:00:00.000Z',
+      // Stale/original Started At — predates the outgoing event's own
+      // close, so it does NOT look fresh and is not trusted as this
+      // reopen's own start (same setup as Finding 1a). This is exactly
+      // what makes `startAt` fall through to `when` at the call site.
+      startedAt: '2026-08-01T00:00:00.000Z',
+    })],
+    events: [eventPage('evt-finding-h-outgoing', {
+      actor: 'Chris',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      // Already closed — by an EARLIER poll, when the assignee was cleared
+      // (`otherActor` is empty THIS poll: nothing left open to close, so
+      // this only reaches the new event via the cross-poll fallback). Its
+      // own Execution= is explicit (not legacy data) and genuinely
+      // continues into this reassignment — Codex's exact reproduction.
+      endedAt: '2026-08-30T09:00:00.000Z',
+      note: 'Reason=reassignment | End Status=In Progress | Write=1000 | Execution=2026-08-01T00:00:00.000Z',
+      workType: 'Review Fix',
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /^opened:/);
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.equal(
+    created.properties['Work Type'].select.name, 'Review Fix',
+    'must inherit the outgoing event\'s Work Type — its explicit Execution= genuinely continues across this cross-poll reassignment gap, so round 4\'s identity gate must not reject it merely because the new event\'s own manufactured executionId (from `when`, an unverified fallback) does not equal it'
+  );
+});

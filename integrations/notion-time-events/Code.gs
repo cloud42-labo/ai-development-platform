@@ -2106,6 +2106,49 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const executionId = otherActor.length
         ? outgoingExecutionId
         : startAt.toISOString();
+      // Whether `executionId` above is a VERIFIED identity, safe to use as
+      // an `expectedExecutionId` that can REJECT a churn candidate outright
+      // — versus a manufactured fallback with no independent evidence
+      // behind it (ADP-051-B2/B3 fixup round 5, Finding H, correcting round
+      // 4's own Finding G fix).
+      //
+      // Verified in exactly two cases: (a) `otherActor.length` — a same-
+      // call reassignment directly inherits `outgoingExecutionId` from a
+      // real outgoing event's own Note, so it IS that event's identity by
+      // construction, or (b) `trustedTaskStart` — the Task's own Started At
+      // was independently confirmed fresh (newer than all existing
+      // history, per `taskStartedAtLooksFresh` above), which is genuine,
+      // affirmative evidence a NEW execution actually began (exactly
+      // Finding G's own scenario: Task Started At Sep 10, well after
+      // execution A's close on Aug 1).
+      //
+      // NOT verified when neither holds: nothing closed THIS call
+      // (`otherActor` empty — a cross-poll reassignment gap, assignee
+      // cleared in one poll, replaced only in a later one) AND the Task's
+      // Started At still reads as stale/unrefreshed (`trustedTaskStart`
+      // null, so `startAt` fell through to `when`, this reassignment's own
+      // observed instant — see the stale-Started-At fallback comment
+      // above). `when` was never claimed to identify any execution; it is
+      // merely "the only signal available" for the TRUE first-ever-open
+      // case where no outgoing event exists at all to fall back on. Reusing
+      // it here as an `expectedExecutionId` to REJECT a legitimate cross-
+      // poll churn candidate — one whose own `Execution=` genuinely
+      // continues across the gap, per §6 ("regardless of which poll
+      // observed the close/reopen") — is exactly Finding H: it silently
+      // turns a real continuation's inherited `Review Fix` back into
+      // `Initial Work` merely because two independently-computed,
+      // unverified values don't happen to match.
+      //
+      // So: only pass a verified identity through as `expectedExecutionId`.
+      // When unverified, pass `''` — `churnCandidateExecutionMatches_`
+      // already treats a falsy `expectedExecutionId` as "no identity to
+      // gate on", skipping the check entirely and deferring to the
+      // Reason/Boundary heuristic alone, exactly the pre-round-4 behavior
+      // for this specific case. This does not reopen Finding G's own gap:
+      // Finding G's scenario is always verified (a genuinely fresh Task
+      // Started At), so it still gates and still rejects correctly — see
+      // the round 5 regression test alongside Finding G's own test.
+      const executionIdIsVerified = otherActor.length > 0 || Boolean(trustedTaskStart);
       // ADP-051-B3: classify this newly-opened event's Work Type
       // (Initial Work / Review Fix), non-blocking. resolveNewTimeEvent
       // WorkTypeSafely_ never throws and never returns anything but a
@@ -2147,7 +2190,13 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       // candidate that belongs to a DIFFERENT execution (§6 first bullet)
       // instead of trusting the Reason/Boundary heuristic alone whenever an
       // Execution= marker is actually available to check against.
-      const workType = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorClosedThisCall, syncLogProjectionLoader, restartCutoffOverride, executionId);
+      //
+      // Only when `executionIdIsVerified` (round 5, Finding H — see its
+      // computation above) — an UNVERIFIED, manufactured `executionId`
+      // (the cross-poll reassignment-gap case) is passed through as `''`
+      // instead, so the gate is skipped rather than wrongly rejecting a
+      // legitimate continuation it cannot actually disprove.
+      const workType = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorClosedThisCall, syncLogProjectionLoader, restartCutoffOverride, executionIdIsVerified ? executionId : '');
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, workType);
       actions.push('opened:' + created.id);
     }
@@ -4287,12 +4336,21 @@ function mostRecentlyClosedEvent_(allEvents) {
 // by `resolveChurnInheritedWorkType_` stands unguarded, exactly as before
 // round 4 (failure #33).
 //
-// `expectedExecutionId` may be omitted (falsy) — this happens only for
-// callers that don't yet know the new event's own identity (direct unit
-// tests of `resolveNewTimeEventWorkTypeSafely_` predating this plumbing);
-// omitting it skips the identity gate entirely, since there is nothing to
-// compare against and rejecting every Execution=-bearing candidate outright
-// would be wrong, not conservative.
+// `expectedExecutionId` may be omitted (falsy) — this happens for callers
+// that don't yet know the new event's own identity (direct unit tests of
+// `resolveNewTimeEventWorkTypeSafely_` predating this plumbing), AND, as of
+// ADP-051-B2/B3 fixup round 5 (Finding H), for the real call site whenever
+// its own computed identity is UNVERIFIED — a manufactured fallback with no
+// independent evidence behind it (see `executionIdIsVerified` at the call
+// site), specifically the cross-poll reassignment-gap case: nothing closed
+// this same call and the Task's own Started At still reads stale. Omitting
+// it in either case skips the identity gate entirely, since there is
+// nothing trustworthy to compare against and rejecting every
+// Execution=-bearing candidate outright would be wrong, not conservative —
+// this is what makes a legitimate cross-poll continuation (Finding H)
+// distinguishable from a genuinely new execution (Finding G, where the
+// call site's identity IS verified via a confirmed-fresh Task Started At,
+// so the gate still applies and still rejects).
 function churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId) {
   if (!expectedExecutionId) return true;
   const meta = parseNoteMeta_(propertyText_(outgoingEvent.properties.Note));
