@@ -2141,7 +2141,13 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         return entry.closeReason === 'ambiguous_provenance_restart';
       });
       const restartCutoffOverride = sameCallRestartHappened ? { timestamp: when, write: Date.now() } : null;
-      const workType = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorClosedThisCall, syncLogProjectionLoader, restartCutoffOverride);
+      // `executionId` (Finding G, ADP-051-B2/B3 fixup round 4): this new
+      // event's own already-computed execution identity, passed straight
+      // through so the churn-inheritance gate can reject a same-Reason
+      // candidate that belongs to a DIFFERENT execution (§6 first bullet)
+      // instead of trusting the Reason/Boundary heuristic alone whenever an
+      // Execution= marker is actually available to check against.
+      const workType = resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorClosedThisCall, syncLogProjectionLoader, restartCutoffOverride, executionId);
       const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, workType);
       actions.push('opened:' + created.id);
     }
@@ -4146,6 +4152,23 @@ function resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCut
 // running under a different actor — never re-resolved via
 // resolveWorkType_, which classifies a genuinely NEW execution only.
 //
+// This function implements ONLY §6's second bullet — the legacy
+// Reason/Boundary heuristic (plus the restart/boundary cutoffs) — and does
+// NOT check Execution= identity itself. §6's FIRST bullet makes identity
+// matching the primary signal, required whenever `outgoingEvent` carries an
+// `Execution=` value at all, "regardless of which poll observed the
+// close/reopen" — i.e. this is not a same-poll-only or cross-poll-only
+// concern, it applies uniformly. That check needs the NEW event's own
+// expected execution identity, which this pure per-event function is never
+// given (round 1-3 callers never needed it; ADP-051-B2/B3 fixup round 4,
+// Finding G, added it) — so it is applied by the caller,
+// resolveNewTimeEventWorkTypeSafely_, via churnCandidateExecutionMatches_,
+// as a gate on top of whatever this function returns. Only when
+// `outgoingEvent` has NO `Execution=` at all (legacy data predating the
+// field) does this function's Reason/Boundary heuristic apply unguarded —
+// §6's stated exception, and exactly what this function was already doing
+// before round 4.
+//
 // `outgoingEvent` is one of the events this same reconciliation call just
 // closed (Reason=reassignment/duplicate_reconciliation, or the
 // ambiguous_provenance_restart variant) as the outgoing side of the
@@ -4222,6 +4245,16 @@ function resolveChurnInheritedWorkType_(outgoingEvent, options) {
 // boundary sitting there correctly stops inheritance (a fresh execution
 // really did start), and a past, already-finished execution's OWN
 // internal churn is never reached past that boundary (failure #7).
+//
+// This function only ever picks WHICH event is the most recent close — it
+// does not decide whether that candidate is actually eligible to inherit
+// from. `resolveChurnInheritedWorkType_` applies the Reason/Boundary
+// cutoffs, and `churnCandidateExecutionMatches_` applies the §6 identity
+// gate (ADP-051-B2/B3 fixup round 4, Finding G) — this deliberately picking
+// the wrong (different-execution) candidate is exactly the gap Finding G
+// found: the most recent close by TIMESTAMP is not necessarily part of the
+// SAME execution the new event is about to open into once a Task can leave
+// and fully reopen between polls.
 function mostRecentlyClosedEvent_(allEvents) {
   let best = null;
   (allEvents || []).forEach(function (eventPage) {
@@ -4236,6 +4269,37 @@ function mostRecentlyClosedEvent_(allEvents) {
   return best ? best.event : null;
 }
 
+// docs/review-fix-state-model.md §6: whether a churn-inheritance CANDIDATE
+// (an outgoing event `resolveChurnInheritedWorkType_` already said
+// `inherits: true` for, via the Reason/Boundary heuristic) is actually
+// allowed to hand its Work Type to the NEW event about to be created.
+// Identity is the PRIMARY signal (§6 first bullet — "matched by Execution=
+// identity ... not 'same poll' and not 'same actor'"): when `outgoingEvent`
+// carries an explicit `Execution=` value, it must equal
+// `expectedExecutionId` exactly, or this candidate is rejected outright —
+// it belongs to a DIFFERENT execution, regardless of what its Reason/
+// Boundary say (ADP-051-B2/B3 fixup round 4, Finding G: an execution that
+// closed via `Reason=reassignment` must not hand its Work Type to an
+// unrelated later execution just because it is the most recently closed
+// same-actor event). Only when `outgoingEvent` has NO `Execution=` at all
+// — legacy data predating the field — does §6's stated exception apply:
+// no identity to check, so the Reason/Boundary heuristic already applied
+// by `resolveChurnInheritedWorkType_` stands unguarded, exactly as before
+// round 4 (failure #33).
+//
+// `expectedExecutionId` may be omitted (falsy) — this happens only for
+// callers that don't yet know the new event's own identity (direct unit
+// tests of `resolveNewTimeEventWorkTypeSafely_` predating this plumbing);
+// omitting it skips the identity gate entirely, since there is nothing to
+// compare against and rejecting every Execution=-bearing candidate outright
+// would be wrong, not conservative.
+function churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId) {
+  if (!expectedExecutionId) return true;
+  const meta = parseNoteMeta_(propertyText_(outgoingEvent.properties.Note));
+  if (!meta.execution) return true;
+  return meta.execution === expectedExecutionId;
+}
+
 // ADP-051-B3: decides, and safely resolves, the Work Type to stamp on a
 // Time Event `reconcileAuthoritativeTimeEvents_` is ABOUT TO CREATE —
 // never blocking or delaying that creation itself (see the call site's own
@@ -4243,32 +4307,51 @@ function mostRecentlyClosedEvent_(allEvents) {
 // unclassified) on any resolver throw, an explicit `unresolved` outcome,
 // or when there is genuinely nothing to classify yet.
 //
+// docs/review-fix-state-model.md §6's full churn-inheritance precedence,
+// as implemented here (ADP-051-B2/B3 fixup round 4 restructuring — rounds
+// 1-3 got each piece right in isolation but never stated the combined
+// order, which is exactly where Findings F and G slipped through):
+//
+//   1. Same-call restart cutoff (Finding F). If ANY entry this SAME call
+//      closed carries `closeReason: 'ambiguous_provenance_restart'` —
+//      regardless of which actor it belongs to, and regardless of its
+//      position in the list relative to an ordinary same-call
+//      reassignment — the restart is a hard cutoff for this poll's new-
+//      event classification (§6 third bullet, "decided here ... full
+//      stop"): no inheritance from ANY other same-call close, ordinary or
+//      not, and no falling through to the cross-poll fallback either (the
+//      restart, having just happened THIS call, is definitionally the most
+//      recent boundary — there is nothing on the near side of it to reach
+//      for). Skip straight to step 4.
+//   2. Execution-identity-matched same-call reassignment. Otherwise, walk
+//      `otherActorEvents` (all `closeReason: 'reassignment'` at this
+//      point, per step 1) in order; the first entry that both (a)
+//      `resolveChurnInheritedWorkType_` says inherits, per the Reason/
+//      Boundary heuristic, AND (b) `churnCandidateExecutionMatches_` says
+//      matches this new event's own expected identity (or carries no
+//      Execution= to check at all) wins.
+//   3. Execution-identity-matched cross-poll candidate (Finding G). Only
+//      when NOTHING was closed this same call at all — not merely "step 2
+//      found no match" (an ambiguous_provenance_restart already exited at
+//      step 1; an ordinary same-call reassignment that fails to match is a
+//      genuine "this poll's churn doesn't carry over" result, not a
+//      license to reach further back) — check
+//      `mostRecentlyClosedEvent_(allEvents)` under the identical
+//      inherits-AND-matches gate as step 2.
+//   4. Otherwise, fall through to resolveWorkType_'s ordinary §3
+//      classification of a genuinely new execution.
+//
 // `otherActorEvents` are `{ event, closeReason }` entries this SAME call
 // already closed (or is in the middle of closing) as the outgoing side of
 // a reassignment — `closeReason` is passed straight to
 // resolveChurnInheritedWorkType_'s override (Finding 1, ADP-051-B3 fixup),
 // since the event object's own in-memory Note is stale until re-fetched.
-// §6: a reassignment replacement inherits Work Type from the outgoing
-// sub-interval it continues rather than being independently (re)resolved
-// as if it were a brand-new execution.
 //
-// When `otherActorEvents` is EMPTY — no reassignment happened this poll at
-// all — this also checks mostRecentlyClosedEvent_(allEvents) (Finding 1,
-// failure #6): an assignee cleared in an EARLIER poll already closed its
-// event with `Reason=reassignment` then, so there is nothing for THIS
-// poll to have closed, yet that outgoing event is still the correct churn
-// source for the replacement now being opened. This cross-poll fallback
-// is deliberately skipped whenever `otherActorEvents` is non-empty, even
-// if none of its entries inherit — e.g. an `ambiguous_provenance_restart`
-// close is itself a hard history cutoff (§6 third bullet) and must not be
-// bypassed by reaching further back into `allEvents` for an older,
-// unrelated churn event (failure #27/#51's same principle).
-//
-// Only when no eligible churn candidate exists at all — no reassignment
-// happened (same call or a prior poll), or the only candidate was itself
-// an ambiguous-provenance restart or execution boundary — does this fall
-// through to resolveWorkType_'s ordinary §3 classification of a genuinely
-// new execution.
+// `expectedExecutionId` (Finding G, round 4): the new event's own
+// already-computed execution identity (see
+// reconcileAuthoritativeTimeEvents_'s `executionId` at its call site) —
+// threaded through to churnCandidateExecutionMatches_ for both steps 2 and
+// 3 above. Never re-derived here; this function only ever forwards it.
 //
 // `syncLogProjectionLoader` (Finding D, ADP-051-B2/B3 fixup round 3): the
 // poll-wide, memoized, lazy Sync Log loader (see
@@ -4284,24 +4367,47 @@ function mostRecentlyClosedEvent_(allEvents) {
 // computes and passes this instant explicitly (see
 // reconcileAuthoritativeTimeEvents_'s call site) — this function only ever
 // forwards it, exactly like `closedThisCall`'s own `closeReason` override.
-function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents, syncLogProjectionLoader, restartCutoffOverride) {
+function resolveNewTimeEventWorkTypeSafely_(taskId, allEvents, otherActorEvents, syncLogProjectionLoader, restartCutoffOverride, expectedExecutionId) {
   try {
     const closedThisCall = otherActorEvents || [];
-    for (let i = 0; i < closedThisCall.length; i++) {
-      const entry = closedThisCall[i];
-      const isWrappedEntry = Boolean(entry) && Object.prototype.hasOwnProperty.call(entry, 'event');
-      const outgoingEvent = isWrappedEntry ? entry.event : entry;
-      const options = isWrappedEntry && entry.closeReason ? { closeReason: entry.closeReason } : undefined;
-      const churn = resolveChurnInheritedWorkType_(outgoingEvent, options);
-      if (churn.inherits) return churn.workType || '';
-    }
-    if (!closedThisCall.length) {
-      const crossPollCandidate = mostRecentlyClosedEvent_(allEvents);
-      if (crossPollCandidate) {
-        const churn = resolveChurnInheritedWorkType_(crossPollCandidate);
-        if (churn.inherits) return churn.workType || '';
+    const entryCloseReason = function (entry) {
+      return (entry && Object.prototype.hasOwnProperty.call(entry, 'closeReason')) ? entry.closeReason : undefined;
+    };
+    // Step 1 (Finding F): scan the WHOLE same-call list for ANY restart
+    // before accepting inheritance from ANYTHING else in it — a restart
+    // later in the list must retroactively block an ordinary reassignment
+    // examined earlier, and an ordinary reassignment later in the list must
+    // never be reached past a restart examined earlier either. Both require
+    // seeing the full list up front, not a single left-to-right pass.
+    const sameCallRestartPresent = closedThisCall.some(function (entry) {
+      return entryCloseReason(entry) === 'ambiguous_provenance_restart';
+    });
+    if (!sameCallRestartPresent) {
+      // Step 2: same-call reassignment, identity-matched.
+      for (let i = 0; i < closedThisCall.length; i++) {
+        const entry = closedThisCall[i];
+        const isWrappedEntry = Boolean(entry) && Object.prototype.hasOwnProperty.call(entry, 'event');
+        const outgoingEvent = isWrappedEntry ? entry.event : entry;
+        const options = isWrappedEntry && entry.closeReason ? { closeReason: entry.closeReason } : undefined;
+        const churn = resolveChurnInheritedWorkType_(outgoingEvent, options);
+        if (churn.inherits && churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId)) {
+          return churn.workType || '';
+        }
+      }
+      // Step 3: cross-poll fallback, identity-matched — only when nothing
+      // at all was closed this same call (see the precedence note above for
+      // why a step-2 non-match must NOT also reach here).
+      if (!closedThisCall.length) {
+        const crossPollCandidate = mostRecentlyClosedEvent_(allEvents);
+        if (crossPollCandidate) {
+          const churn = resolveChurnInheritedWorkType_(crossPollCandidate);
+          if (churn.inherits && churnCandidateExecutionMatches_(crossPollCandidate, expectedExecutionId)) {
+            return churn.workType || '';
+          }
+        }
       }
     }
+    // Step 4: fall through to §3's ordinary fresh classification below.
     const resolution = resolveWorkType_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride);
     if (resolution.unresolved || !resolution.classification) return '';
     return resolution.classification;

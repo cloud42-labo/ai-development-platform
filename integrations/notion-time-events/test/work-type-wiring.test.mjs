@@ -389,3 +389,99 @@ test('Finding E (P1, ADP-051-B2/B3 fixup round 3): a same-poll ambiguous_provena
     'with the pre-restart Review row correctly cut off and no genuine boundary on the near side, this is a fresh, unclassified-history execution — exactly like the no-Sync-Log-at-all restart case'
   );
 });
+
+test('Finding F (P1, ADP-051-B2/B3 fixup round 4): a same-call ambiguous_provenance_restart for ONE actor is a hard cutoff for the WHOLE same-call closed-events list — an ORDINARY reassignment closed in the SAME call, for a DIFFERENT actor, must not be inherited from either (docs/review-fix-state-model.md §6, lines 585-601: "the churn-history fallback must never scan past the most recent ambiguous_provenance_restart ... full stop")', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-finding-f', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // maps to 'Claude' — a THIRD actor, distinct from both open events below
+      lastEdited: '2026-08-30T10:00:00.000Z',
+    })],
+    events: [
+      // Ambiguous-provenance open event for actor 'Chris' — a different
+      // actor than desiredActor, so it lands in `otherActor` (not the
+      // sameActor ambiguousOpenEvent branch) and closes THIS SAME call as
+      // `ambiguous_provenance_restart`. Listed FIRST so the pre-fix loop
+      // (which returns on the first same-call entry that inherits) would
+      // skip straight past it without ever treating it as a cutoff.
+      eventPage('evt-f-ambiguous', {
+        actor: 'Chris',
+        startedAt: '2026-08-01T00:00:00.000Z',
+        endedAt: null,
+        note: 'Task Origin=ambiguous-pre-upgrade',
+      }),
+      // Ordinary open event for a SECOND, different actor — closes THIS
+      // SAME call as an ordinary `reassignment`, already correctly
+      // classified 'Review Fix'. Listed AFTER the restart above so the
+      // pre-fix loop reaches it and (wrongly) returns its Work Type.
+      eventPage('evt-f-ordinary', {
+        actor: 'Codex',
+        startedAt: '2026-08-20T00:00:00.000Z',
+        endedAt: null,
+        note: '',
+        workType: 'Review Fix',
+      }),
+    ],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /closed_ambiguous_provenance_restart:evt-f-ambiguous/);
+  assert.match(summary.outcomes[0], /closed_reassigned:evt-f-ordinary/);
+  assert.match(summary.outcomes[0], /opened:/);
+
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.notEqual(
+    created.properties['Work Type'] && created.properties['Work Type'].select.name,
+    'Review Fix',
+    'a same-call ambiguous_provenance_restart for ONE actor must block inheritance from EVERY other same-call close, including an ordinary reassignment for a DIFFERENT actor — the restart is a hard cutoff for this poll\'s classification regardless of which actor it belongs to or where it sits in the closed-events list'
+  );
+  assert.equal(
+    created.properties['Work Type'].select.name, 'Initial Work',
+    'with the restart correctly blocking the co-occurring ordinary reassignment, and no genuine boundary or Sync Log history on the near side, this is a fresh, unclassified-history execution'
+  );
+});
+
+test('Finding G (P1, ADP-051-B2/B3 fixup round 4): a cross-poll churn candidate whose Note carries an explicit Execution= identity must match the new event\'s own expected execution — a same-actor close from a DIFFERENT, unrelated execution is not inherited from merely because it is the most recently closed event (docs/review-fix-state-model.md §6, lines 562-576: identity is primary "regardless of which poll observed the close/reopen", and the Reason/Boundary heuristic applies "only" when the outgoing event has no Execution= at all)', () => {
+  const { sandbox, fetchLog } = harness({
+    tasks: [taskPage('task-finding-g', {
+      status: 'In Progress',
+      agent: 'Claude Opus', // newly (re)assigned — a genuinely NEW execution B
+      lastEdited: '2026-09-10T10:00:00.000Z',
+      // Execution B's own fresh Started At — well after execution A's own
+      // Execution= identity below, proving the Task left and reopened as a
+      // genuinely different execution, not a continuation of A.
+      startedAt: '2026-09-10T10:00:00.000Z',
+    })],
+    events: [eventPage('evt-execution-a', {
+      actor: 'Chris',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      // Execution A already closed — by an EARLIER poll — via an ordinary
+      // assignee-clear `Reason=reassignment`, with its own `Execution=`
+      // identity explicitly stamped (not legacy data).
+      endedAt: '2026-08-01T05:00:00.000Z',
+      note: 'Reason=reassignment | End Status=In Progress | Write=1000 | Execution=2026-08-01T00:00:00.000Z',
+      workType: 'Review Fix',
+    })],
+  });
+
+  const summary = sandbox.pollTaskChanges();
+
+  assert.equal(summary.processed, 1);
+  assert.match(summary.outcomes[0], /^opened:/);
+  const creates = requestsTo(fetchLog, 'POST', '/v1/pages');
+  assert.equal(creates.length, 1);
+  const created = JSON.parse(creates[0].options.payload);
+  assert.notEqual(
+    created.properties['Work Type'] && created.properties['Work Type'].select.name,
+    'Review Fix',
+    'must not inherit execution A\'s Work Type merely because A is the most recently closed same-actor event — A\'s own Execution= identity does not match this genuinely new execution B\'s own expected identity'
+  );
+  assert.equal(
+    created.properties['Work Type'].select.name, 'Initial Work',
+    'execution A\'s Reason=reassignment close is not itself a genuine boundary, but with its Execution= correctly rejected as a mismatch and no Sync Log history at all, this is a fresh, unclassified-history execution'
+  );
+});
