@@ -4,7 +4,7 @@
 > **規程ID:** R06  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-11 JST  
+> **最終改定日:** 2026-09-13 JST  
 > **関連規程:** R01 組織規程 / R02 職務権限規程 / R03 決裁規程 / R04 文書管理規程 / R05 システム開発管理規程  
 > **移管元:** `docs/operating-guide.md` §1、§7、§8、§9、§10、§11、§13、§14
 
@@ -116,9 +116,10 @@ Weekly Sprintは、原則として次の順で管理する。
 2. **Sprint Review** — 成果、未完了、Blockerを確認する。
 3. **Retrospective** — Keep / Problem / Tryと改善入力を記録する。
 4. **Backlog Refinement** — MISC受付の正式配置、構造とHowを再評価する。
+4.5. **Task / Story State Reconciliation** — terminal Taskから後続TaskのDependency ReleaseとParent Storyの完了判定を行う。
 5. **Sprint Close** — 未完了項目の扱いを明示してSprintを閉じる。
 6. **Sprint Goal Review** — 新しい事実に基づきGoalを再評価する。
-7. **Sprint Planning** — Ready workから次Sprintを構成する。
+7. **Sprint Planning** — Ready workとCommitted Storyの依存チェーンから次Sprintを構成する。
 
 実行Howは `cloud42-labo/skills` の `weekly-sprint` Compositeおよび構成Skillを正本とし、Scheduler / Routineには詳細手順を重複保持しない。
 
@@ -129,6 +130,8 @@ Weekly Sprintは、原則として次の順で管理する。
 3. Human Gate、依存関係、Reviewer capacityその他の既知制約を考慮する。
 4. 未完了Taskを自動的に次Sprintへcarry overしない。Sprint Closeで継続、分割、Backlog戻し、Superseded等を明示する。
 5. Refinementの結果、上位構造または外部前提が変わった場合はSprint Goal自体を見直す。
+6. StoryをCommittedにする場合、その時点でReadyなTaskだけを選択して完了計画とみなしてはならない。Story Acceptance Criteria達成に必要なRequired child work、依存順、Future Ready条件およびStory完了判定点をExecution Chainとして明示する。
+7. Planning時点で依存未解消のFuture Ready Taskを先行してReadyへ変更しない。依存条件が満たされた時点で第14条の2に従い再評価する。
 
 ## 第11条 ReviewとRefinement
 
@@ -156,6 +159,7 @@ Taskを分割・置換する場合は、DoneではなくSupersededを用いる�
 4. 後工程だけのHuman-only条件を、現在の開発・Review・mergeを止める理由にしない。
 5. Human Gateは定期的に再評価し、証拠が到着したら速やかに解除する。
 6. Human Queueは高コストな例外処理としてWIPを管理し、AIで縮小できる準備・代替作業を優先する。
+7. Blockerの原因となるTaskまたは条件が解消した場合、後続TaskのBlockerとDefinition of Readyを速やかに再評価する。解消済みBlockerの文言だけを残し、Backlog / Blockedへ滞留させてはならない。
 
 ## 第14条 Definition of Done
 
@@ -172,6 +176,19 @@ TaskをDoneとするには、原則として次を満たす。
 9. Task自身のAcceptance Criteriaに必要なHuman / 他Agent作業が残っていない。
 
 詳細なDoD判定は下位基準として管理する。
+
+TaskをDoneまたはSuperseded等のterminal状態へ遷移させたActorは、その状態変更を孤立させず、第14条の2のState Reconciliationを実行する。即時実行が漏れた場合はDaily CloseおよびWeekly Sprintが補償制御として再実行する。
+
+## 第14条の2 Task / Story State Reconciliation
+
+1. **Dependency Release** — terminalになったTaskに依存する後続Taskについて、状態名だけではなく成果・置換関係・依存条件の実質を確認する。依存が解消し、他のBlockerがなく、Definition of Readyと必要なApproach Reviewを満たす場合は、Blockerを解消し `Status = Ready` へ遷移する。
+2. Superseded / ReplacedはDependency充足と同義ではない。置換先Taskを追跡し、依存条件が既に満たされたのか、置換先へ移ったのかを確認する。
+3. **Story Completion Roll-up** — terminalになったTaskのParent Storyについて、Required child work、置換関係、Human / 外部作業、Story自身のAcceptance Criteriaを評価する。
+4. StoryをDoneとするには、Story Outcomeに必要なRequired workがすべてterminalで置換関係が収束し、Story Acceptance Criteriaを成果証拠に照らして満たし、Story Outcomeに必要なHuman / 外部作業が残っていないことを要する。
+5. StoryをDoneとする場合は、`Status = Done`、`Closure Reason = Done`、`Completed At`、`Result`のStory Outcomeと主要証拠を記録する。StoryはTask Time Eventを持つ実行単位ではないため、TaskのTime Event完了条件をそのまま適用しない。
+6. Story Acceptance Criteriaが未達の場合、子Task件数だけを根拠にStoryをDoneとしてはならない。不足AC、Active child、未解消Blockerまたはmissing workを明示する。
+7. missing workが新たに必要な場合は、第2条の新規Task受付原則に従い `MISC｜... / Backlog` として起票し、Backlog Refinementへ渡す。
+8. State ReconciliationはTask terminal transition直後を原則とし、Daily CloseおよびWeekly Sprintで補償的に再実行する。詳細手順は `cloud42-labo/skills` の `task-state-reconcile` を正本とする。
 
 ## 第15条 Time Eventと管理計測
 
