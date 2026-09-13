@@ -3804,6 +3804,27 @@ function classifyWorkTypeStatus_(status) {
 // candidates all agreeing) still resolves normally, matching every other
 // `ambiguousCutoffTie`/`windowTruncatedAmbiguous` sentinel already
 // established in this file.
+//
+// Finding N (ADP-051-B2/B3 fixup round 8): agreeing `endStatus` alone is not
+// proof the tied candidates are interchangeable. A GENUINE boundary
+// (`Reason=left_in_progress`) supplies its own End Status= directly — real
+// evidence. A RETROACTIVE boundary (`Boundary=left_in_progress` stamped
+// later by `stampExecutionBoundary_` onto a `reassignment`/
+// `duplicate_reconciliation` close) has a STALE End Status= that §3 step 1/3
+// forbids reading directly at all — it merely happens to still read the same
+// text as the genuine candidate right now, which says nothing about whether
+// the retroactive candidate's true (Sync-Log-sourced) status actually
+// agrees. Trusting a same-`endStatus` tie between one genuine and one
+// retroactive candidate therefore risks silently picking whichever of the
+// two the query happened to return first, exactly the query-order bug
+// Finding M already fixed for the differing-`endStatus` case — just reached
+// through a different gap (a `kind` mismatch hiding behind an
+// `endStatus` match instead of showing up in it). So a tie additionally
+// conflicts whenever the tied candidates' `kind` (`genuine` vs
+// `retroactive`) differs, even when `endStatus` happens to match — reusing
+// the same `conflictingTie` sentinel Finding M established, not a new shape.
+// A tie between two candidates that agree on BOTH `kind` and `endStatus`
+// remains non-conflicting, unchanged from Finding M.
 function mostRecentBoundaryCandidate_(allEvents) {
   const candidates = [];
   (allEvents || []).forEach(function (eventPage) {
@@ -3830,7 +3851,11 @@ function mostRecentBoundaryCandidate_(allEvents) {
   const conflictingTie = candidates.some(function (candidate) {
     if (candidate === best) return false;
     if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) !== 0) return false;
-    return candidate.endStatus !== best.endStatus;
+    // Finding N: a kind mismatch (genuine vs retroactive) is a conflict on
+    // its own, independent of whether endStatus happens to match — see this
+    // function's header comment for why an agreeing endStatus is not proof
+    // of interchangeability here.
+    return candidate.endStatus !== best.endStatus || candidate.kind !== best.kind;
   });
   if (conflictingTie) return { conflictingTie: true };
   return best;
@@ -4520,18 +4545,73 @@ function resolveChurnInheritedWorkType_(outgoingEvent, options) {
 // found: the most recent close by TIMESTAMP is not necessarily part of the
 // SAME execution the new event is about to open into once a Task can leave
 // and fully reopen between polls.
+//
+// Finding O (P1, ADP-051-B2/B3 fixup round 8): when two legacy closes fall
+// in the same Notion minute and neither carries a usable `Write=`,
+// `compareInstants_` returns `0` and the `> 0`-only scan below (unchanged
+// from before this fix) silently keeps whichever candidate the query
+// happened to return first — the same order-dependent-tie shape Finding M
+// fixed inside `mostRecentBoundaryCandidate_`, but this is a structurally
+// SEPARATE selector Finding M's fix never reached. Here the consequence is
+// worse than an ambiguous Work Type: if the query-order "winner" happens to
+// be an ordinary `reassignment` close while a tied `ambiguous_provenance_
+// restart` or genuine execution-boundary close (`isExecutionBoundary_`) sits
+// at the exact same instant, `resolveChurnInheritedWorkType_` lets
+// inheritance proceed via the reassignment — silently CROSSING the hard
+// restart/boundary cutoff §6 (L585-601) establishes "full stop", via a tie
+// rather than the scan-order bug round 4's Finding F already closed.
+//
+// §6's cutoff is not "go ambiguous when uncertain" — it is a categorical
+// rule that a restart (or any execution boundary) always wins over churn on
+// its near side, precisely because Notion's minute granularity can never
+// prove the two didn't happen in the boundary-first order, and reaching past
+// a boundary that might have happened first is the one mistake this cutoff
+// exists to rule out. So an unresolvable tie between a blocking candidate
+// (`isExecutionBoundary_`, or `Reason=ambiguous_provenance_restart`) and a
+// non-blocking one (an ordinary `reassignment`/`duplicate_reconciliation`
+// close) is resolved by the blocking candidate categorically winning — never
+// by silently keeping query order, and never by a generic "unresolved"
+// sentinel that would leave the restart's own hard-cutoff guarantee
+// unenforced. A tie between two candidates that agree on blocking-ness
+// (both block, or neither does) has no such disagreement to hide and
+// resolves exactly as before.
 function mostRecentlyClosedEvent_(allEvents) {
-  let best = null;
+  const candidates = [];
   (allEvents || []).forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
     if (!endedAt) return;
     const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
-    const instant = { timestamp: endedAt, write: meta.write };
-    if (!best || compareInstants_(instant, { timestamp: best.endedAt, write: best.write }) > 0) {
-      best = { event: eventPage, endedAt: endedAt, write: meta.write };
-    }
+    candidates.push({
+      event: eventPage,
+      endedAt: endedAt,
+      write: meta.write,
+      // Same "does this close categorically stop inheritance" test §6 and
+      // resolveChurnInheritedWorkType_ already apply: a genuine/retroactive
+      // execution boundary, or an ambiguous_provenance_restart close.
+      blocks: isExecutionBoundary_(meta) || meta.reason === 'ambiguous_provenance_restart',
+    });
   });
-  return best ? best.event : null;
+  if (!candidates.length) return null;
+  let best = candidates[0];
+  for (let idx = 1; idx < candidates.length; idx++) {
+    const candidate = candidates[idx];
+    if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) > 0) {
+      best = candidate;
+    }
+  }
+  // Finding O: if `best` does not block inheritance but ties (at Notion-
+  // minute + Write= granularity, per compareInstants_) with a candidate that
+  // DOES, the blocking candidate must win — never let query order decide
+  // whether a hard restart/boundary cutoff applies. `best` already blocking
+  // (or every tied candidate agreeing with it) needs no change.
+  if (!best.blocks) {
+    const blockingTie = candidates.find(function (candidate) {
+      if (candidate === best || !candidate.blocks) return false;
+      return compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) === 0;
+    });
+    if (blockingTie) best = blockingTie;
+  }
+  return best.event;
 }
 
 // docs/review-fix-state-model.md §6: whether a churn-inheritance CANDIDATE

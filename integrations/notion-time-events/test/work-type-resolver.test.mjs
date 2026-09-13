@@ -451,6 +451,128 @@ test('failure #12: a Reason=reassignment close that ALSO carries a retroactive B
 });
 
 // ---------------------------------------------------------------------------
+// Finding O (ADP-051-B2/B3 fixup round 8): mostRecentlyClosedEvent_ — the
+// SEPARATE cross-poll churn-candidate selector step 3 of
+// resolveNewTimeEventWorkTypeSafely_ falls back to — had no conflicting-tie
+// sentinel of its own. Finding M/N's fix lives inside
+// mostRecentBoundaryCandidate_ and never reaches this function. Consequence:
+// when the most-recently-closed candidate is genuinely unorderable (same
+// Notion minute, no Write=) against a tied candidate that would produce a
+// DIFFERENT churn-inheritance outcome — a restart/execution-boundary close
+// (categorically blocks, §6 L585-601 "full stop") tied against an ordinary
+// reassignment close (would inherit) — the pre-fix `> 0`-only scan silently
+// kept whichever candidate the query happened to return first, letting
+// inheritance cross the hard restart/boundary cutoff on an unlucky query
+// order. Per §6's categorical "full stop" wording (not "ambiguous when
+// uncertain"), the fix makes the blocking candidate win any such tie
+// outright, rather than surfacing a generic unresolved sentinel — see
+// mostRecentlyClosedEvent_'s own header comment for the reasoning.
+// ---------------------------------------------------------------------------
+
+test('Finding O (P1, ADP-051-B2/B3 fixup round 8): an ambiguous_provenance_restart close tied at the same Notion minute against an ordinary reassignment close — no Write= on either side — must not let cross-poll churn inheritance cross the restart cutoff via query order (docs/review-fix-state-model.md §6, L585-601: the restart cutoff is a categorical "full stop", not merely ambiguous)', () => {
+  const { sandbox } = harness();
+  const restartClose = eventPage('evt-o-restart', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=ambiguous_provenance_restart'),
+    workType: 'Review Fix', // deliberately the WRONG answer if ever wrongly inherited
+  });
+  const reassignmentClose = eventPage('evt-o-reassignment', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:30.000Z', // same Notion minute as the restart; neither side carries Write=
+    note: note('Reason=reassignment'),
+    workType: 'Review Fix',
+  });
+
+  // Cross-poll fallback (step 3) only triggers when NOTHING was closed this
+  // SAME call — an empty otherActorEvents list makes both closes reachable
+  // only via mostRecentlyClosedEvent_(allEvents).
+  const resultA = sandbox.resolveNewTimeEventWorkTypeSafely_(TASK_ID, [restartClose, reassignmentClose], []);
+  assert.equal(resultA.inherited, false, 'the restart is a hard cutoff (§6 L585-601) — a tied reassignment must never inherit through it');
+  assert.equal(resultA.workType, 'Initial Work', 'no boundary/Sync Log evidence survives once inheritance is correctly blocked — a fresh, unclassified-history execution');
+
+  // Order independence: this ordering is the one that exposed the pre-fix
+  // bug. The pre-fix `> 0`-only scan in mostRecentlyClosedEvent_ kept
+  // whichever candidate came FIRST on an unresolvable tie — listing the
+  // reassignment first used to let it silently win and cross the cutoff.
+  // This exact assertion (resultB.inherited === false) would have FAILED
+  // before this fix (it returned true with workType 'Review Fix') and
+  // passes after.
+  const resultB = sandbox.resolveNewTimeEventWorkTypeSafely_(TASK_ID, [reassignmentClose, restartClose], []);
+  assert.equal(resultB.inherited, false, 'swapping query order must not change the outcome — the restart must still categorically block inheritance');
+  assert.equal(resultB.workType, 'Initial Work');
+});
+
+test('Finding O (P1, ADP-051-B2/B3 fixup round 8, execution-boundary variant): a genuine execution-boundary close (Reason=left_in_progress) tied at the same Notion minute against an ordinary reassignment close must also block cross-poll churn inheritance — the blocking check covers isExecutionBoundary_, not only ambiguous_provenance_restart (docs/review-fix-state-model.md §6)', () => {
+  const { sandbox } = harness();
+  const boundaryClose = eventPage('evt-o-boundary', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=left_in_progress', 'End Status=Review'),
+    workType: 'Review Fix',
+  });
+  const reassignmentClose = eventPage('evt-o-boundary-reassignment', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:30.000Z', // same Notion minute, no Write=
+    note: note('Reason=reassignment'),
+    workType: 'Initial Work', // deliberately the WRONG answer if ever wrongly inherited
+  });
+
+  const resultA = sandbox.resolveNewTimeEventWorkTypeSafely_(TASK_ID, [boundaryClose, reassignmentClose], []);
+  assert.equal(resultA.inherited, false, 'a genuine execution boundary tied with a reassignment must also block churn inheritance');
+
+  // Order independence — this ordering exposed the pre-fix bug: pre-fix,
+  // listing the reassignment first let it silently win the tie and inherit.
+  const resultB = sandbox.resolveNewTimeEventWorkTypeSafely_(TASK_ID, [reassignmentClose, boundaryClose], []);
+  assert.equal(resultB.inherited, false, 'swapping query order must not change the outcome');
+});
+
+test('Finding O (P1, ADP-051-B2/B3 fixup round 8, companion — no false positive): two ordinary reassignment closes tied at the same Notion minute (no Write=) — neither blocks inheritance, so cross-poll churn inheritance still proceeds normally, unaffected by Finding O\'s new blocking-tie check (docs/review-fix-state-model.md §6)', () => {
+  const { sandbox } = harness();
+  const reassignmentA = eventPage('evt-o-same-a', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=reassignment'),
+    workType: 'Review Fix',
+  });
+  const reassignmentB = eventPage('evt-o-same-b', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:30.000Z', // same Notion minute, no Write=
+    note: note('Reason=reassignment'),
+    workType: 'Review Fix',
+  });
+
+  const result = sandbox.resolveNewTimeEventWorkTypeSafely_(TASK_ID, [reassignmentA, reassignmentB], []);
+
+  assert.equal(result.inherited, true, 'neither tied candidate blocks inheritance — Finding O\'s new check must not turn this into a false-positive block');
+  assert.equal(result.workType, 'Review Fix');
+});
+
+test('Finding O (P1, ADP-051-B2/B3 fixup round 8, no-regression check — Finding F): a same-call ambiguous_provenance_restart still categorically blocks a same-call reassignment for a DIFFERENT actor via steps 1/2 — Finding O only touches the SEPARATE cross-poll step 3 selector (docs/review-fix-state-model.md §6, L585-601)', () => {
+  const { sandbox } = harness();
+  const restart = eventPage('evt-o-f-restart', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=ambiguous_provenance_restart'),
+  });
+  const reassignment = eventPage('evt-o-f-reassignment', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T09:00:00.000Z', // strictly later, NOT tied — same-call list, not cross-poll
+    note: note('Reason=reassignment'),
+    workType: 'Review Fix',
+  });
+
+  const result = sandbox.resolveNewTimeEventWorkTypeSafely_(
+    TASK_ID,
+    [restart, reassignment],
+    [{ event: restart, closeReason: 'ambiguous_provenance_restart' }, { event: reassignment, closeReason: 'reassignment' }]
+  );
+
+  assert.equal(result.inherited, false, 'Finding F\'s same-call restart cutoff (steps 1/2) must still block the co-occurring reassignment, unchanged by Finding O\'s cross-poll-only fix');
+  assert.equal(result.workType, 'Initial Work');
+});
+
+// ---------------------------------------------------------------------------
 // §4: evidence priority & timestamp-tie resolution (compareInstants_ itself)
 // ---------------------------------------------------------------------------
 
@@ -605,6 +727,67 @@ test('Finding M (P2, ADP-051-B2/B3 fixup round 7, no-regression check): Write= s
 
   assert.equal(result.unresolved, false, 'Write=2000 unambiguously outranks Write=1000 within the same Notion minute — this is a resolvable order, not a conflicting tie');
   assert.equal(result.classification, 'Initial Work', 'the later-Write= candidate (End Status=Backlog) must win outright');
+  assert.equal(result.reasonCode, 'genuine_boundary_only');
+});
+
+// ---------------------------------------------------------------------------
+// Finding N (ADP-051-B2/B3 fixup round 8): mostRecentBoundaryCandidate_'s
+// conflicting-tie check (Finding M) only compared End Status= — but a
+// GENUINE boundary (Reason=left_in_progress, its own End Status= is real
+// evidence) and a RETROACTIVE boundary (Boundary=left_in_progress stamped
+// later onto a reassignment/duplicate_reconciliation close, whose End
+// Status=/Ended At are STALE per §3 step 1 and must never be read directly)
+// are not interchangeable even when their End Status= happens to read the
+// same right now. A same-minute, Write=-less tie between the two kinds must
+// still surface as ambiguous, reusing Finding M's `conflictingTie` sentinel.
+// ---------------------------------------------------------------------------
+
+test('Finding N (P2, ADP-051-B2/B3 fixup round 8): a GENUINE boundary tied with a RETROACTIVE boundary at the same Notion minute — SAME End Status=, no Write= to break the tie — still surfaces an explicit ambiguous outcome, since the retroactive candidate\'s matching End Status= is not proof of agreement (its own status is stale and never read directly per §3 step 1) (docs/review-fix-state-model.md §3 step 1, §4)', () => {
+  const { sandbox } = harness();
+  const genuineBoundary = eventPage('evt-n-genuine', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=left_in_progress', 'End Status=Review'),
+  });
+  const retroactiveBoundary = eventPage('evt-n-retroactive', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:30.000Z', // same Notion minute as genuine; neither side carries Write=
+    // Same End Status=Review as the genuine candidate above — but this is a
+    // STALE value left over from the original reassignment close, only
+    // Boundary=left_in_progress was added later by stampExecutionBoundary_.
+    note: note('Reason=reassignment', 'Boundary=left_in_progress', 'End Status=Review'),
+  });
+
+  const result = sandbox.resolveWorkType_(TASK_ID, [genuineBoundary, retroactiveBoundary]);
+
+  assert.equal(result.unresolved, true, 'a genuine boundary tied with a retroactive boundary is not interchangeable even when End Status= happens to match — Finding M\'s endStatus-only check misses exactly this gap');
+  assert.equal(result.classification, null);
+  assert.equal(result.reasonCode, 'boundary_conflicting_tie_ambiguous');
+
+  // Order independence, same as Finding M's own regression test.
+  const swapped = sandbox.resolveWorkType_(TASK_ID, [retroactiveBoundary, genuineBoundary]);
+  assert.equal(swapped.unresolved, true);
+  assert.equal(swapped.classification, null);
+  assert.equal(swapped.reasonCode, 'boundary_conflicting_tie_ambiguous');
+});
+
+test('Finding N (P2, ADP-051-B2/B3 fixup round 8, companion — no false positive): two boundary candidates tied at the same Notion minute with the SAME kind AND the SAME End Status= still classify normally — no actual disagreement to surface (docs/review-fix-state-model.md §3 step 1, §4)', () => {
+  const { sandbox } = harness();
+  const boundaryA = eventPage('evt-n-same-a', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:00.000Z',
+    note: note('Reason=left_in_progress', 'End Status=Review'),
+  });
+  const boundaryB = eventPage('evt-n-same-b', {
+    startedAt: '2026-08-01T00:00:00.000Z',
+    endedAt: '2026-08-01T08:00:30.000Z', // same Notion minute, no Write=
+    note: note('Reason=left_in_progress', 'End Status=Review'), // same kind (genuine) AND same End Status=
+  });
+
+  const result = sandbox.resolveWorkType_(TASK_ID, [boundaryA, boundaryB]);
+
+  assert.equal(result.unresolved, false, 'both tied candidates agree on kind AND End Status= — no actual disagreement in the answer, so this must not be flagged as ambiguous (must not over-broaden Finding N)');
+  assert.equal(result.classification, 'Review Fix');
   assert.equal(result.reasonCode, 'genuine_boundary_only');
 });
 
