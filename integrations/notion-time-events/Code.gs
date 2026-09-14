@@ -3831,6 +3831,32 @@ function mostRecentBoundaryCandidate_(allEvents) {
     return candidate.endStatus !== best.endStatus || candidate.kind !== best.kind;
   });
   if (conflictingTie) return { conflictingTie: true };
+  // Codex Review (PR #55): a HARMLESS tie (same endStatus and kind, so no
+  // conflictingTie above) can still leave `best` as whichever candidate
+  // this scan reached first, when neither side's Write= broke the tie —
+  // e.g. one candidate has a real Write= and the other has none at all,
+  // which is itself a `compareInstants_` tie (0), not a difference. The
+  // classification these two candidates produce is identical (agreeing
+  // endStatus/kind), but the raw `write`/`event` this function RETURNS
+  // would still differ by query order — and a future caller reading
+  // `.write` directly (the same pattern resolveWorkType_'s existing
+  // same-cycle Sync Log check already uses via compareWriteOnly_) could
+  // get a different, query-order-dependent answer from that alone.
+  // Canonicalize: among candidates that tie with `best` and agree with it
+  // (the exact set the check above already treats as harmless), prefer
+  // one that actually HAS a Write= over `best` when `best` itself lacks
+  // one — never the reverse (two present Write= values that tie must be
+  // numerically equal, per compareInstants_, so swapping cannot change
+  // anything there).
+  if (best.write === undefined || best.write === null || best.write === '') {
+    const moreInformative = candidates.find(function (candidate) {
+      if (candidate === best) return false;
+      if (!sameNotionMinute(candidate.endedAt, best.endedAt)) return false;
+      if (candidate.endStatus !== best.endStatus || candidate.kind !== best.kind) return false;
+      return candidate.write !== undefined && candidate.write !== null && candidate.write !== '';
+    });
+    if (moreInformative) best = moreInformative;
+  }
   return best;
 }
 
