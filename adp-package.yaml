@@ -31,12 +31,13 @@ version: 0.1.0
 schema_version: 0.1.0-experimental
 
 # Version of the Rules asset class (README.md, AGENTS.md,
+# docs/regulations/README.md and R01-R06,
 # governance/ai-execution-constraints.md, governance/source-of-truth.md,
 # governance/research-security-policy.md,
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 3.0.0
+rules_version: 3.1.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -302,3 +303,19 @@ migration_path:
       state rather than only same-day transitions. Story closure must be
       based on Story Acceptance Criteria and required child outcomes, not
       child Task count alone.
+  - field: rules_version
+    from: "3.0.0"
+    to: "3.1.0"
+    date: "2026-09-14"
+    change: >-
+      ADP-054-T18: the R01-R06 regulation hierarchy is now exposed through
+      the Rules package index, and R06 adds binding Task / Story State
+      Reconciliation after terminal transitions. This is additive MINOR:
+      existing Rules are retained while adopters gain a new mandatory
+      reconciliation constraint and a discoverable normative index.
+    action_required: >-
+      Adopters must include docs/regulations/README.md and applicable R01-R06
+      in their Rules set. After a Task or Story reaches a terminal state,
+      reconcile downstream dependencies and affected Story completion before
+      allowing the state change to remain isolated; compensation runs must
+      converge missing work through Backlog Refinement before Sprint Planning.
