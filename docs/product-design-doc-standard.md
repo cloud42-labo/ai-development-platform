@@ -15,9 +15,9 @@ memory or a Task that will eventually be archived.
 
 Product Vision quality itself is governed by
 [`product-vision-quality-standard.md`](product-vision-quality-standard.md).
-A Human Raw Idea or provisional Vision is valid during Idea / Experimental
-work, but it is not an Approved Vision and cannot permanently justify
-downstream Epic structure.
+A Human Raw Idea or provisional Vision is valid during Idea / Vibe /
+Experimental work, but it is not an Approved Vision and cannot permanently
+justify downstream Epic structure.
 
 ## The flow
 
@@ -25,16 +25,19 @@ downstream Epic structure.
 Human Raw Idea
       │
       ▼
-Idea / Experimental ── primary evidence / learning
+Idea / Vibe / Experimental ── primary evidence / learning
       │
       ▼
 Human × AI Vision re-articulation
       │
       ▼
-Product Vision Quality Gate + Owner acceptance
+Product Vision Quality Gate + auditable Owner acceptance
       │
       ▼
 Approved Product Vision (Why / desired future state)
+      │
+      ▼
+Project / Development planning
       │
       ▼
 Inception Deck (Starting Alignment)
@@ -50,24 +53,24 @@ PRD (What)
    └─────────┘
       │
       ▼
-Major pivot → re-run Vision Gate / revise downstream docs as needed
+Major pivot review → re-run Vision Gate / revise downstream docs as needed
 ```
 
 Product Vision and the Inception Deck are **Product-level**. The Vision may
-begin provisionally during exploration, but Product Registry / Product
-Planning entry requires an Approved Vision that passes the quality standard
-and has explicit Owner acceptance. The PRD is also **Product-level** (What
-the Product does as a whole), amended when a Story's requirement changes.
-The Design Doc is written **once per Product at development start** (How the
-Product works) and kept in sync — not recreated per Epic. An Epic Brief is a
-**lightweight, per-Epic** artifact: it does not duplicate the Product Vision,
-Inception Deck, or full PRD/Design Doc, only the scope of that Epic's change.
+begin provisionally during exploration, but formal R05 transitions that
+require an Approved Vision must pass the quality standard and carry explicit,
+auditable Owner acceptance. The PRD is also **Product-level** (What the Product
+does as a whole), amended when a Story's requirement changes. The Design Doc
+is written **once per Product at development start** (How the Product works)
+and kept in sync — not recreated per Epic. An Epic Brief is a **lightweight,
+per-Epic** artifact: it does not duplicate the Product Vision, Inception Deck,
+or full PRD/Design Doc, only the scope of that Epic's change.
 
 ## Where each document lives
 
 | Document | Canonical path | Scope | Created | Synced |
 |---|---|---|---|---|
-| Product Vision | `docs/PRD.md` §1/§2 may carry an already-approved Product Vision; a separately-approved Vision may live at `docs/product-vision.md` and be linked from the PRD. In either case the content must pass `docs/product-vision-quality-standard.md`. | Product | provisional during Idea/Experimental; Approved before Product Registry / Product Planning | Major pivot / material evidence change |
+| Product Vision | `docs/PRD.md` §1/§2 may carry an already-approved Product Vision; a separately-approved Vision may live at `docs/product-vision.md` and be linked from the PRD. In either case the content must pass `docs/product-vision-quality-standard.md`. | Product | provisional during Idea/Vibe/Experimental; Approved before an R05 transition that requires it | Major pivot / material evidence change |
 | Inception Deck | `docs/inception-deck.md` | Product | Product start after Approved Vision | Major pivot only |
 | PRD | `docs/PRD.md` | Product | Product requirement definition | Any Epic that changes a requirement |
 | Design Doc | `design-doc.md` (repository root, matching this repository's and `management-simulation-game`'s existing convention) | Product | Development start | Any Epic that changes the design |
@@ -84,10 +87,11 @@ where the Epic already lives.
 Templates for all five are in `../templates/` (`product-vision.md`,
 `inception-deck.md`, `prd.md`, `design-doc.md`, `epic-brief.md`).
 
-- **Product Vision**: Vision Type / Lifecycle Stage / Purpose / Problem /
-  Opportunity / Evidence / Desired Future State or Outcome / Success Measures /
-  Assumptions / Unknowns / Non-goals / Owner Intent / AI Interpretation /
-  Downstream Boundary / Vision Gate / Revision Notes.
+- **Product Vision**: Vision Type / Canonical R05 Stage / Review Context /
+  Purpose / Problem / Opportunity / Evidence / Desired Future State or Outcome /
+  Success Measures / Assumptions / Unknowns / Non-goals / Owner Intent /
+  AI Interpretation / Downstream Boundary / Vision Gate / auditable Owner
+  Acceptance Reference / Revision Notes.
 - **Inception Deck**: Why / Elevator Pitch / Product Box / NOT List /
   Stakeholders / Solution Outline / Risks / Size & Milestones / Trade-off
   Sliders / Scope Boundary.
@@ -104,10 +108,14 @@ Templates for all five are in `../templates/` (`product-vision.md`,
 
 ## Vision lifecycle, concretely
 
+The canonical lifecycle is R05's seven stages: **Idea / Vibe / Experimental /
+Project / Development / Release Candidate / Product**. “Product Planning” and
+“Major Pivot” are planning/review contexts, not additional Stage values.
+
 - **Idea**: Human Raw Idea may be incomplete, intuitive, emotional, or solution-shaped. Preserve it as input; do not label it Approved merely to unblock planning.
-- **Experimental**: use prototypes/experiments/direct observation to create primary evidence. AI may challenge assumptions and propose alternative structures, but Human × AI dialogue must re-articulate the Vision from the evidence.
-- **Product Registry / Product Planning promotion**: require `Vision Decision = Approved` and Owner acceptance evidence under the Product Vision Quality Standard.
-- **Major pivot**: re-run the Vision Gate when target user/stakeholder, problem/opportunity, desired future state, or foundational evidence changes. Implementation-only changes do not automatically require Vision revision.
+- **Vibe / Experimental**: use demos/prototypes/experiments/direct observation to create primary evidence. AI may challenge assumptions and propose alternative structures, but Human × AI dialogue must re-articulate the Vision from the evidence.
+- **Project / Development promotion**: require `Vision Decision = Approved` and an auditable Owner acceptance reference when R05 requires an Approved Product Vision.
+- **Major pivot review**: re-run the Vision Gate when target user/stakeholder, problem/opportunity, desired future state, or foundational evidence changes. Implementation-only changes do not automatically require Vision revision.
 
 ## When to sync, concretely
 
@@ -130,4 +138,4 @@ existing Product. Existing Product artifacts are evaluated against the Vision
 Quality Gate when their lifecycle next requires an Approved Vision or when a
 material pivot is proposed. Do not silently rewrite Owner intent merely to
 make a legacy document pass the Gate; return `Revise` with the specific
-quality gap and obtain Owner acceptance for the revised Vision.
+quality gap and obtain auditable Owner acceptance for the revised Vision.
