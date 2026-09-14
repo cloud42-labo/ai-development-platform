@@ -349,3 +349,18 @@ test('query order independence: mostRecentBoundaryCandidate_ returns the identic
   assert.equal(forward.event.id, 'fresh');
   assert.equal(backward.event.id, 'fresh');
 });
+
+test('Codex Review (PR #55): a harmless tie (same endStatus/kind, no conflictingTie) between one candidate WITH a Write= and one WITHOUT canonically prefers the one with Write=, regardless of query order — a future caller reading .write directly must not get a query-order-dependent answer', () => {
+  const { sandbox } = harness();
+  const withWrite = eventPage('with-write', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=left_in_progress', 'End Status=Review', 'Write=1000') });
+  const withoutWrite = eventPage('without-write', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=left_in_progress', 'End Status=Review') });
+
+  const forward = sandbox.mostRecentBoundaryCandidate_([withWrite, withoutWrite]);
+  const backward = sandbox.mostRecentBoundaryCandidate_([withoutWrite, withWrite]);
+  assert.equal(forward.conflictingTie, undefined);
+  assert.equal(backward.conflictingTie, undefined);
+  assert.equal(forward.event.id, 'with-write');
+  assert.equal(backward.event.id, 'with-write');
+  assert.equal(forward.write, '1000');
+  assert.equal(backward.write, '1000');
+});
