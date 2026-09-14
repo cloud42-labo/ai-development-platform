@@ -405,3 +405,53 @@ test('Codex Review (PR #55 follow-up): a harmless tie where NEITHER candidate ca
   assert.equal(forward.event.id, backward.event.id);
   assert.equal(forward.endedAt.getTime(), backward.endedAt.getTime());
 });
+
+test('Codex Review (PR #55, redesign): a Write=-missing candidate must not act as a non-transitive bridge between two Write=-bearing candidates that are themselves definitively ordered — with three same-minute genuine candidates sharing endStatus/kind (Write=2000 at :00, no Write= at :15, Write=3000 at :30), the highest-Write candidate always wins, regardless of query order', () => {
+  const { sandbox } = harness();
+  const low = eventPage('low', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=left_in_progress', 'End Status=Review', 'Write=2000') });
+  const missing = eventPage('missing', { endedAt: '2026-08-01T08:00:15.000Z', note: note('Reason=left_in_progress', 'End Status=Review') });
+  const high = eventPage('high', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=left_in_progress', 'End Status=Review', 'Write=3000') });
+
+  const orderings = [
+    [low, missing, high],
+    [missing, high, low],
+    [high, low, missing],
+    [missing, low, high],
+  ];
+  orderings.forEach(function (events) {
+    const result = sandbox.mostRecentBoundaryCandidate_(events);
+    assert.equal(result.conflictingTie, undefined);
+    assert.equal(result.event.id, 'high');
+    assert.equal(result.write, '3000');
+  });
+});
+
+test('Codex Review (PR #55, cutoff redesign): syncLogScanCutoff_ canonicalizes equal-present-Write= ties to the earliest raw timestamp, regardless of row order', () => {
+  const { sandbox } = harness();
+  const rows = [
+    syncLogRow({ type: 'Story', receivedAt: '2026-08-01T08:00:00.000Z', write: '1000' }),
+    syncLogRow({ type: 'Story', receivedAt: '2026-08-01T08:00:30.000Z', write: '1000' }),
+  ];
+  const forward = sandbox.syncLogScanCutoff_(rows, [], null);
+  const backward = sandbox.syncLogScanCutoff_(rows.slice().reverse(), [], null);
+  assert.equal(forward.ambiguousCutoffTie, undefined);
+  assert.equal(backward.ambiguousCutoffTie, undefined);
+  assert.equal(forward.timestamp.toISOString(), backward.timestamp.toISOString());
+});
+
+test('Codex Review (PR #55, cutoff redesign): a Write=-missing row at the same Notion minute as two definitively-ordered Write=-bearing rows correctly remains ambiguousCutoffTie in EVERY row order — the missing row genuinely cannot be proven earlier or later than the higher-Write row, so this is real ambiguity, not an order-dependent bridging artifact (a naive best-then-tie scan can make `best` land on any of the three depending on order; the redesign\'s undominated-set computation must reach the same ambiguous verdict regardless)', () => {
+  const { sandbox } = harness();
+  const low = syncLogRow({ type: 'Story', receivedAt: '2026-08-01T08:00:00.000Z', write: '1000' });
+  const missing = syncLogRow({ type: 'Story', receivedAt: '2026-08-01T08:00:15.000Z', write: '' });
+  const high = syncLogRow({ type: 'Story', receivedAt: '2026-08-01T08:00:30.000Z', write: '2000' });
+
+  [
+    [low, missing, high],
+    [missing, high, low],
+    [high, low, missing],
+    [missing, low, high],
+  ].forEach(function (rows) {
+    const cutoff = sandbox.syncLogScanCutoff_(rows, [], null);
+    assert.equal(cutoff.ambiguousCutoffTie, true);
+  });
+});

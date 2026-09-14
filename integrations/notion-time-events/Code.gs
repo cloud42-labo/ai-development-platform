@@ -3798,83 +3798,68 @@ function mostRecentBoundaryCandidate_(allEvents) {
     });
   });
   if (!candidates.length) return null;
-  let best = candidates[0];
-  for (let idx = 1; idx < candidates.length; idx++) {
-    const candidate = candidates[idx];
-    if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) > 0) {
-      best = candidate;
-    }
-  }
+
   const sameNotionMinute = function (a, b) {
     return Math.floor(a.getTime() / 60000) === Math.floor(b.getTime() / 60000);
   };
-  // A same-Notion-minute tie between two candidates that agree on both
-  // `endStatus` and `kind` (genuine vs retroactive) is not an actual
-  // disagreement — no ambiguity to surface (round 7/8's own no-false-
-  // positive regression tests). Disagreement on either one, when the pair
-  // cannot be trusted to be safely ordered, is.
-  //
   // A pair CAN be trusted to be safely ordered by compareInstants_ (i.e.
-  // Write= genuinely settles it) only when NEITHER side is retroactive.
-  // Once a retroactive candidate is on either side of a same-minute pair,
-  // its Write= is a discovery-time stamp, not real event-time evidence
-  // (see this block's header comment, finding 2) — compareInstants_
-  // returning non-zero there is not proof of a real order, so that pair
-  // is treated as still-tied for this conflict check regardless of what
-  // compareInstants_ said.
-  const conflictingTie = candidates.some(function (candidate) {
-    if (candidate === best) return false;
-    if (!sameNotionMinute(candidate.endedAt, best.endedAt)) return false;
-    const involvesRetroactive = candidate.kind === 'retroactive' || best.kind === 'retroactive';
-    const instantsTie = compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) === 0;
-    if (!instantsTie && !involvesRetroactive) return false;
-    return candidate.endStatus !== best.endStatus || candidate.kind !== best.kind;
+  // Write= genuinely settles it) only when NEITHER side is retroactive AND
+  // they land in the same Notion minute. Once a retroactive candidate is on
+  // either side of a same-minute pair, its Write= is a discovery-time
+  // stamp, not real event-time evidence (see this block's header comment,
+  // finding 2) — compareInstants_ resolving the pair is not proof of a real
+  // order, so treat same-minute pairs involving a retroactive side as tied
+  // (0) regardless of what raw Write= comparison would say. Different
+  // Notion minutes are always trustworthy (a real `Ended At` difference),
+  // retroactive or not.
+  const boundaryCompare_ = function (a, b) {
+    if (sameNotionMinute(a.endedAt, b.endedAt) && (a.kind === 'retroactive' || b.kind === 'retroactive')) return 0;
+    return compareInstants_({ timestamp: a.endedAt, write: a.write }, { timestamp: b.endedAt, write: b.write });
+  };
+  // Codex Review (PR #55, third follow-up / redesign): rather than picking
+  // an arbitrary `best` via a single left-to-right scan and then gathering
+  // "whatever ties with best", compute the UNDOMINATED set directly — the
+  // candidates no other candidate is proven strictly later than. This is
+  // the mathematically well-defined "top" of the partial order
+  // boundaryCompare_ induces (candidates can be incomparable —
+  // boundaryCompare_ returning 0 means "cannot prove either way", not
+  // necessarily "identical") and is immune to the non-transitive-bridge bug
+  // a naive "ties with an arbitrarily-chosen best" check has: if A (no
+  // Write=) ties with B, and B ties with C, but B and C carry DIFFERENT
+  // present Write= values that definitively order them, a scan that only
+  // ever compares against a single `best` can let A bridge into the pool
+  // via whichever of B/C got picked as `best` first — even though C
+  // (say) actually dominates A too. Checking A against EVERY other
+  // candidate, not just `best`, closes that gap. Any pair that both land in
+  // the undominated set is provably tied (0) by boundaryCompare_'s
+  // antisymmetry: if neither dominates the other, both directions must
+  // return 0.
+  const undominated = candidates.filter(function (candidate) {
+    return !candidates.some(function (other) {
+      return other !== candidate && boundaryCompare_(other, candidate) > 0;
+    });
+  });
+  // A disagreement in `endStatus` or `kind` among candidates that cannot be
+  // proven to not be the true winner is a genuine ambiguity — never an
+  // arbitrary pick (rounds 7/8/P4-2's own regression tests).
+  const conflictingTie = undominated.some(function (a) {
+    return undominated.some(function (b) {
+      return a !== b && (a.endStatus !== b.endStatus || a.kind !== b.kind);
+    });
   });
   if (conflictingTie) return { conflictingTie: true };
-  // Codex Review (PR #55, incl. follow-up): a HARMLESS tie (same endStatus
-  // and kind, so no conflictingTie above) can still leave `best` as
-  // whichever candidate this scan reached first, when nothing in
-  // compareInstants_ broke the tie. Two sub-cases both need canonicalizing,
-  // or the raw `write`/`event`/`endedAt` this function RETURNS — and the
-  // cutoff B7 derives from it — would flip with `allEvents` query order:
-  //   (a) one candidate has a real Write= and another has none at all
-  //       (itself a compareInstants_ tie of 0, not a real difference) —
-  //       prefer the one that actually carries Write= evidence.
-  //   (b) two-or-more candidates that both carry a Write= (or both lack
-  //       one) still tie at Notion-minute granularity with matching raw
-  //       `endedAt` values not byte-identical — pick a fixed,
-  //       order-independent representative rather than "whichever the
-  //       scan saw first".
-  // Both are handled together: gather every candidate tied with `best`
-  // (best included), prefer the Write=-bearing subset when non-empty, then
-  // pick the earliest raw `endedAt` within that subset as the canonical
-  // representative — independent of `allEvents`' iteration order.
-  //
-  // Codex Review (PR #55, second follow-up): membership in this pool MUST
-  // require an actual compareInstants_ tie (0), not merely an agreeing
-  // endStatus/kind at the same Notion minute — two genuine boundaries can
-  // share both of those yet carry DIFFERENT present Write= values that
-  // compareInstants_ already used to order them definitively (e.g.
-  // 08:00:00/Write=1000 vs. 08:00:30/Write=2000: same minute, same
-  // endStatus/kind, but Write= settles it). Including such a pair here
-  // would let the earliest-endedAt reduction below silently discard that
-  // real ordering and return the OLDER, already-outranked candidate.
-  const tiedWithBest = candidates.filter(function (candidate) {
-    if (candidate === best) return true;
-    if (!sameNotionMinute(candidate.endedAt, best.endedAt)) return false;
-    if (candidate.endStatus !== best.endStatus || candidate.kind !== best.kind) return false;
-    return compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) === 0;
+  // Every remaining undominated candidate agrees on endStatus/kind — a
+  // harmless tie (or a single clear winner). Canonicalize independent of
+  // `allEvents` query order: prefer the Write=-bearing subset when
+  // non-empty (more informative than an absent Write=), then pick the
+  // earliest raw `endedAt` within that subset as a fixed representative.
+  const withWrite = undominated.filter(function (candidate) {
+    return candidate.write !== undefined && candidate.write !== null && candidate.write !== '';
   });
-  if (tiedWithBest.length > 1) {
-    const withWrite = tiedWithBest.filter(function (candidate) {
-      return candidate.write !== undefined && candidate.write !== null && candidate.write !== '';
-    });
-    const pool = withWrite.length ? withWrite : tiedWithBest;
-    best = pool.reduce(function (earliest, candidate) {
-      return candidate.endedAt.getTime() < earliest.endedAt.getTime() ? candidate : earliest;
-    }, pool[0]);
-  }
-  return best;
+  const pool = withWrite.length ? withWrite : undominated;
+  return pool.reduce(function (earliest, candidate) {
+    return candidate.endedAt.getTime() < earliest.endedAt.getTime() ? candidate : earliest;
+  }, pool[0]);
 }
 
 // docs/review-fix-state-model.md §3 step 2's hard history cutoff: the most
@@ -3908,29 +3893,37 @@ function syncLogScanCutoff_(rows, allEvents, restartCutoffOverride) {
   });
   if (restartCutoffOverride) candidates.push(restartCutoffOverride);
   if (!candidates.length) return null;
-  let best = candidates[0];
-  for (let idx = 1; idx < candidates.length; idx++) {
-    if (compareInstants_(candidates[idx], best) > 0) best = candidates[idx];
-  }
-  // Unlike mostRecentBoundaryCandidate_'s conflictingTie check, a tied
-  // candidate here carries no separate payload to disagree on — it is
-  // only ever compared as an instant. A tie where BOTH sides have a
-  // present, EQUAL Write= is a genuine, harmless simultaneity: the two
-  // candidates' instants are indistinguishable in every respect this
-  // function's caller can observe, so either one serves as an equally
-  // valid cutoff. A tie where Write= is missing on either side is the
-  // real ambiguity this guards against (see this block's header comment,
-  // finding 1) — the two candidates could be genuinely different real
-  // moments with no way to tell which, and the caller must not silently
-  // prefer whichever this scan reached first.
+  // Codex Review (PR #55, cutoff redesign): compute the UNDOMINATED set
+  // directly (same rationale as mostRecentBoundaryCandidate_'s redesign)
+  // instead of picking an arbitrary `best` via a left-to-right scan and
+  // then gathering "whatever ties with it" — that approach lets a
+  // Write=-missing candidate act as a non-transitive bridge between two
+  // Write=-bearing candidates that are themselves definitively ordered by
+  // compareInstants_. Any pair that both land in the undominated set is
+  // provably tied (0) by compareInstants_'s antisymmetry.
+  const undominated = candidates.filter(function (candidate) {
+    return !candidates.some(function (other) {
+      return other !== candidate && compareInstants_(other, candidate) > 0;
+    });
+  });
+  // A tie where BOTH sides have a present, EQUAL Write= is a genuine,
+  // harmless simultaneity: the candidates' instants are indistinguishable
+  // in every respect this function's caller can observe, so any one of
+  // them serves as an equally valid cutoff — canonicalize to the earliest
+  // raw timestamp so the returned representative doesn't depend on input
+  // order (Codex Review, PR #55 follow-up: "Canonicalize equal-Write cutoff
+  // ties"). A tie where Write= is missing on EITHER side among the
+  // undominated set is the real ambiguity this guards against (see this
+  // block's header comment, finding 1) — those candidates could be
+  // genuinely different real moments with no way to tell which, and the
+  // caller must not silently prefer whichever this scan reached first.
   const hasWrite = function (instant) {
     return instant.write !== undefined && instant.write !== null && instant.write !== '';
   };
-  const tieExists = candidates.some(function (candidate) {
-    if (candidate === best) return false;
-    if (compareInstants_(candidate, best) !== 0) return false;
-    return !hasWrite(candidate) || !hasWrite(best);
-  });
-  if (tieExists) return { ambiguousCutoffTie: true };
-  return best;
+  if (undominated.length > 1 && undominated.some(function (candidate) { return !hasWrite(candidate); })) {
+    return { ambiguousCutoffTie: true };
+  }
+  return undominated.reduce(function (earliest, candidate) {
+    return candidate.timestamp.getTime() < earliest.timestamp.getTime() ? candidate : earliest;
+  }, undominated[0]);
 }
