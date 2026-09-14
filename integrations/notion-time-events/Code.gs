@@ -3942,3 +3942,331 @@ function syncLogScanCutoff_(rows, allEvents, restartCutoffOverride) {
     return candidate.timestamp.getTime() < earliest.timestamp.getTime() ? candidate : earliest;
   }, undominated[0]);
 }
+
+// =============================================================================
+// ADP-051-B6: churn inheritance / Execution identity continuity
+// =============================================================================
+//
+// Work Type continuity and Execution identity propagation across a
+// reassignment/duplicate_reconciliation churn close, extracted from
+// PR #50 (ADP-051-B2/B3, Superseded after reaching the 9-round review
+// hard cap — docs/regulations/R06-project-management-regulation.md §11)
+// as their own independent change objective, per
+// docs/review-fix-state-model.md §6. Boundary/cutoff resolution
+// (isExecutionBoundary_, compareInstants_) is ADP-051-B4's scope — this
+// block calls those two functions directly rather than re-implementing
+// them, so it depends on B4 landing first (or being present on whatever
+// branch this is reviewed against). Sync Log I/O is ADP-051-B5's; wiring
+// resolveChurnInheritedWorkType_/mostRecentlyClosedEvent_/
+// churnCandidateExecutionMatches_ together with resolveWorkType_'s
+// ordinary §3 classification into resolveNewTimeEventWorkTypeSafely_ and
+// the live poll path is ADP-051-B7's — none of that combining logic ships
+// here. Nothing in this block is called from the live poll path yet.
+// docs/review-fix-state-model.md §6 (reassignment/churn inheritance):
+// whether a reassignment REPLACEMENT event inherits Work Type from the
+// outgoing sub-interval it continues, because it is the SAME execution
+// running under a different actor — never re-resolved via
+// resolveWorkType_, which classifies a genuinely NEW execution only.
+//
+// This function implements ONLY §6's second bullet — the legacy
+// Reason/Boundary heuristic (plus the restart/boundary cutoffs) — and does
+// NOT check Execution= identity itself. §6's FIRST bullet makes identity
+// matching the primary signal, required whenever `outgoingEvent` carries an
+// `Execution=` value at all, "regardless of which poll observed the
+// close/reopen" — i.e. this is not a same-poll-only or cross-poll-only
+// concern, it applies uniformly. That check needs the NEW event's own
+// expected execution identity, which this pure per-event function is never
+// given (round 1-3 callers never needed it; ADP-051-B2/B3 fixup round 4,
+// Finding G, added it) — so it is applied by the caller,
+// resolveNewTimeEventWorkTypeSafely_, via churnCandidateExecutionMatches_,
+// as a gate on top of whatever this function returns. Only when
+// `outgoingEvent` has NO `Execution=` at all (legacy data predating the
+// field) does this function's Reason/Boundary heuristic apply unguarded —
+// §6's stated exception, and exactly what this function was already doing
+// before round 4.
+//
+// `outgoingEvent` is one of the events this same reconciliation call just
+// closed (Reason=reassignment/duplicate_reconciliation, or the
+// ambiguous_provenance_restart variant) as the outgoing side of the
+// reassignment the new replacement event is about to open for. Returns:
+//   - `{ inherits: true, workType }` when this outgoing event genuinely
+//     continues into the current execution — `workType` is whatever this
+//     outgoing event's own `Work Type` Notion property already reads (may
+//     be `''` if that event was itself never classified — carried forward
+//     as still-unclassified, never invented here).
+//   - `{ inherits: false, reasonCode }` when this outgoing event does NOT
+//     establish continuity: either it is itself a genuine execution
+//     boundary (isExecutionBoundary_ — the same legacy Reason/Boundary
+//     check enforceDoneGate_ already trusts for Done-gate current-
+//     execution membership, per §6's second bullet and failure #33), or
+//     its own Reason is `ambiguous_provenance_restart` (§6 third bullet:
+//     a restart never inherits, and is a hard cutoff for any further
+//     history-scanning fallback — failure #26/#27).
+//
+// Deliberately reads `outgoingEvent.properties['Work Type']` directly
+// rather than making a Notion request of its own — this function is pure,
+// like every other function in this section.
+//
+// `options.closeReason`, when given, OVERRIDES the Reason this function
+// would otherwise parse from `outgoingEvent.properties.Note` — ADP-051-B3
+// fixup (Finding 1): `closeNotionTimeEvent_` only ever PATCHes Notion, it
+// never mutates the `eventPage` object it was given, so a caller that is
+// checking an event it JUST closed THIS SAME reconciliation call (before
+// the next fetch ever re-reads it) would otherwise see the stale
+// pre-close Note — which carries no `Reason=` at all — and wrongly
+// conclude `outgoing_event_not_a_churn_close` even though this event was
+// just closed with `Reason=reassignment`/`ambiguous_provenance_restart`.
+// A caller passing this MUST be the same code that performed (or is about
+// to perform) that exact close, so the override is trustworthy; it is
+// never used for an event read fresh from a query, where the real,
+// already-current Note is authoritative and must be parsed as normal.
+function resolveChurnInheritedWorkType_(outgoingEvent, options) {
+  if (!outgoingEvent) return { inherits: false, reasonCode: 'no_outgoing_event' };
+  const meta = parseNoteMeta_(propertyText_(outgoingEvent.properties.Note));
+  const closeReasonOverride = options && options.closeReason;
+  // An overridden reason always describes a FIRST-time close (this event
+  // was open, with no prior close, until this same call) — so it can never
+  // also carry a retroactively-stamped `Boundary=left_in_progress` from an
+  // earlier close; only the (necessarily stale, pre-close) parsed Boundary
+  // would exist, and it never applies here.
+  const effectiveReason = closeReasonOverride || meta.reason;
+  const effectiveBoundary = closeReasonOverride ? '' : meta.boundary;
+  if (effectiveReason === 'ambiguous_provenance_restart') {
+    return { inherits: false, reasonCode: 'ambiguous_provenance_restart_never_inherits' };
+  }
+  if (isExecutionBoundary_({ reason: effectiveReason, boundary: effectiveBoundary })) {
+    return { inherits: false, reasonCode: 'outgoing_event_is_execution_boundary' };
+  }
+  if (effectiveReason !== 'reassignment' && effectiveReason !== 'duplicate_reconciliation') {
+    return { inherits: false, reasonCode: 'outgoing_event_not_a_churn_close' };
+  }
+  const workTypeProp = outgoingEvent.properties['Work Type'];
+  const inheritedWorkType = (workTypeProp && workTypeProp.type === 'select' && workTypeProp.select)
+    ? workTypeProp.select.name
+    : '';
+  return { inherits: true, workType: inheritedWorkType, reasonCode: 'inherited_from_outgoing_churn_close' };
+}
+
+// docs/review-fix-state-model.md §6 (Finding 1, ADP-051-B3 fixup, failure
+// #6): the most recently CLOSED event across this Task's whole history —
+// by Ended At, `Write=` tie-break, the identical compareInstants_ priority
+// §4 uses everywhere else — regardless of its own Reason/Boundary. Used to
+// extend churn-inheritance lookups past the current poll: when an
+// assignee was cleared in an EARLIER poll (closing that outgoing event
+// with `Reason=reassignment` then, not now), no `otherActorEvents` entry
+// exists for it in a LATER poll that finally reassigns the Task, even
+// though the closed event itself is sitting right there, already
+// correctly tagged, in `allEvents`. Deliberately looks only at the SINGLE
+// most recent close — never scans further back — so a genuine execution
+// boundary sitting there correctly stops inheritance (a fresh execution
+// really did start), and a past, already-finished execution's OWN
+// internal churn is never reached past that boundary (failure #7).
+//
+// This function only ever picks WHICH event is the most recent close — it
+// does not decide whether that candidate is actually eligible to inherit
+// from. `resolveChurnInheritedWorkType_` applies the Reason/Boundary
+// cutoffs, and `churnCandidateExecutionMatches_` applies the §6 identity
+// gate (ADP-051-B2/B3 fixup round 4, Finding G) — this deliberately picking
+// the wrong (different-execution) candidate is exactly the gap Finding G
+// found: the most recent close by TIMESTAMP is not necessarily part of the
+// SAME execution the new event is about to open into once a Task can leave
+// and fully reopen between polls.
+//
+// Finding O (P1, ADP-051-B2/B3 fixup round 8): when two legacy closes fall
+// in the same Notion minute and neither carries a usable `Write=`,
+// `compareInstants_` returns `0` and the `> 0`-only scan below (unchanged
+// from before this fix) silently keeps whichever candidate the query
+// happened to return first — the same order-dependent-tie shape Finding M
+// fixed inside `mostRecentBoundaryCandidate_`, but this is a structurally
+// SEPARATE selector Finding M's fix never reached. Here the consequence is
+// worse than an ambiguous Work Type: if the query-order "winner" happens to
+// be an ordinary `reassignment` close while a tied `ambiguous_provenance_
+// restart` or genuine execution-boundary close (`isExecutionBoundary_`) sits
+// at the exact same instant, `resolveChurnInheritedWorkType_` lets
+// inheritance proceed via the reassignment — silently CROSSING the hard
+// restart/boundary cutoff §6 (L585-601) establishes "full stop", via a tie
+// rather than the scan-order bug round 4's Finding F already closed.
+//
+// §6's cutoff is not "go ambiguous when uncertain" — it is a categorical
+// rule that a restart (or any execution boundary) always wins over churn on
+// its near side, precisely because Notion's minute granularity can never
+// prove the two didn't happen in the boundary-first order, and reaching past
+// a boundary that might have happened first is the one mistake this cutoff
+// exists to rule out. So an unresolvable tie between a blocking candidate
+// (`isExecutionBoundary_`, or `Reason=ambiguous_provenance_restart`) and a
+// non-blocking one (an ordinary `reassignment`/`duplicate_reconciliation`
+// close) is resolved by the blocking candidate categorically winning — never
+// by silently keeping query order, and never by a generic "unresolved"
+// sentinel that would leave the restart's own hard-cutoff guarantee
+// unenforced. A tie between two candidates that agree on blocking-ness
+// (both block, or neither does) has no such disagreement to hide and
+// resolves exactly as before.
+//
+// Codex Review (PR #57): the blocking-tie fix above resolves ties between
+// candidates that DISAGREE on blocking-ness, but says nothing about a tie
+// between two candidates that AGREE (both non-blocking) yet belong to
+// DIFFERENT executions — e.g. one candidate's own `Execution=` matches
+// the new event's expected identity and the other's does not (possible
+// whenever an `Execution=`-bearing candidate predates this Task's most
+// recent Started At, so neither its Notion minute nor a missing/matching
+// `Write=` says anything about which execution it belongs to). Without an
+// identity-aware tiebreak here, this function can return the
+// NON-matching candidate purely by query order, and the caller
+// (`churnCandidateExecutionMatches_`, downstream) sees only that single
+// returned candidate — it has no way to reach back for the other, genuinely
+// matching one. `expectedExecutionId` (optional; omitted by a caller whose
+// own identity is unverified, mirroring `churnCandidateExecutionMatches_`'s
+// own contract) lets this function prefer a same-tie candidate whose
+// `Execution=` actually matches over one that does not — identity is the
+// PRIMARY churn-continuity signal (§6 first bullet) and must not lose to
+// arbitrary query order any more than the blocking check above does.
+function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
+  const candidates = [];
+  (allEvents || []).forEach(function (eventPage) {
+    const endedAt = propertyDate_(eventPage.properties['Ended At']);
+    if (!endedAt) return;
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    candidates.push({
+      event: eventPage,
+      endedAt: endedAt,
+      write: meta.write,
+      execution: meta.execution,
+      // Same "does this close categorically stop inheritance" test §6 and
+      // resolveChurnInheritedWorkType_ already apply: a genuine/retroactive
+      // execution boundary, or an ambiguous_provenance_restart close.
+      blocks: isExecutionBoundary_(meta) || meta.reason === 'ambiguous_provenance_restart',
+      // Same retroactive-vs-genuine distinction as ADP-051-B4's
+      // mostRecentBoundaryCandidate_ (this block's header comment): a
+      // boundary CLOSED naturally (`Reason=left_in_progress`) carries a
+      // trustworthy event-time Write=; a boundary stamped onto an event
+      // AFTER the fact (`Boundary=left_in_progress` with a different
+      // `Reason=`) carries a discovery-time Write= instead. Only
+      // meaningful for boundary-marked events; an ordinary reassignment/
+      // duplicate_reconciliation close is neither.
+      kind: meta.reason === 'left_in_progress' ? 'genuine' : meta.boundary === 'left_in_progress' ? 'retroactive' : null,
+    });
+  });
+  if (!candidates.length) return null;
+
+  const sameNotionMinute = function (a, b) {
+    return Math.floor(a.getTime() / 60000) === Math.floor(b.getTime() / 60000);
+  };
+  const instantOf = function (c) { return { timestamp: c.endedAt, write: c.write }; };
+  // Codex Review (PR #57, round 5 / Owner-classified fix): reuse B4's
+  // retroactive-write-is-untrustworthy rule here too — a same-minute pair
+  // where either side is a retroactively-stamped boundary must be treated
+  // as tied (0) regardless of raw Write= comparison, or a normal
+  // reassignment close with a larger discovery-unrelated Write= can
+  // dominate (and thus exclude from `undominated`) a retroactive boundary
+  // that should categorically block inheritance at that point. Different
+  // Notion minutes remain trustworthy (a real `Ended At` difference)
+  // regardless of retroactive-ness.
+  const churnCompare_ = function (a, b) {
+    if (sameNotionMinute(a.endedAt, b.endedAt) && (a.kind === 'retroactive' || b.kind === 'retroactive')) return 0;
+    return compareInstants_(instantOf(a), instantOf(b));
+  };
+  // Codex Review (PR #57, redesign): compute the UNDOMINATED set directly
+  // (same rationale as ADP-051-B4's mostRecentBoundaryCandidate_ redesign)
+  // instead of picking an arbitrary `best` via a left-to-right scan and
+  // then gathering "whatever ties with it". Round 4's finding ("Resolve
+  // strict Write ordering before blocking ties") showed the latter lets a
+  // Write=-missing candidate act as a non-transitive bridge between two
+  // Write=-bearing candidates that are themselves definitively ordered —
+  // which candidate a naive scan happens to land on as `best` (and thus
+  // which category, blocking or non-blocking, gets checked for ties) can
+  // flip with query order. Any pair within the undominated set is provably
+  // tied (0) by churnCompare_'s antisymmetry: checking each candidate
+  // against EVERY other candidate, not just a single `best`, cannot be
+  // fooled by an intermediate tied-but-dominated candidate.
+  const undominated = candidates.filter(function (c) {
+    return !candidates.some(function (other) {
+      return other !== c && churnCompare_(other, c) > 0;
+    });
+  });
+
+  // Finding O: a blocking candidate within the undominated set always wins
+  // over a non-blocking one — never let query order decide whether a hard
+  // restart/boundary cutoff applies. If every undominated candidate agrees
+  // (all blocking or all non-blocking), this is a no-op.
+  const blocking = undominated.filter(function (c) { return c.blocks; });
+  const pool = blocking.length ? blocking : undominated;
+
+  const canonicalEarliest = function (group) {
+    const earliestTime = group.reduce(function (min, c) {
+      return Math.min(min, c.endedAt.getTime());
+    }, group[0].endedAt.getTime());
+    const earliestGroup = group.filter(function (c) { return c.endedAt.getTime() === earliestTime; });
+    // Codex Review (PR #57, round 5 / Owner-classified fix): same residual
+    // gap as ADP-051-B4 — two group members can share a byte-identical
+    // `endedAt`, and the min-reduce above has no further discriminator in
+    // that case, silently keeping whichever candidate the array placed
+    // first. Break that with the event's own Notion page id (stable,
+    // unique, independent of query order).
+    return earliestGroup.reduce(function (winner, c) {
+      return c.event.id < winner.event.id ? c : winner;
+    }, earliestGroup[0]);
+  };
+
+  // No identity to resolve (single candidate left, the pool is the
+  // blocking set — identity never overrides a blocking close — or the
+  // caller gave no expectedExecutionId): canonicalize deterministically.
+  if (pool.length === 1 || pool[0].blocks || !expectedExecutionId) {
+    return canonicalEarliest(pool).event;
+  }
+
+  // Identity-aware tiebreak among the non-blocking pool (see header comment
+  // on churnCandidateExecutionMatches_ below): an EXPLICIT Execution= match
+  // is stronger evidence than the legacy no-Execution= fallback (a legacy
+  // event vacuously "matches" — it has nothing to contradict
+  // expectedExecutionId). Search the FULL pool for an explicit match
+  // first — a single-pass `.find()` combining both checks could stop at a
+  // legacy candidate before reaching a later explicit match in the array
+  // (Codex Review, PR #57, second follow-up) — and fall back to a legacy
+  // match only when no explicit match exists anywhere in the pool.
+  const explicitMatch = pool.find(function (c) { return c.execution === expectedExecutionId; });
+  if (explicitMatch) return explicitMatch.event;
+  const legacyMatch = pool.find(function (c) {
+    return churnCandidateExecutionMatches_(c.event, expectedExecutionId);
+  });
+  return (legacyMatch || canonicalEarliest(pool)).event;
+}
+
+// docs/review-fix-state-model.md §6: whether a churn-inheritance CANDIDATE
+// (an outgoing event `resolveChurnInheritedWorkType_` already said
+// `inherits: true` for, via the Reason/Boundary heuristic) is actually
+// allowed to hand its Work Type to the NEW event about to be created.
+// Identity is the PRIMARY signal (§6 first bullet — "matched by Execution=
+// identity ... not 'same poll' and not 'same actor'"): when `outgoingEvent`
+// carries an explicit `Execution=` value, it must equal
+// `expectedExecutionId` exactly, or this candidate is rejected outright —
+// it belongs to a DIFFERENT execution, regardless of what its Reason/
+// Boundary say (ADP-051-B2/B3 fixup round 4, Finding G: an execution that
+// closed via `Reason=reassignment` must not hand its Work Type to an
+// unrelated later execution just because it is the most recently closed
+// same-actor event). Only when `outgoingEvent` has NO `Execution=` at all
+// — legacy data predating the field — does §6's stated exception apply:
+// no identity to check, so the Reason/Boundary heuristic already applied
+// by `resolveChurnInheritedWorkType_` stands unguarded, exactly as before
+// round 4 (failure #33).
+//
+// `expectedExecutionId` may be omitted (falsy) — this happens for callers
+// that don't yet know the new event's own identity (direct unit tests of
+// `resolveNewTimeEventWorkTypeSafely_` predating this plumbing), AND, as of
+// ADP-051-B2/B3 fixup round 5 (Finding H), for the real call site whenever
+// its own computed identity is UNVERIFIED — a manufactured fallback with no
+// independent evidence behind it (see `executionIdIsVerified` at the call
+// site), specifically the cross-poll reassignment-gap case: nothing closed
+// this same call and the Task's own Started At still reads stale. Omitting
+// it in either case skips the identity gate entirely, since there is
+// nothing trustworthy to compare against and rejecting every
+// Execution=-bearing candidate outright would be wrong, not conservative —
+// this is what makes a legitimate cross-poll continuation (Finding H)
+// distinguishable from a genuinely new execution (Finding G, where the
+// call site's identity IS verified via a confirmed-fresh Task Started At,
+// so the gate still applies and still rejects).
+function churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId) {
+  if (!expectedExecutionId) return true;
+  const meta = parseNoteMeta_(propertyText_(outgoingEvent.properties.Note));
+  if (!meta.execution) return true;
+  return meta.execution === expectedExecutionId;
+}
