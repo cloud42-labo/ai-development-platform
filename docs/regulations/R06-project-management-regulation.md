@@ -177,7 +177,7 @@ TaskをDoneとするには、原則として次を満たす。
 
 詳細なDoD判定は下位基準として管理する。
 
-TaskをDoneまたはSuperseded等のterminal状態へ遷移させたActorは、その状態変更を孤立させず、第14条の2のState Reconciliationを実行する。即時実行が漏れた場合はDaily CloseおよびWeekly Sprintが補償制御として再実行する。
+TaskまたはStoryをDone / Superseded / Replaced / Merged / Stopped等のterminal状態へ遷移させたActorは、その状態変更を孤立させず、第14条の2のState Reconciliationを実行する。即時実行が漏れた場合はDaily CloseおよびWeekly Sprintが補償制御として再実行する。
 
 ## 第14条の2 Task / Story State Reconciliation
 
@@ -185,10 +185,10 @@ TaskをDoneまたはSuperseded等のterminal状態へ遷移させたActorは、�
 2. Superseded / ReplacedはDependency充足と同義ではない。置換先Taskを追跡し、依存条件が既に満たされたのか、置換先へ移ったのかを確認する。
 3. **Story Completion Roll-up** — terminalになったTaskのParent Story、terminal childを持つactive Story、またはDependency Releaseでwaiting状態から解放されたactive Storyについて、Required child work、置換関係、Human / 外部作業、Story自身のAcceptance Criteriaを評価する。waiting状態から解放されたStoryはterminal predecessor evidenceとして扱わず、別のroll-up候補として即時completion判定へ回す。
 4. StoryをDoneとするには、Story Outcomeに必要なRequired workがすべてterminalで置換関係が収束し、Story Acceptance Criteriaを成果証拠に照らして満たし、Story Outcomeに必要なHuman / 外部作業が残っていないことを要する。
-5. StoryをDoneとする場合は、`Status = Done`、`Closure Reason = Done`、`Completed At`、`Result`のStory Outcomeと主要証拠を記録する。StoryはTask Time Eventを持つ実行単位ではないため、TaskのTime Event完了条件をそのまま適用しない。
+5. StoryをDoneとする場合は、`Status = Done`、`Closure Reason = Done`、`Completed At`、`Result`のStory Outcomeと主要証拠を記録する。StoryはTask Time Eventを持つ実行単位ではないため、TaskのTime Event完了条件をそのまま適用しない。**新たにterminalとなったStoryは直ちに同一Reconciliation runのterminal候補へ追加し、そのStoryに依存する後続WorkのDependency Releaseまで固定点に到達するまで継続する。**
 6. Story Acceptance Criteriaが未達の場合、子Task件数だけを根拠にStoryをDoneとしてはならない。不足AC、Active child、未解消Blockerまたはmissing workを明示する。
 7. missing workが新たに必要な場合は、第2条の新規Task受付原則に従い `MISC｜... / Backlog` として起票し、Backlog Refinementへ渡す。Weekly Sprintの補償Reconciliationで発見したmissing workは、同一runで後続のBacklog Refinementへ入力し、Sprint Planning前に正式配置・再評価する。
-8. State ReconciliationはTask terminal transition直後を原則とする。Daily CloseおよびWeekly Sprintでは遷移日ではなく、terminal Dependencyを参照するwaiting Taskやterminal childを持つopen Story等の**未reconcile状態**を基準に補償的に再実行する。詳細手順は `cloud42-labo/skills` の `task-state-reconcile` を正本とする。
+8. State ReconciliationはTask / Story terminal transition直後を原則とし、新たなterminal Storyを含む依存伝播がなくなるまで固定点へ収束させる。Daily CloseおよびWeekly Sprintでは遷移日ではなく、terminal Dependencyを参照するwaiting Taskやterminal childを持つopen Story等の**未reconcile状態**を基準に補償的に再実行する。詳細手順は `cloud42-labo/skills` の `task-state-reconcile` を正本とする。
 
 ## 第15条 Time Eventと管理計測
 
