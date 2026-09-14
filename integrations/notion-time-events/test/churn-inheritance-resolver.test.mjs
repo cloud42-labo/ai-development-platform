@@ -218,3 +218,48 @@ test('mostRecentlyClosedEvent_: a genuine minute difference (not a tie) always p
   const laterReassignment = eventPage('evt-later-reassignment', { endedAt: '2026-08-01T09:00:00.000Z', note: note('Reason=reassignment') });
   assert.equal(sandbox.mostRecentlyClosedEvent_([boundaryClose, laterReassignment]).id, 'evt-later-reassignment');
 });
+
+// ---------------------------------------------------------------------------
+// Codex Review (PR #57): identity-aware tiebreak for mostRecentlyClosedEvent_
+// ---------------------------------------------------------------------------
+
+test('Codex Review (PR #57): two non-blocking closes tied at the same Notion minute (no Write=) from DIFFERENT executions — the candidate whose Execution= actually matches the expected identity wins, regardless of query order', () => {
+  const { sandbox } = harness();
+  const wrongExecution = eventPage('evt-wrong-execution', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment', 'Execution=2026-01-01T00:00:00.000Z') });
+  const rightExecution = eventPage('evt-right-execution', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=reassignment', 'Execution=2026-08-01T00:00:00.000Z') });
+  const expected = '2026-08-01T00:00:00.000Z';
+
+  assert.equal(sandbox.mostRecentlyClosedEvent_([wrongExecution, rightExecution], expected).id, 'evt-right-execution');
+  // Order independence — without the fix, listing wrongExecution first let
+  // it silently win the tie (the pre-fix `> 0`-only scan never looked past
+  // the first candidate reached on an unresolvable tie).
+  assert.equal(sandbox.mostRecentlyClosedEvent_([rightExecution, wrongExecution], expected).id, 'evt-right-execution');
+});
+
+test('Codex Review (PR #57) no-regression: with no expectedExecutionId given (caller identity unverified), the identity gate does not apply — same behavior as before the fix', () => {
+  const { sandbox } = harness();
+  const a = eventPage('evt-a', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment', 'Execution=2026-01-01T00:00:00.000Z') });
+  const b = eventPage('evt-b', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=reassignment', 'Execution=2026-08-01T00:00:00.000Z') });
+  assert.equal(sandbox.mostRecentlyClosedEvent_([a, b]).id, 'evt-a');
+  assert.equal(sandbox.mostRecentlyClosedEvent_([b, a]).id, 'evt-b');
+});
+
+test('Codex Review (PR #57) no-regression: a blocking candidate still wins outright even when a tied non-blocking candidate matches the expected identity', () => {
+  const { sandbox } = harness();
+  const restartClose = eventPage('evt-restart', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=ambiguous_provenance_restart') });
+  const matchingReassignment = eventPage('evt-matching-reassignment', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=reassignment', 'Execution=2026-08-01T00:00:00.000Z') });
+  const expected = '2026-08-01T00:00:00.000Z';
+  assert.equal(sandbox.mostRecentlyClosedEvent_([restartClose, matchingReassignment], expected).id, 'evt-restart');
+  assert.equal(sandbox.mostRecentlyClosedEvent_([matchingReassignment, restartClose], expected).id, 'evt-restart');
+});
+
+test('Codex Review (PR #57) no-regression: when NEITHER tied candidate matches the expected identity, the identity gate does not swap anything (both remain equally ineligible downstream)', () => {
+  const { sandbox } = harness();
+  const a = eventPage('evt-neither-a', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment', 'Execution=2026-01-01T00:00:00.000Z') });
+  const b = eventPage('evt-neither-b', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=reassignment', 'Execution=2026-02-01T00:00:00.000Z') });
+  const expected = '2026-08-01T00:00:00.000Z';
+  const forward = sandbox.mostRecentlyClosedEvent_([a, b], expected);
+  const backward = sandbox.mostRecentlyClosedEvent_([b, a], expected);
+  assert.equal(sandbox.churnCandidateExecutionMatches_(forward, expected), false);
+  assert.equal(sandbox.churnCandidateExecutionMatches_(backward, expected), false);
+});

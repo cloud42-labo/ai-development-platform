@@ -4076,7 +4076,26 @@ function resolveChurnInheritedWorkType_(outgoingEvent, options) {
 // unenforced. A tie between two candidates that agree on blocking-ness
 // (both block, or neither does) has no such disagreement to hide and
 // resolves exactly as before.
-function mostRecentlyClosedEvent_(allEvents) {
+//
+// Codex Review (PR #57): the blocking-tie fix above resolves ties between
+// candidates that DISAGREE on blocking-ness, but says nothing about a tie
+// between two candidates that AGREE (both non-blocking) yet belong to
+// DIFFERENT executions — e.g. one candidate's own `Execution=` matches
+// the new event's expected identity and the other's does not (possible
+// whenever an `Execution=`-bearing candidate predates this Task's most
+// recent Started At, so neither its Notion minute nor a missing/matching
+// `Write=` says anything about which execution it belongs to). Without an
+// identity-aware tiebreak here, this function can return the
+// NON-matching candidate purely by query order, and the caller
+// (`churnCandidateExecutionMatches_`, downstream) sees only that single
+// returned candidate — it has no way to reach back for the other, genuinely
+// matching one. `expectedExecutionId` (optional; omitted by a caller whose
+// own identity is unverified, mirroring `churnCandidateExecutionMatches_`'s
+// own contract) lets this function prefer a same-tie candidate whose
+// `Execution=` actually matches over one that does not — identity is the
+// PRIMARY churn-continuity signal (§6 first bullet) and must not lose to
+// arbitrary query order any more than the blocking check above does.
+function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
   const candidates = [];
   (allEvents || []).forEach(function (eventPage) {
     const endedAt = propertyDate_(eventPage.properties['Ended At']);
@@ -4111,6 +4130,18 @@ function mostRecentlyClosedEvent_(allEvents) {
       return compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) === 0;
     });
     if (blockingTie) best = blockingTie;
+  }
+  // Identity-aware tiebreak (see header comment above): only meaningful
+  // once `best` is confirmed non-blocking (a blocking `best` wins on its
+  // own terms regardless of identity) and the caller supplied an
+  // expectedExecutionId to check against at all.
+  if (!best.blocks && expectedExecutionId && !churnCandidateExecutionMatches_(best.event, expectedExecutionId)) {
+    const identityMatchTie = candidates.find(function (candidate) {
+      if (candidate === best || candidate.blocks) return false;
+      if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) !== 0) return false;
+      return churnCandidateExecutionMatches_(candidate.event, expectedExecutionId);
+    });
+    if (identityMatchTie) best = identityMatchTie;
   }
   return best.event;
 }
