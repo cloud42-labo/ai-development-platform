@@ -4,7 +4,7 @@
 > **規程ID:** R06  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-11 JST  
+> **最終改定日:** 2026-09-14 JST  
 > **関連規程:** R01 組織規程 / R02 職務権限規程 / R03 決裁規程 / R04 文書管理規程 / R05 システム開発管理規程  
 > **移管元:** `docs/operating-guide.md` §1、§7、§8、§9、§10、§11、§13、§14
 
@@ -182,6 +182,14 @@ TaskをDoneとするには、原則として次を満たす。
 5. 計測の不整合を見つけた場合は、データを都合よく補正するのではなく、生成・状態遷移・証跡モデルを修正する。
 6. Active時間の期間集計は、`Ended At`が確定している Closed Time Event の Duration のみを合算する。Open Time Event（`Ended At`未確定）が存在しても、それを理由に集計値全体をN/A化しない——Closedデータから算出できる数値はそのまま報告し、Open件数・対象Task・滞留理由は別項目として明記する（`BUG-ADP-TTE-01`）。Open Time Eventが表すのは実作業のExecution時間ではなく、Taskが当該Statusに滞留している時間（Process Occupancy）であり、これをClosed Durationと同一視してActive時間へ合算しない。
 7. Waiting時間（Review等、`In Progress`以外での滞留）はTime Event（`In Progress`区間のみ生成される）からは算出できない。Sync Logまたは状態遷移記録等、別の情報源から独立して計測する（`BUG-ADP-TTE-01-C`）。第6項のClosed Time Event基準をWaiting時間の算出根拠として流用しない。
+8. Task Sizing Failure関連KPIを次のとおり定義する。第12条のClosure semantics（`Closure Reason`／`Closed At`／`Completed At`）を正本とし、新たな計測の仕組みを追加しない。
+   - **Task Sizing Failure Cost** = 対象期間に `Closure Reason = Superseded` となったTaskの `Active Time (h)` の合計。粒度誤りにより消費した実行コストを表す。
+   - **Task Sizing Failure Rate** = 対象期間に `Closure Reason = Superseded` となったTask数 ÷ 対象期間に着手（`Started At` が記録された）Task数。
+   - **Refinement Effectiveness** = 分割後Task（`Split From` で元Taskを参照するTask群）の平均 substantive review round数（`governance/review-loop-control.md` 第2節の定義に従う）および平均 `Lead Time (h)` を、分割前の元Taskの実績と比較した差分。round数の減少・Lead Timeの短縮を正の効果として記録する。
+9. 日報・月次KPIでSupersededを集計する際は、次を厳守する。
+   - Superseded Taskは `Completed At` を持たないため、Doneの完了件数・平均Lead Time等の完了実績には算入しない。
+   - Superseded Taskを未完了（進行中・停滞）の実績とも混同しない。`Closed At` が記録された時点で当該Taskのライフサイクルは終了しており、In Progress/Blockedの滞留集計に含めない。
+   - 一方で、Superseded Taskが消費した実行コストを単純に切り捨てず、第8項の Task Sizing Failure Cost / Rate として独立集計し、Task粒度の管理改善に用いる（第12条第4項・第5項）。
 
 ## 第16条 Portfolio Dashboard
 
