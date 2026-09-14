@@ -183,8 +183,9 @@ TaskをDoneとするには、原則として次を満たす。
 6. Active時間の期間集計は、`Ended At`が確定している Closed Time Event の Duration のみを合算する。Open Time Event（`Ended At`未確定）が存在しても、それを理由に集計値全体をN/A化しない——Closedデータから算出できる数値はそのまま報告し、Open件数・対象Task・滞留理由は別項目として明記する（`BUG-ADP-TTE-01`）。Open Time Eventが表すのは実作業のExecution時間ではなく、Taskが当該Statusに滞留している時間（Process Occupancy）であり、これをClosed Durationと同一視してActive時間へ合算しない。
 7. Waiting時間（Review等、`In Progress`以外での滞留）はTime Event（`In Progress`区間のみ生成される）からは算出できない。Sync Logまたは状態遷移記録等、別の情報源から独立して計測する（`BUG-ADP-TTE-01-C`）。第6項のClosed Time Event基準をWaiting時間の算出根拠として流用しない。
 8. Task Sizing Failure関連KPIを次のとおり定義する。第12条のClosure semantics（`Closure Reason`／`Closed At`／`Completed At`）を正本とし、新たな計測の仕組みを追加しない。
-   - **Task Sizing Failure Cost** = 対象期間に `Closure Reason = Superseded` となったTaskの `Active Time (h)` の合計。粒度誤りにより消費した実行コストを表す。
-   - **Task Sizing Failure Rate** = 対象期間に `Closure Reason = Superseded` となったTask数 ÷ 対象期間に着手（`Started At` が記録された）Task数。
+   - **Sizing-driven Superseded** — `Closure Reason = Superseded` のうち、`Refinement Decision` が粒度超過（1 AI稼働日超過、`task-approach-review` の `Task Size = Split` 判定等）を理由に記録しているTaskだけを指す。第11条3項（Taskの目的自体を変える設計変更）や単純なMerge/Stopによる Superseded はここに含めない——`Closure Reason = Superseded` 単独では、目的変更・設計変更による置換と粒度誤りを区別できないため（Codex Review, PR #54）。
+   - **Task Sizing Failure Cost** = 対象期間に Sizing-driven Superseded となったTaskの `Active Time (h)` の合計。粒度誤りにより消費した実行コストを表す。
+   - **Task Sizing Failure Rate** = 対象期間に終端状態（`Closed At` または `Completed At` が記録された、すなわち `Done` または `Superseded`）に達したTaskのうち、Sizing-driven Supersededであった件数の割合。分子・分母を「対象期間に着手したTask数」のような別コホートから取らない——期間ズレのある分子・分母（例: 過去に着手し当期にSupersededされたTaskを分子に含める一方、当期新規着手・未終端のTaskで分母だけを膨らませる）は実態と乖離した数値（100%超えの発生を含む）を生むため、必ず「当期に終端状態へ達したTask」という同一コホートを分子・分母の双方に用いる（Codex Review, PR #54）。
    - **Refinement Effectiveness** = 分割後Task（`Split From` で元Taskを参照するTask群）の平均 substantive review round数（`governance/review-loop-control.md` 第2節の定義に従う）および平均 `Lead Time (h)` を、分割前の元Taskの実績と比較した差分。round数の減少・Lead Timeの短縮を正の効果として記録する。
 9. 日報・月次KPIでSupersededを集計する際は、次を厳守する。
    - Superseded Taskは `Completed At` を持たないため、Doneの完了件数・平均Lead Time等の完了実績には算入しない。
