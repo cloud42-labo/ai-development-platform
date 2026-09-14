@@ -188,7 +188,7 @@ TaskをDoneとするには、原則として次を満たす。
    - **Task Sizing Failure Rate** = 対象期間に終端状態（`Status = Done` または `Status = Superseded`）に達したTaskのうち、Sizing-driven Supersededであった件数の割合。分子・分母を「対象期間に着手したTask数」のような別コホートから取らない——期間ズレのある分子・分母（例: 過去に着手し当期にSupersededされたTaskを分子に含める一方、当期新規着手・未終端のTaskで分母だけを膨らませる）は実態と乖離した数値（100%超えの発生を含む）を生むため、必ず「当期に終端状態へ達したTask」という同一コホートを分子・分母の双方に用いる（Codex Review, PR #54）。終端状態への到達は `Status` 自体（`Done`/`Superseded`）で判定し、`Closed At`/`Completed At` の記録有無だけでは判定しない——Status遷移が未完了のまま `Closed At`/`Completed At` のみ書き込まれた不整合データ（`integrations/notion-time-events/README.md` に記載のある証跡ギャップ等）を、誤って終端到達済みとして分母に含めないため。`Closed At`/`Completed At` は、その終端状態が対象期間内に生じたかどうかを判定する期間の切り出しにのみ用いる（Codex Review, PR #54 追加指摘）。
    - **Refinement Effectiveness** = 分割後Task（`Split From` で元Taskを参照するTask群）の平均 substantive review round数（`governance/review-loop-control.md` 第2節の定義に従う）および平均 `Lead Time (h)` を、分割前の元Taskの実績と比較した差分。round数の減少・Lead Timeの短縮を正の効果として記録する。
 9. 日報・月次KPIでSupersededを集計する際は、次を厳守する。
-   - Superseded Taskは `Completed At` を持たないため、Doneの完了件数・平均Lead Time等の完了実績には算入しない。
+   - Superseded Taskは、Doneの完了件数・平均Lead Time等の完了実績には算入しない。**判定は現在の `Status = Done` によって行い、`Completed At` の記録有無だけに依拠しない**——一度Doneとなった後にReopenされ最終的にSupersededとして閉じたTaskは、Reopen時にNotion側が過去の `Completed At` を自動的にはクリアしない仕様（`integrations/notion-time-events/README.md` に記載のReopenガード）のため、Supersededでありながら `Completed At` を保持し得る。集計ロジックが `Completed At` の有無だけでDone件数を選別すると、このようなTaskを誤って完了実績に含めてしまう（Codex Review, PR #54 第3ラウンド指摘）。
    - Superseded Taskを未完了（進行中・停滞）の実績とも混同しない。`Closed At` が記録された時点で当該Taskのライフサイクルは終了しており、In Progress/Blockedの滞留集計に含めない。
    - 一方で、Superseded Taskが消費した実行コストを単純に切り捨てず、第8項の Task Sizing Failure Cost / Rate として独立集計し、Task粒度の管理改善に用いる（第12条第4項・第5項）。
 
