@@ -378,6 +378,21 @@ test('Codex Review (PR #55 follow-up): a harmless tie where BOTH candidates carr
   assert.equal(forward.endedAt.getTime(), backward.endedAt.getTime());
 });
 
+test('Codex Review (PR #55, second follow-up): two genuine boundaries sharing a Notion minute/endStatus/kind but with DIFFERENT present Write= values are NOT a harmless tie — compareInstants_ already ordered them, and the newer one (higher Write=) must win, not be discarded by the earliest-endedAt canonicalization', () => {
+  const { sandbox } = harness();
+  const older = eventPage('older', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=left_in_progress', 'End Status=Review', 'Write=1000') });
+  const newer = eventPage('newer', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=left_in_progress', 'End Status=Review', 'Write=2000') });
+
+  const forward = sandbox.mostRecentBoundaryCandidate_([older, newer]);
+  const backward = sandbox.mostRecentBoundaryCandidate_([newer, older]);
+  assert.equal(forward.conflictingTie, undefined);
+  assert.equal(backward.conflictingTie, undefined);
+  assert.equal(forward.event.id, 'newer');
+  assert.equal(backward.event.id, 'newer');
+  assert.equal(forward.write, '2000');
+  assert.equal(backward.write, '2000');
+});
+
 test('Codex Review (PR #55 follow-up): a harmless tie where NEITHER candidate carries a Write= still canonicalizes to a fixed representative regardless of query order', () => {
   const { sandbox } = harness();
   const earlier = eventPage('earlier', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=left_in_progress', 'End Status=Review') });
