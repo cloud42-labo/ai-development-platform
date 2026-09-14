@@ -47,4 +47,4 @@ GitHub remains the authoritative source for repository content, commits, pull re
 
 ## 5. Legacy compatibility
 
-Existing links to `docs/operating-guide.md` may continue to resolve here during migration. New rules or procedures must not be added to this file. Update the appropriate regulation, governance criterion or Skill instead, and record execution state in Notion/GitHub/brain as defined above.
+Existing links to `docs/operating-guide.md` continue to resolve here as a compatibility entry point after the ADP-059 migration. New rules or procedures must not be added to this file. Update the appropriate regulation, governance criterion or Skill instead, and record execution state in Notion/GitHub/brain as defined above.
