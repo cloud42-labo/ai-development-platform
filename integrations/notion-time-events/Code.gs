@@ -3849,10 +3849,21 @@ function mostRecentBoundaryCandidate_(allEvents) {
   // (best included), prefer the Write=-bearing subset when non-empty, then
   // pick the earliest raw `endedAt` within that subset as the canonical
   // representative — independent of `allEvents`' iteration order.
+  //
+  // Codex Review (PR #55, second follow-up): membership in this pool MUST
+  // require an actual compareInstants_ tie (0), not merely an agreeing
+  // endStatus/kind at the same Notion minute — two genuine boundaries can
+  // share both of those yet carry DIFFERENT present Write= values that
+  // compareInstants_ already used to order them definitively (e.g.
+  // 08:00:00/Write=1000 vs. 08:00:30/Write=2000: same minute, same
+  // endStatus/kind, but Write= settles it). Including such a pair here
+  // would let the earliest-endedAt reduction below silently discard that
+  // real ordering and return the OLDER, already-outranked candidate.
   const tiedWithBest = candidates.filter(function (candidate) {
     if (candidate === best) return true;
     if (!sameNotionMinute(candidate.endedAt, best.endedAt)) return false;
-    return candidate.endStatus === best.endStatus && candidate.kind === best.kind;
+    if (candidate.endStatus !== best.endStatus || candidate.kind !== best.kind) return false;
+    return compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) === 0;
   });
   if (tiedWithBest.length > 1) {
     const withWrite = tiedWithBest.filter(function (candidate) {
