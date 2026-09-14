@@ -4105,6 +4105,7 @@ function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
       event: eventPage,
       endedAt: endedAt,
       write: meta.write,
+      execution: meta.execution,
       // Same "does this close categorically stop inheritance" test §6 and
       // resolveChurnInheritedWorkType_ already apply: a genuine/retroactive
       // execution boundary, or an ambiguous_provenance_restart close.
@@ -4135,13 +4136,35 @@ function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
   // once `best` is confirmed non-blocking (a blocking `best` wins on its
   // own terms regardless of identity) and the caller supplied an
   // expectedExecutionId to check against at all.
-  if (!best.blocks && expectedExecutionId && !churnCandidateExecutionMatches_(best.event, expectedExecutionId)) {
-    const identityMatchTie = candidates.find(function (candidate) {
-      if (candidate === best || candidate.blocks) return false;
-      if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) !== 0) return false;
-      return churnCandidateExecutionMatches_(candidate.event, expectedExecutionId);
-    });
-    if (identityMatchTie) best = identityMatchTie;
+  //
+  // Codex Review (PR #57 follow-up): an EXPLICIT Execution= match is
+  // stronger evidence than the legacy no-Execution= fallback —
+  // churnCandidateExecutionMatches_ returns true for both (a legacy event
+  // has nothing to contradict the expected identity), so gating this scan
+  // on "`best` fails the match" alone missed the case where `best` is
+  // itself the legacy event: it vacuously "matches", so the scan never ran,
+  // and query order alone decided whether the explicitly-matching tied
+  // candidate was ever considered. Trigger the scan whenever `best` lacks
+  // an EXPLICIT match (mismatched OR legacy), and within it prefer an
+  // explicit match over a legacy one.
+  if (!best.blocks && expectedExecutionId) {
+    const bestExplicitMatch = best.execution && best.execution === expectedExecutionId;
+    if (!bestExplicitMatch) {
+      const bestIsLegacy = !best.execution;
+      const identityMatchTie = candidates.find(function (candidate) {
+        if (candidate === best || candidate.blocks) return false;
+        if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) !== 0) return false;
+        if (candidate.execution === expectedExecutionId) return true;
+        // `best` already matches vacuously (legacy, no Execution= to
+        // contradict expectedExecutionId) — do not swap it for another
+        // non-explicit-match candidate found first by scan order alone.
+        if (bestIsLegacy) return false;
+        // `best` explicitly mismatches: fall back to the pre-fix behavior
+        // of accepting a legacy (vacuous) match when no explicit match ties.
+        return churnCandidateExecutionMatches_(candidate.event, expectedExecutionId);
+      });
+      if (identityMatchTie) best = identityMatchTie;
+    }
   }
   return best.event;
 }
