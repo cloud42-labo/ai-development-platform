@@ -3656,3 +3656,274 @@ function withPollLock_(fn) {
     lock.releaseLock();
   }
 }
+
+// =============================================================================
+// ADP-051-B4: boundary candidate / cutoff / tie-order pure resolver
+// =============================================================================
+//
+// Pure judgment functions extracted from PR #50 (ADP-051-B2/B3, Superseded
+// after reaching the 9-round review hard cap — docs/regulations/
+// R06-project-management-regulation.md §11) as their own independent change
+// objective, per docs/review-fix-state-model.md §3 step 1 (boundary
+// candidate selection) and §4 (evidence priority & timestamp-tie
+// resolution). None of these functions perform Notion/Sheets I/O — every
+// input is data the caller already holds in memory. Sync Log reading/
+// projection is ADP-051-B5's scope; churn inheritance is ADP-051-B6's;
+// wiring these into the live poll path is ADP-051-B7's. This block is not
+// called from anywhere yet — it ships as tested, unwired pure functions
+// until B5/B6 exist for B7 to assemble.
+//
+// PR #50 reached round 9 with two open findings still unresolved when it
+// was Split rather than continued (docs/regulations/R06 §11 point 4); both
+// are fixed here, ported alongside the round-1..8 fixes (Findings A-O)
+// PR #50 already got right:
+//
+//   (1) syncLogScanCutoff_ picked its own most-recent candidate (a
+//       Type=Story Sync Log row, an ambiguous_provenance_restart close, or
+//       an explicit same-call override) via the same `> 0`-only scan
+//       mostRecentBoundaryCandidate_ uses, but never checked whether that
+//       winner was itself tied — at Notion-minute granularity, with
+//       Write= unable to break the tie — against another of its own
+//       candidates. Because this cutoff gates a hard boundary the
+//       same-status Sync Log scan must never cross (failures #27/#45/#48/
+//       #51 below), silently keeping whichever candidate this function
+//       happened to reach first can place the cutoff earlier than the
+//       true restart/reclassification moment.
+//   (2) mostRecentBoundaryCandidate_'s Finding M/N conflicting-tie check
+//       only ran when compareInstants_ returned an unbroken tie (0). A
+//       RETROACTIVE candidate's Write= is stampExecutionBoundary_'s own
+//       DISCOVERY-time stamp (see its comment on main), never the
+//       original close's write-time — it answers "when did this codebase
+//       notice the boundary," not "when did the execution genuinely end."
+//       So when a retroactive candidate ties at Notion-MINUTE against
+//       another candidate but their Write= values happen to differ,
+//       compareInstants_ resolves the pair outright — an apparently
+//       definite order built by comparing two incommensurable clocks, not
+//       a real one. Every existing round 1-8 regression test for the
+//       genuine/retroactive conflicting-tie case deliberately omits Write=
+//       on at least one side (see its own header comment); none exercises
+//       a retroactive candidate whose Write= is present but does not
+//       agree with the other side's — the gap this closes.
+
+// Shared definition of "this closed event marks a genuine execution
+// boundary" — Reason=left_in_progress (the Task actually left In Progress
+// here) OR a retroactively-stamped Boundary=left_in_progress (see
+// stampExecutionBoundary_). Extracted so every caller shares one
+// definition and can never drift apart on it — inlining the identical
+// boolean expression independently at each call site is exactly how such
+// drift starts.
+function isExecutionBoundary_(meta) {
+  return meta.reason === 'left_in_progress' || meta.boundary === 'left_in_progress';
+}
+
+// docs/review-fix-state-model.md §4: Notion timestamps are only
+// minute-granular, so two genuinely different real-world moments can round
+// to the identical Notion minute — no choice of comparison operator fixes
+// this (PR #21 rounds 9/10/12/19). Every comparison between two candidate
+// "instants" (a Notion timestamp plus this codebase's own `Write=`
+// millisecond clock) for boundary/cutoff resolution goes through this one
+// function, so every caller applies the identical priority order: Notion
+// minute first, `Write=` milliseconds only as a tie-break.
+//
+// Returns 1 if `a` is strictly more recent than `b`, -1 if `b` is strictly
+// more recent, or 0 when the two are indistinguishable by minute + Write=
+// (a genuine simultaneous tie, or a minute-tie with `Write=` missing on
+// one or both sides). A 0 here is not proof the two instants are
+// interchangeable — see mostRecentBoundaryCandidate_'s own handling of a
+// RETROACTIVE candidate for a case where a *non*-zero result from this
+// function still must not be trusted.
+function compareInstants_(a, b) {
+  const aMinute = Math.floor(a.timestamp.getTime() / 60000);
+  const bMinute = Math.floor(b.timestamp.getTime() / 60000);
+  if (aMinute !== bMinute) return aMinute > bMinute ? 1 : -1;
+  const aWrite = (a.write !== undefined && a.write !== null && a.write !== '') ? Number(a.write) : null;
+  const bWrite = (b.write !== undefined && b.write !== null && b.write !== '') ? Number(b.write) : null;
+  if (aWrite !== null && bWrite !== null && aWrite !== bWrite) {
+    return aWrite > bWrite ? 1 : -1;
+  }
+  return 0;
+}
+
+// docs/review-fix-state-model.md §3 step 3: unlike compareInstants_ above,
+// this answers a different question — "did this write happen at or after
+// that write," a write-ordering question between two Apps Script actions,
+// never a transition-recency question. Routing it through §4's general
+// "Notion minute first" hierarchy would wrongly reject a same-cycle Sync
+// Log row whose own logical timestamp predates the boundary's `Write=`
+// even though both were written in the same reconciliation pass — this
+// must compare `Write=` directly against `Write=` on both sides and
+// nothing else.
+//
+// Returns 1 if `aWrite` is strictly later, -1 if `bWrite` is strictly
+// later, 0 if exactly equal, or null when either side has no `Write=` at
+// all (legacy data) — callers must treat null as "cannot answer," never as
+// a false/0 result.
+function compareWriteOnly_(aWrite, bWrite) {
+  const a = (aWrite !== undefined && aWrite !== null && aWrite !== '') ? Number(aWrite) : null;
+  const b = (bWrite !== undefined && bWrite !== null && bWrite !== '') ? Number(bWrite) : null;
+  if (a === null || b === null) return null;
+  if (a === b) return 0;
+  return a > b ? 1 : -1;
+}
+
+// docs/review-fix-state-model.md §3 step 1: the most recent closed event
+// tagged as an execution boundary (isExecutionBoundary_), split into the
+// two situations §3 distinguishes:
+//   - GENUINE (Reason=left_in_progress): its own End Status=/Ended At are
+//     real (if only minute-granular) evidence — read them directly.
+//   - RETROACTIVE (Reason=reassignment/duplicate_reconciliation with a
+//     later Boundary=left_in_progress added by stampExecutionBoundary_):
+//     its End Status=/Ended At are STALE (they still hold whatever the
+//     original reassignment close wrote) and must never be read directly.
+// Ties across more than one boundary-tagged close are resolved by
+// compareInstants_ (Ended At, then Write=).
+//
+// Returns `null` when there is no boundary-tagged candidate at all,
+// `{ conflictingTie: true }` when more than one candidate is genuinely
+// unresolvable against the winner (see below), or the winning candidate
+// object itself (`{ kind, event, endStatus, endedAt, write }`).
+function mostRecentBoundaryCandidate_(allEvents) {
+  const candidates = [];
+  (allEvents || []).forEach(function (eventPage) {
+    const endedAt = propertyDate_(eventPage.properties['Ended At']);
+    if (!endedAt) return;
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    if (!isExecutionBoundary_(meta)) return;
+    candidates.push({
+      kind: meta.reason === 'left_in_progress' ? 'genuine' : 'retroactive',
+      event: eventPage,
+      endStatus: meta.endStatus || '',
+      endedAt: endedAt,
+      write: meta.write,
+    });
+  });
+  if (!candidates.length) return null;
+
+  const sameNotionMinute = function (a, b) {
+    return Math.floor(a.getTime() / 60000) === Math.floor(b.getTime() / 60000);
+  };
+  // A pair CAN be trusted to be safely ordered by compareInstants_ (i.e.
+  // Write= genuinely settles it) only when NEITHER side is retroactive AND
+  // they land in the same Notion minute. Once a retroactive candidate is on
+  // either side of a same-minute pair, its Write= is a discovery-time
+  // stamp, not real event-time evidence (see this block's header comment,
+  // finding 2) — compareInstants_ resolving the pair is not proof of a real
+  // order, so treat same-minute pairs involving a retroactive side as tied
+  // (0) regardless of what raw Write= comparison would say. Different
+  // Notion minutes are always trustworthy (a real `Ended At` difference),
+  // retroactive or not.
+  const boundaryCompare_ = function (a, b) {
+    if (sameNotionMinute(a.endedAt, b.endedAt) && (a.kind === 'retroactive' || b.kind === 'retroactive')) return 0;
+    return compareInstants_({ timestamp: a.endedAt, write: a.write }, { timestamp: b.endedAt, write: b.write });
+  };
+  // Codex Review (PR #55, third follow-up / redesign): rather than picking
+  // an arbitrary `best` via a single left-to-right scan and then gathering
+  // "whatever ties with best", compute the UNDOMINATED set directly — the
+  // candidates no other candidate is proven strictly later than. This is
+  // the mathematically well-defined "top" of the partial order
+  // boundaryCompare_ induces (candidates can be incomparable —
+  // boundaryCompare_ returning 0 means "cannot prove either way", not
+  // necessarily "identical") and is immune to the non-transitive-bridge bug
+  // a naive "ties with an arbitrarily-chosen best" check has: if A (no
+  // Write=) ties with B, and B ties with C, but B and C carry DIFFERENT
+  // present Write= values that definitively order them, a scan that only
+  // ever compares against a single `best` can let A bridge into the pool
+  // via whichever of B/C got picked as `best` first — even though C
+  // (say) actually dominates A too. Checking A against EVERY other
+  // candidate, not just `best`, closes that gap. Any pair that both land in
+  // the undominated set is provably tied (0) by boundaryCompare_'s
+  // antisymmetry: if neither dominates the other, both directions must
+  // return 0.
+  const undominated = candidates.filter(function (candidate) {
+    return !candidates.some(function (other) {
+      return other !== candidate && boundaryCompare_(other, candidate) > 0;
+    });
+  });
+  // A disagreement in `endStatus` or `kind` among candidates that cannot be
+  // proven to not be the true winner is a genuine ambiguity — never an
+  // arbitrary pick (rounds 7/8/P4-2's own regression tests).
+  const conflictingTie = undominated.some(function (a) {
+    return undominated.some(function (b) {
+      return a !== b && (a.endStatus !== b.endStatus || a.kind !== b.kind);
+    });
+  });
+  if (conflictingTie) return { conflictingTie: true };
+  // Every remaining undominated candidate agrees on endStatus/kind — a
+  // harmless tie (or a single clear winner). Canonicalize independent of
+  // `allEvents` query order: prefer the Write=-bearing subset when
+  // non-empty (more informative than an absent Write=), then pick the
+  // earliest raw `endedAt` within that subset as a fixed representative.
+  const withWrite = undominated.filter(function (candidate) {
+    return candidate.write !== undefined && candidate.write !== null && candidate.write !== '';
+  });
+  const pool = withWrite.length ? withWrite : undominated;
+  return pool.reduce(function (earliest, candidate) {
+    return candidate.endedAt.getTime() < earliest.endedAt.getTime() ? candidate : earliest;
+  }, pool[0]);
+}
+
+// docs/review-fix-state-model.md §3 step 2's hard history cutoff: the most
+// recent of (a) a Type=Story Sync Log observation for this Task, (b) a
+// Time-Event-side `ambiguous_provenance_restart` close already visible in
+// `allEvents`, or (c) `restartCutoffOverride` (an explicit instant the
+// caller supplies for a same-call restart `allEvents` cannot yet reflect —
+// see reconcileAuthoritativeTimeEvents_'s own staleness handling for
+// churn inheritance, the identical pattern). A same-status Sync Log scan
+// must never cross this cutoff under any circumstances, even when the
+// filtered candidate set on the near side of it is empty
+// (failures #27/#45/#48/#51).
+//
+// Returns `null` when none of the three sources produced a candidate,
+// `{ ambiguousCutoffTie: true }` when more than one of this function's own
+// candidates ties at Notion-minute granularity without a trustworthy way
+// to order them (see this block's header comment, finding 1), or the
+// winning candidate as a plain `{ timestamp, write }` instant.
+function syncLogScanCutoff_(rows, allEvents, restartCutoffOverride) {
+  const candidates = [];
+  (rows || []).forEach(function (row) {
+    if (row.type !== 'Story') return;
+    candidates.push({ timestamp: row.receivedAt, write: row.write });
+  });
+  (allEvents || []).forEach(function (eventPage) {
+    const endedAt = propertyDate_(eventPage.properties['Ended At']);
+    if (!endedAt) return;
+    const meta = parseNoteMeta_(propertyText_(eventPage.properties.Note));
+    if (meta.reason !== 'ambiguous_provenance_restart') return;
+    candidates.push({ timestamp: endedAt, write: meta.write });
+  });
+  if (restartCutoffOverride) candidates.push(restartCutoffOverride);
+  if (!candidates.length) return null;
+  // Codex Review (PR #55, cutoff redesign): compute the UNDOMINATED set
+  // directly (same rationale as mostRecentBoundaryCandidate_'s redesign)
+  // instead of picking an arbitrary `best` via a left-to-right scan and
+  // then gathering "whatever ties with it" — that approach lets a
+  // Write=-missing candidate act as a non-transitive bridge between two
+  // Write=-bearing candidates that are themselves definitively ordered by
+  // compareInstants_. Any pair that both land in the undominated set is
+  // provably tied (0) by compareInstants_'s antisymmetry.
+  const undominated = candidates.filter(function (candidate) {
+    return !candidates.some(function (other) {
+      return other !== candidate && compareInstants_(other, candidate) > 0;
+    });
+  });
+  // A tie where BOTH sides have a present, EQUAL Write= is a genuine,
+  // harmless simultaneity: the candidates' instants are indistinguishable
+  // in every respect this function's caller can observe, so any one of
+  // them serves as an equally valid cutoff — canonicalize to the earliest
+  // raw timestamp so the returned representative doesn't depend on input
+  // order (Codex Review, PR #55 follow-up: "Canonicalize equal-Write cutoff
+  // ties"). A tie where Write= is missing on EITHER side among the
+  // undominated set is the real ambiguity this guards against (see this
+  // block's header comment, finding 1) — those candidates could be
+  // genuinely different real moments with no way to tell which, and the
+  // caller must not silently prefer whichever this scan reached first.
+  const hasWrite = function (instant) {
+    return instant.write !== undefined && instant.write !== null && instant.write !== '';
+  };
+  if (undominated.length > 1 && undominated.some(function (candidate) { return !hasWrite(candidate); })) {
+    return { ambiguousCutoffTie: true };
+  }
+  return undominated.reduce(function (earliest, candidate) {
+    return candidate.timestamp.getTime() < earliest.timestamp.getTime() ? candidate : earliest;
+  }, undominated[0]);
+}
