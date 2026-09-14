@@ -4123,69 +4123,62 @@ function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
     });
   });
   if (!candidates.length) return null;
-  let best = candidates[0];
-  for (let idx = 1; idx < candidates.length; idx++) {
-    const candidate = candidates[idx];
-    if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) > 0) {
-      best = candidate;
-    }
-  }
-  // Finding O: if `best` does not block inheritance but ties (at Notion-
-  // minute + Write= granularity, per compareInstants_) with a candidate that
-  // DOES, the blocking candidate must win — never let query order decide
-  // whether a hard restart/boundary cutoff applies. `best` already blocking
-  // (or every tied candidate agreeing with it) needs no change.
-  if (!best.blocks) {
-    const blockingTie = candidates.find(function (candidate) {
-      if (candidate === best || !candidate.blocks) return false;
-      return compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) === 0;
+
+  const instantOf = function (c) { return { timestamp: c.endedAt, write: c.write }; };
+  // Codex Review (PR #57, redesign): compute the UNDOMINATED set directly
+  // (same rationale as ADP-051-B4's mostRecentBoundaryCandidate_ redesign)
+  // instead of picking an arbitrary `best` via a left-to-right scan and
+  // then gathering "whatever ties with it". Round 4's finding ("Resolve
+  // strict Write ordering before blocking ties") showed the latter lets a
+  // Write=-missing candidate act as a non-transitive bridge between two
+  // Write=-bearing candidates that are themselves definitively ordered —
+  // which candidate a naive scan happens to land on as `best` (and thus
+  // which category, blocking or non-blocking, gets checked for ties) can
+  // flip with query order. Any pair within the undominated set is provably
+  // tied (0) by compareInstants_'s antisymmetry: checking each candidate
+  // against EVERY other candidate, not just a single `best`, cannot be
+  // fooled by an intermediate tied-but-dominated candidate.
+  const undominated = candidates.filter(function (c) {
+    return !candidates.some(function (other) {
+      return other !== c && compareInstants_(instantOf(other), instantOf(c)) > 0;
     });
-    if (blockingTie) best = blockingTie;
+  });
+
+  // Finding O: a blocking candidate within the undominated set always wins
+  // over a non-blocking one — never let query order decide whether a hard
+  // restart/boundary cutoff applies. If every undominated candidate agrees
+  // (all blocking or all non-blocking), this is a no-op.
+  const blocking = undominated.filter(function (c) { return c.blocks; });
+  const pool = blocking.length ? blocking : undominated;
+
+  const canonicalEarliest = function (group) {
+    return group.reduce(function (earliest, c) {
+      return c.endedAt.getTime() < earliest.endedAt.getTime() ? c : earliest;
+    }, group[0]);
+  };
+
+  // No identity to resolve (single candidate left, the pool is the
+  // blocking set — identity never overrides a blocking close — or the
+  // caller gave no expectedExecutionId): canonicalize deterministically.
+  if (pool.length === 1 || pool[0].blocks || !expectedExecutionId) {
+    return canonicalEarliest(pool).event;
   }
-  // Identity-aware tiebreak (see header comment above): only meaningful
-  // once `best` is confirmed non-blocking (a blocking `best` wins on its
-  // own terms regardless of identity) and the caller supplied an
-  // expectedExecutionId to check against at all.
-  //
-  // Codex Review (PR #57 follow-up): an EXPLICIT Execution= match is
-  // stronger evidence than the legacy no-Execution= fallback —
-  // churnCandidateExecutionMatches_ returns true for both (a legacy event
-  // has nothing to contradict the expected identity), so gating this scan
-  // on "`best` fails the match" alone missed the case where `best` is
-  // itself the legacy event: it vacuously "matches", so the scan never ran,
-  // and query order alone decided whether the explicitly-matching tied
-  // candidate was ever considered. Trigger the scan whenever `best` lacks
-  // an EXPLICIT match (mismatched OR legacy), and within it prefer an
-  // explicit match over a legacy one.
-  if (!best.blocks && expectedExecutionId) {
-    const bestExplicitMatch = best.execution && best.execution === expectedExecutionId;
-    if (!bestExplicitMatch) {
-      const bestIsLegacy = !best.execution;
-      const tiedNonBlocking = candidates.filter(function (candidate) {
-        if (candidate === best || candidate.blocks) return false;
-        return compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) === 0;
-      });
-      // Codex Review (PR #57, second follow-up): search the FULL tied
-      // cohort for an explicit match first — a single `.find()` combining
-      // both checks stops at whichever candidate it reaches first, so a
-      // legacy candidate encountered before an explicitly-matching one
-      // (e.g. order [mismatch, legacy, explicit-match]) would satisfy the
-      // fallback branch and wrongly win before the scan ever reached the
-      // explicit match later in the array. Only fall back to a legacy
-      // (vacuous) match when no explicit match exists anywhere in the tie.
-      const identityMatchTie =
-        tiedNonBlocking.find(function (candidate) {
-          return candidate.execution === expectedExecutionId;
-        }) ||
-        (bestIsLegacy
-          ? undefined
-          : tiedNonBlocking.find(function (candidate) {
-              return churnCandidateExecutionMatches_(candidate.event, expectedExecutionId);
-            }));
-      if (identityMatchTie) best = identityMatchTie;
-    }
-  }
-  return best.event;
+
+  // Identity-aware tiebreak among the non-blocking pool (see header comment
+  // on churnCandidateExecutionMatches_ below): an EXPLICIT Execution= match
+  // is stronger evidence than the legacy no-Execution= fallback (a legacy
+  // event vacuously "matches" — it has nothing to contradict
+  // expectedExecutionId). Search the FULL pool for an explicit match
+  // first — a single-pass `.find()` combining both checks could stop at a
+  // legacy candidate before reaching a later explicit match in the array
+  // (Codex Review, PR #57, second follow-up) — and fall back to a legacy
+  // match only when no explicit match exists anywhere in the pool.
+  const explicitMatch = pool.find(function (c) { return c.execution === expectedExecutionId; });
+  if (explicitMatch) return explicitMatch.event;
+  const legacyMatch = pool.find(function (c) {
+    return churnCandidateExecutionMatches_(c.event, expectedExecutionId);
+  });
+  return (legacyMatch || canonicalEarliest(pool)).event;
 }
 
 // docs/review-fix-state-model.md §6: whether a churn-inheritance CANDIDATE

@@ -236,12 +236,12 @@ test('Codex Review (PR #57): two non-blocking closes tied at the same Notion min
   assert.equal(sandbox.mostRecentlyClosedEvent_([rightExecution, wrongExecution], expected).id, 'evt-right-execution');
 });
 
-test('Codex Review (PR #57) no-regression: with no expectedExecutionId given (caller identity unverified), the identity gate does not apply — same behavior as before the fix', () => {
+test('Codex Review (PR #57, redesign): with no expectedExecutionId given (caller identity unverified), the identity gate still does not apply, but the undominated-set redesign now also canonicalizes this tie deterministically (earliest raw endedAt) regardless of query order — this improves on the pre-redesign behavior, which left the no-identity path\'s tie order-dependent as an intentional but non-ideal no-regression baseline', () => {
   const { sandbox } = harness();
   const a = eventPage('evt-a', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment', 'Execution=2026-01-01T00:00:00.000Z') });
   const b = eventPage('evt-b', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=reassignment', 'Execution=2026-08-01T00:00:00.000Z') });
   assert.equal(sandbox.mostRecentlyClosedEvent_([a, b]).id, 'evt-a');
-  assert.equal(sandbox.mostRecentlyClosedEvent_([b, a]).id, 'evt-b');
+  assert.equal(sandbox.mostRecentlyClosedEvent_([b, a]).id, 'evt-a');
 });
 
 test('Codex Review (PR #57) no-regression: a blocking candidate still wins outright even when a tied non-blocking candidate matches the expected identity', () => {
@@ -291,4 +291,24 @@ test('Codex Review (PR #57, second follow-up): a three-way tie of [explicit-mism
   assert.equal(sandbox.mostRecentlyClosedEvent_([mismatch, legacy, explicitMatch], expected).id, 'evt-explicit-match');
   assert.equal(sandbox.mostRecentlyClosedEvent_([mismatch, explicitMatch, legacy], expected).id, 'evt-explicit-match');
   assert.equal(sandbox.mostRecentlyClosedEvent_([explicitMatch, legacy, mismatch], expected).id, 'evt-explicit-match');
+});
+
+test('Codex Review (PR #57, round 4): a Write=-missing legacy close must not act as a non-transitive bridge that lets a boundary win via a blocking-tie promotion it is not actually entitled to — with a legacy close at :00 (no Write=, ties with both others), a boundary at :15 (Write=100), and a reassignment at :30 (Write=200) definitively later than the boundary per Write=, the boundary (provably dominated by the reassignment) must NEVER win, and the result must be the SAME regardless of query order. Pre-redesign, a naive best-then-tie scan could land on `best=legacy` (untied, non-blocking) and then promote `boundary` via a blocking tie against that arbitrary best — even though `reassignment` proves `boundary` is not the true latest close. The genuine ambiguity that remains (legacy vs reassignment, since Write= cannot place legacy relative to either) is resolved deterministically, not left to query order', () => {
+  const { sandbox } = harness();
+  const legacy = eventPage('evt-legacy', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment') });
+  const boundary = eventPage('evt-boundary', { endedAt: '2026-08-01T08:00:15.000Z', note: note('Reason=left_in_progress', 'End Status=Review', 'Write=100') });
+  const reassignment = eventPage('evt-reassignment', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=reassignment', 'Write=200') });
+
+  const results = [
+    [legacy, boundary, reassignment],
+    [boundary, reassignment, legacy],
+    [reassignment, legacy, boundary],
+    [legacy, reassignment, boundary],
+  ].map(function (events) {
+    return sandbox.mostRecentlyClosedEvent_(events).id;
+  });
+  results.forEach(function (id) {
+    assert.notEqual(id, 'evt-boundary');
+  });
+  assert.ok(results.every(function (id) { return id === results[0]; }), 'result must not depend on query order: got ' + JSON.stringify(results));
 });
