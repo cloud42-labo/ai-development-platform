@@ -364,3 +364,29 @@ test('Codex Review (PR #55): a harmless tie (same endStatus/kind, no conflicting
   assert.equal(forward.write, '1000');
   assert.equal(backward.write, '1000');
 });
+
+test('Codex Review (PR #55 follow-up): a harmless tie where BOTH candidates carry an equal Write= still canonicalizes to a fixed representative regardless of query order, since same-Notion-minute raw `Ended At` values need not be byte-identical', () => {
+  const { sandbox } = harness();
+  const earlier = eventPage('earlier', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=left_in_progress', 'End Status=Review', 'Write=1000') });
+  const later = eventPage('later', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=left_in_progress', 'End Status=Review', 'Write=1000') });
+
+  const forward = sandbox.mostRecentBoundaryCandidate_([earlier, later]);
+  const backward = sandbox.mostRecentBoundaryCandidate_([later, earlier]);
+  assert.equal(forward.conflictingTie, undefined);
+  assert.equal(backward.conflictingTie, undefined);
+  assert.equal(forward.event.id, backward.event.id);
+  assert.equal(forward.endedAt.getTime(), backward.endedAt.getTime());
+});
+
+test('Codex Review (PR #55 follow-up): a harmless tie where NEITHER candidate carries a Write= still canonicalizes to a fixed representative regardless of query order', () => {
+  const { sandbox } = harness();
+  const earlier = eventPage('earlier', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=left_in_progress', 'End Status=Review') });
+  const later = eventPage('later', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=left_in_progress', 'End Status=Review') });
+
+  const forward = sandbox.mostRecentBoundaryCandidate_([earlier, later]);
+  const backward = sandbox.mostRecentBoundaryCandidate_([later, earlier]);
+  assert.equal(forward.conflictingTie, undefined);
+  assert.equal(backward.conflictingTie, undefined);
+  assert.equal(forward.event.id, backward.event.id);
+  assert.equal(forward.endedAt.getTime(), backward.endedAt.getTime());
+});

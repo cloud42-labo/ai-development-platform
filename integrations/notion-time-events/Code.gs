@@ -3831,31 +3831,37 @@ function mostRecentBoundaryCandidate_(allEvents) {
     return candidate.endStatus !== best.endStatus || candidate.kind !== best.kind;
   });
   if (conflictingTie) return { conflictingTie: true };
-  // Codex Review (PR #55): a HARMLESS tie (same endStatus and kind, so no
-  // conflictingTie above) can still leave `best` as whichever candidate
-  // this scan reached first, when neither side's Write= broke the tie —
-  // e.g. one candidate has a real Write= and the other has none at all,
-  // which is itself a `compareInstants_` tie (0), not a difference. The
-  // classification these two candidates produce is identical (agreeing
-  // endStatus/kind), but the raw `write`/`event` this function RETURNS
-  // would still differ by query order — and a future caller reading
-  // `.write` directly (the same pattern resolveWorkType_'s existing
-  // same-cycle Sync Log check already uses via compareWriteOnly_) could
-  // get a different, query-order-dependent answer from that alone.
-  // Canonicalize: among candidates that tie with `best` and agree with it
-  // (the exact set the check above already treats as harmless), prefer
-  // one that actually HAS a Write= over `best` when `best` itself lacks
-  // one — never the reverse (two present Write= values that tie must be
-  // numerically equal, per compareInstants_, so swapping cannot change
-  // anything there).
-  if (best.write === undefined || best.write === null || best.write === '') {
-    const moreInformative = candidates.find(function (candidate) {
-      if (candidate === best) return false;
-      if (!sameNotionMinute(candidate.endedAt, best.endedAt)) return false;
-      if (candidate.endStatus !== best.endStatus || candidate.kind !== best.kind) return false;
+  // Codex Review (PR #55, incl. follow-up): a HARMLESS tie (same endStatus
+  // and kind, so no conflictingTie above) can still leave `best` as
+  // whichever candidate this scan reached first, when nothing in
+  // compareInstants_ broke the tie. Two sub-cases both need canonicalizing,
+  // or the raw `write`/`event`/`endedAt` this function RETURNS — and the
+  // cutoff B7 derives from it — would flip with `allEvents` query order:
+  //   (a) one candidate has a real Write= and another has none at all
+  //       (itself a compareInstants_ tie of 0, not a real difference) —
+  //       prefer the one that actually carries Write= evidence.
+  //   (b) two-or-more candidates that both carry a Write= (or both lack
+  //       one) still tie at Notion-minute granularity with matching raw
+  //       `endedAt` values not byte-identical — pick a fixed,
+  //       order-independent representative rather than "whichever the
+  //       scan saw first".
+  // Both are handled together: gather every candidate tied with `best`
+  // (best included), prefer the Write=-bearing subset when non-empty, then
+  // pick the earliest raw `endedAt` within that subset as the canonical
+  // representative — independent of `allEvents`' iteration order.
+  const tiedWithBest = candidates.filter(function (candidate) {
+    if (candidate === best) return true;
+    if (!sameNotionMinute(candidate.endedAt, best.endedAt)) return false;
+    return candidate.endStatus === best.endStatus && candidate.kind === best.kind;
+  });
+  if (tiedWithBest.length > 1) {
+    const withWrite = tiedWithBest.filter(function (candidate) {
       return candidate.write !== undefined && candidate.write !== null && candidate.write !== '';
     });
-    if (moreInformative) best = moreInformative;
+    const pool = withWrite.length ? withWrite : tiedWithBest;
+    best = pool.reduce(function (earliest, candidate) {
+      return candidate.endedAt.getTime() < earliest.endedAt.getTime() ? candidate : earliest;
+    }, pool[0]);
   }
   return best;
 }
