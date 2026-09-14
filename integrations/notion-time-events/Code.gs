@@ -4157,18 +4157,27 @@ function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
     const bestExplicitMatch = best.execution && best.execution === expectedExecutionId;
     if (!bestExplicitMatch) {
       const bestIsLegacy = !best.execution;
-      const identityMatchTie = candidates.find(function (candidate) {
+      const tiedNonBlocking = candidates.filter(function (candidate) {
         if (candidate === best || candidate.blocks) return false;
-        if (compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) !== 0) return false;
-        if (candidate.execution === expectedExecutionId) return true;
-        // `best` already matches vacuously (legacy, no Execution= to
-        // contradict expectedExecutionId) — do not swap it for another
-        // non-explicit-match candidate found first by scan order alone.
-        if (bestIsLegacy) return false;
-        // `best` explicitly mismatches: fall back to the pre-fix behavior
-        // of accepting a legacy (vacuous) match when no explicit match ties.
-        return churnCandidateExecutionMatches_(candidate.event, expectedExecutionId);
+        return compareInstants_({ timestamp: candidate.endedAt, write: candidate.write }, { timestamp: best.endedAt, write: best.write }) === 0;
       });
+      // Codex Review (PR #57, second follow-up): search the FULL tied
+      // cohort for an explicit match first — a single `.find()` combining
+      // both checks stops at whichever candidate it reaches first, so a
+      // legacy candidate encountered before an explicitly-matching one
+      // (e.g. order [mismatch, legacy, explicit-match]) would satisfy the
+      // fallback branch and wrongly win before the scan ever reached the
+      // explicit match later in the array. Only fall back to a legacy
+      // (vacuous) match when no explicit match exists anywhere in the tie.
+      const identityMatchTie =
+        tiedNonBlocking.find(function (candidate) {
+          return candidate.execution === expectedExecutionId;
+        }) ||
+        (bestIsLegacy
+          ? undefined
+          : tiedNonBlocking.find(function (candidate) {
+              return churnCandidateExecutionMatches_(candidate.event, expectedExecutionId);
+            }));
       if (identityMatchTie) best = identityMatchTie;
     }
   }

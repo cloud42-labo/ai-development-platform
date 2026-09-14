@@ -276,3 +276,19 @@ test('Codex Review (PR #57 follow-up): tied against a LEGACY candidate (no Execu
   assert.equal(sandbox.mostRecentlyClosedEvent_([legacy, explicitMatch], expected).id, 'evt-explicit-match');
   assert.equal(sandbox.mostRecentlyClosedEvent_([explicitMatch, legacy], expected).id, 'evt-explicit-match');
 });
+
+test('Codex Review (PR #57, second follow-up): a three-way tie of [explicit-mismatch, legacy, explicit-match] must find the explicit match wherever it falls in the array — a single-pass scan that stops at the first "vacuously eligible" legacy candidate must not shadow a later explicit match', () => {
+  const { sandbox } = harness();
+  const mismatch = eventPage('evt-mismatch', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment', 'Execution=2026-01-01T00:00:00.000Z') });
+  const legacy = eventPage('evt-legacy', { endedAt: '2026-08-01T08:00:15.000Z', note: note('Reason=reassignment') });
+  const explicitMatch = eventPage('evt-explicit-match', { endedAt: '2026-08-01T08:00:45.000Z', note: note('Reason=reassignment', 'Execution=2026-08-01T00:00:00.000Z') });
+  const expected = '2026-08-01T00:00:00.000Z';
+
+  // `mismatch` is `best` initially (first candidate, all tied with no
+  // Write=). Without the fix, the single find() reaches `legacy` before
+  // `explicitMatch` and returns it, since churnCandidateExecutionMatches_
+  // vacuously accepts a no-Execution= event.
+  assert.equal(sandbox.mostRecentlyClosedEvent_([mismatch, legacy, explicitMatch], expected).id, 'evt-explicit-match');
+  assert.equal(sandbox.mostRecentlyClosedEvent_([mismatch, explicitMatch, legacy], expected).id, 'evt-explicit-match');
+  assert.equal(sandbox.mostRecentlyClosedEvent_([explicitMatch, legacy, mismatch], expected).id, 'evt-explicit-match');
+});
