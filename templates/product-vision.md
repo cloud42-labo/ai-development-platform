@@ -1,8 +1,8 @@
 # Product Vision: <Vision / Product name>
 
 > Template for an Approved Vision. Follow `../docs/product-vision-quality-standard.md`.
-> Idea / Experimental work may begin from a Human Raw Idea or provisional Vision,
-> but Product Registry / Product Planning promotion requires this Gate to pass.
+> Idea / Vibe / Experimental work may begin from a Human Raw Idea or provisional Vision,
+> but the R05 lifecycle transitions that require an Approved Vision must pass this Gate.
 > Keep Vision solution-neutral; move Product Concept, GTM, pricing, UI, technology,
 > implementation, PRD, Epic, and Task choices downstream.
 
@@ -10,9 +10,13 @@
 
 <Company / Business / Product>
 
-## Lifecycle Stage
+## Canonical R05 Stage
 
-<Idea / Experimental / Product Planning / Major Pivot>
+<Idea / Vibe / Experimental / Project / Development / Release Candidate / Product>
+
+## Review Context
+
+<Exploration / Project promotion / Development promotion / Major Pivot review / Existing Product review>
 
 ## Purpose
 
@@ -73,6 +77,7 @@
 - Owner intent boundary: <Pass / Revise / Unverified>
 - Downstream boundary: <Pass / Revise>
 - Owner acceptance evidence: <Present / Missing / Not yet required>
+- Owner acceptance reference: <Notion Decision/Task URL or equivalent stable record + decision date + accepted wording/scope; required when evidence is Present>
 - Vision Decision: <Approved / Revise / Unverified / Provisional>
 
 ## Revision Notes
