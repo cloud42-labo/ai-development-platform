@@ -455,3 +455,19 @@ test('Codex Review (PR #55, cutoff redesign): a Write=-missing row at the same N
     assert.equal(cutoff.ambiguousCutoffTie, true);
   });
 });
+
+test('Codex Review (PR #55, round 5 / Owner-classified fix): two undominated candidates sharing a BYTE-IDENTICAL Ended At but different present Write= values (a genuine possibility for retroactive boundaries treated as tied by boundaryCompare_) are resolved by a stable final discriminator (event id), not by whichever the array happened to place first', () => {
+  const { sandbox } = harness();
+  // Both retroactive, same exact instant, same endStatus/kind (so no
+  // conflictingTie) — boundaryCompare_ treats this same-minute
+  // retroactive-involving pair as tied (0) regardless of differing Write=.
+  const a = eventPage('evt-a-retro', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment', 'Boundary=left_in_progress', 'End Status=Review', 'Write=1000') });
+  const b = eventPage('evt-b-retro', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=duplicate_reconciliation', 'Boundary=left_in_progress', 'End Status=Review', 'Write=2000') });
+
+  const forward = sandbox.mostRecentBoundaryCandidate_([a, b]);
+  const backward = sandbox.mostRecentBoundaryCandidate_([b, a]);
+  assert.equal(forward.conflictingTie, undefined);
+  assert.equal(backward.conflictingTie, undefined);
+  assert.equal(forward.event.id, backward.event.id);
+  assert.equal(forward.event.id, 'evt-a-retro');
+});

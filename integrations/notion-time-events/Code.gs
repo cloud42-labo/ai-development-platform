@@ -3857,9 +3857,24 @@ function mostRecentBoundaryCandidate_(allEvents) {
     return candidate.write !== undefined && candidate.write !== null && candidate.write !== '';
   });
   const pool = withWrite.length ? withWrite : undominated;
-  return pool.reduce(function (earliest, candidate) {
-    return candidate.endedAt.getTime() < earliest.endedAt.getTime() ? candidate : earliest;
-  }, pool[0]);
+  const earliestTime = pool.reduce(function (min, candidate) {
+    return Math.min(min, candidate.endedAt.getTime());
+  }, pool[0].endedAt.getTime());
+  const earliestGroup = pool.filter(function (candidate) {
+    return candidate.endedAt.getTime() === earliestTime;
+  });
+  // Codex Review (PR #55, round 5 / Owner-classified fix): two pool members
+  // can share a BYTE-IDENTICAL `endedAt` (a real occurrence — these values
+  // originate from minute-granular task-edit timestamps that can genuinely
+  // collide, not just differ within the same minute). The reduction above
+  // has no further discriminator in that case and silently keeps whichever
+  // candidate the array happened to place first — still query-order
+  // dependent. Break that residual tie with the event's own Notion page id
+  // (stable and unique, independent of query order): lexicographically
+  // smallest wins.
+  return earliestGroup.reduce(function (winner, candidate) {
+    return candidate.event.id < winner.event.id ? candidate : winner;
+  }, earliestGroup[0]);
 }
 
 // docs/review-fix-state-model.md §3 step 2's hard history cutoff: the most
