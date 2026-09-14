@@ -312,3 +312,25 @@ test('Codex Review (PR #57, round 4): a Write=-missing legacy close must not act
   });
   assert.ok(results.every(function (id) { return id === results[0]; }), 'result must not depend on query order: got ' + JSON.stringify(results));
 });
+
+test('Codex Review (PR #57, round 5 / Owner-classified fix): a RETROACTIVELY-stamped boundary close (Boundary=left_in_progress with a different Reason=) must not be dominated by a same-minute ordinary reassignment carrying a larger Write= — its Write= is discovery time, not real close time (same rule as ADP-051-B4 boundaryCompare_), so it must stay in the undominated set and win via Finding O\'s blocking-priority rule, regardless of query order', () => {
+  const { sandbox } = harness();
+  const retroBoundary = eventPage('evt-retro-boundary', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment', 'Boundary=left_in_progress', 'End Status=Review', 'Write=100') });
+  const reassignment = eventPage('evt-reassignment-bigwrite', { endedAt: '2026-08-01T08:00:30.000Z', note: note('Reason=reassignment', 'Write=999999') });
+
+  const forward = sandbox.mostRecentlyClosedEvent_([retroBoundary, reassignment]);
+  const backward = sandbox.mostRecentlyClosedEvent_([reassignment, retroBoundary]);
+  assert.equal(forward.id, 'evt-retro-boundary');
+  assert.equal(backward.id, 'evt-retro-boundary');
+});
+
+test('Codex Review (PR #57, round 5 / Owner-classified fix): two undominated candidates sharing a BYTE-IDENTICAL Ended At are resolved by a stable final discriminator (event id), not by whichever the array happened to place first', () => {
+  const { sandbox } = harness();
+  const a = eventPage('evt-a-identical', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=reassignment') });
+  const b = eventPage('evt-b-identical', { endedAt: '2026-08-01T08:00:00.000Z', note: note('Reason=duplicate_reconciliation') });
+
+  const forward = sandbox.mostRecentlyClosedEvent_([a, b]);
+  const backward = sandbox.mostRecentlyClosedEvent_([b, a]);
+  assert.equal(forward.id, backward.id);
+  assert.equal(forward.id, 'evt-a-identical');
+});

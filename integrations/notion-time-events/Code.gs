@@ -4135,11 +4135,36 @@ function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
       // resolveChurnInheritedWorkType_ already apply: a genuine/retroactive
       // execution boundary, or an ambiguous_provenance_restart close.
       blocks: isExecutionBoundary_(meta) || meta.reason === 'ambiguous_provenance_restart',
+      // Same retroactive-vs-genuine distinction as ADP-051-B4's
+      // mostRecentBoundaryCandidate_ (this block's header comment): a
+      // boundary CLOSED naturally (`Reason=left_in_progress`) carries a
+      // trustworthy event-time Write=; a boundary stamped onto an event
+      // AFTER the fact (`Boundary=left_in_progress` with a different
+      // `Reason=`) carries a discovery-time Write= instead. Only
+      // meaningful for boundary-marked events; an ordinary reassignment/
+      // duplicate_reconciliation close is neither.
+      kind: meta.reason === 'left_in_progress' ? 'genuine' : meta.boundary === 'left_in_progress' ? 'retroactive' : null,
     });
   });
   if (!candidates.length) return null;
 
+  const sameNotionMinute = function (a, b) {
+    return Math.floor(a.getTime() / 60000) === Math.floor(b.getTime() / 60000);
+  };
   const instantOf = function (c) { return { timestamp: c.endedAt, write: c.write }; };
+  // Codex Review (PR #57, round 5 / Owner-classified fix): reuse B4's
+  // retroactive-write-is-untrustworthy rule here too — a same-minute pair
+  // where either side is a retroactively-stamped boundary must be treated
+  // as tied (0) regardless of raw Write= comparison, or a normal
+  // reassignment close with a larger discovery-unrelated Write= can
+  // dominate (and thus exclude from `undominated`) a retroactive boundary
+  // that should categorically block inheritance at that point. Different
+  // Notion minutes remain trustworthy (a real `Ended At` difference)
+  // regardless of retroactive-ness.
+  const churnCompare_ = function (a, b) {
+    if (sameNotionMinute(a.endedAt, b.endedAt) && (a.kind === 'retroactive' || b.kind === 'retroactive')) return 0;
+    return compareInstants_(instantOf(a), instantOf(b));
+  };
   // Codex Review (PR #57, redesign): compute the UNDOMINATED set directly
   // (same rationale as ADP-051-B4's mostRecentBoundaryCandidate_ redesign)
   // instead of picking an arbitrary `best` via a left-to-right scan and
@@ -4150,12 +4175,12 @@ function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
   // which candidate a naive scan happens to land on as `best` (and thus
   // which category, blocking or non-blocking, gets checked for ties) can
   // flip with query order. Any pair within the undominated set is provably
-  // tied (0) by compareInstants_'s antisymmetry: checking each candidate
+  // tied (0) by churnCompare_'s antisymmetry: checking each candidate
   // against EVERY other candidate, not just a single `best`, cannot be
   // fooled by an intermediate tied-but-dominated candidate.
   const undominated = candidates.filter(function (c) {
     return !candidates.some(function (other) {
-      return other !== c && compareInstants_(instantOf(other), instantOf(c)) > 0;
+      return other !== c && churnCompare_(other, c) > 0;
     });
   });
 
@@ -4167,9 +4192,19 @@ function mostRecentlyClosedEvent_(allEvents, expectedExecutionId) {
   const pool = blocking.length ? blocking : undominated;
 
   const canonicalEarliest = function (group) {
-    return group.reduce(function (earliest, c) {
-      return c.endedAt.getTime() < earliest.endedAt.getTime() ? c : earliest;
-    }, group[0]);
+    const earliestTime = group.reduce(function (min, c) {
+      return Math.min(min, c.endedAt.getTime());
+    }, group[0].endedAt.getTime());
+    const earliestGroup = group.filter(function (c) { return c.endedAt.getTime() === earliestTime; });
+    // Codex Review (PR #57, round 5 / Owner-classified fix): same residual
+    // gap as ADP-051-B4 — two group members can share a byte-identical
+    // `endedAt`, and the min-reduce above has no further discriminator in
+    // that case, silently keeping whichever candidate the array placed
+    // first. Break that with the event's own Notion page id (stable,
+    // unique, independent of query order).
+    return earliestGroup.reduce(function (winner, c) {
+      return c.event.id < winner.event.id ? c : winner;
+    }, earliestGroup[0]);
   };
 
   // No identity to resolve (single candidate left, the pool is the
