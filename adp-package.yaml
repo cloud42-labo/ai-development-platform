@@ -78,8 +78,12 @@ optional_adapters: []
 package_root: package/README.md
 example_config: examples/cloud42-labo-config.md
 
-# How to move between manifest states. Add an entry whenever a version bump
-# requires an adopter to change something; see docs/versioning-policy.md.
+# How to move between manifest states. This is the first manifest this
+# repository has had, so there is no prior version to migrate from — the
+# only entry today documents adopting the manifest itself. Add an entry
+# here whenever a future version bump requires an adopter to change
+# something (see docs/versioning-policy.md's "when to add a migration_path
+# entry").
 migration_path:
   - from: null
     to: "0.1.0"
@@ -93,8 +97,8 @@ migration_path:
   # ADP-049-C (2026-08-30) added the package_root/example_config fields
   # above without bumping any version field: both are new optional-to-use
   # fields, no existing field changed meaning, and no asset content
-  # changed — per docs/versioning-policy.md's migration rule this did not
-  # require a version migration entry.
+  # changed — per docs/versioning-policy.md's "When to add a
+  # migration_path entry", a bump-free additive change does not need one.
   - field: rules_version
     from: "0.1.0"
     to: "0.2.0"
@@ -109,9 +113,12 @@ migration_path:
     action_required: >-
       An adopter following this Rule must, from this version on, also
       create/update a row in an AI Work Sessions-equivalent database at
-      Task start and end. An adopter with no such database should either
-      create one matching that section's fields, or explicitly adopt the
-      section's degradation rule.
+      Task start and end (see governance/ai-execution-constraints.md's
+      "AI Work Session recording"), not only the Task's own Status/Time
+      Event. An adopter with no such database should either create one
+      matching that section's fields, or explicitly adopt the section's
+      degradation rule (record the gap in the Task's Result, do not block
+      substantive work on it).
   - field: workflow_version
     from: "0.1.0"
     to: "0.2.0"
@@ -123,7 +130,9 @@ migration_path:
       required steps changed.
     action_required: >-
       None to adopt the field bump itself. Adopting the standard's content
-      is separate, per-Product backfill work.
+      (creating the five documents for a Product, syncing PRD/Design Doc at
+      Epic completion) is the separate, per-Product backfill work tracked
+      as ADP-050's child Tasks — not implied by the version bump alone.
   - field: templates_version
     from: "0.1.0"
     to: "0.2.0"
@@ -144,47 +153,118 @@ migration_path:
       ("Current-gate relevance checked") between classifying a criterion
       Human-only and creating the Human Request for it. Added
       governance/state-transition-pre-check-regression-cases.md and
-      Pattern 4 in docs/human-gate-pre-check-examples.md. MAJOR because
-      previously-compliant Human-gate behavior became non-compliant.
+      Pattern 4 in docs/human-gate-pre-check-examples.md. MAJOR per
+      docs/versioning-policy.md's Rules judgment, not MINOR as first
+      classified (corrected after Codex review on ai-development-platform
+      PR #19): the prior gate's own written form (old step 4/5, now
+      renumbered 4/6/7) blocked/permitted a Human Request whenever ANY
+      `Human-only` criterion remained, regardless of which transition it
+      belonged to — the exact behavior that produced PM-8. The new step 5
+      makes that same previously-compliant behavior (creating a Human
+      Request or Blocked state for a `Human-only` criterion that gates a
+      *different*, downstream transition) non-compliant, and narrows the
+      condition under which the existing gate fires. That is a loosening
+      of a relied-upon safety gate per the policy's own MAJOR criteria,
+      not a purely additive new constraint — even though its purpose is
+      to prevent the gate from being *misapplied*, not to remove it from
+      cases where it genuinely applies.
     action_required: >-
-      Before setting a task/PR to a Human-reason Blocked state or reporting
-      one as Human-waiting, identify the exact transition and verify each
-      Human-only criterion is a prerequisite of that transition rather than
-      a later downstream transition.
+      An adopter following this Rule must, before setting a task/PR to a
+      Human-reason Blocked state or reporting one as Human-waiting
+      (including during a backlog sweep, not only when first creating the
+      gate), name the exact transition being evaluated and confirm each
+      remaining Human-only criterion is a mandatory prerequisite of that
+      transition specifically — not of a later, independent transition in
+      the same flow (deployment, publication, real-device/environment
+      Acceptance) — before treating it as blocking. A criterion that only
+      gates a downstream transition must not block the current one; route
+      it as its own Human Request scoped to the transition it actually
+      gates. Demoting an existing Human gate under this step still
+      requires the same evidence standard as the rest of the Human gate
+      pre-flight (see governance/state-transition-pre-check-regression-cases.md
+      Case 2): a criterion an accountable reviewer has explicitly and
+      currently tied to the transition being evaluated stays blocking
+      until that same authority revises it — this step narrows AI-invented
+      over-blocking, it does not let an agent unilaterally override an
+      explicit, still-current reviewer decision.
   - field: workflow_version
     from: "0.2.0"
     to: "0.3.0"
     date: "2026-09-01"
     change: >-
-      ADP-043-O (Postmortem PM-8): docs/operating-guide.md gained the
-      Current-gate relevance step and standing re-evaluation cross-reference.
-      Additive: no existing Stage/Gate/step/closure criterion was removed.
+      ADP-043-O (Postmortem PM-8): docs/operating-guide.md gained new
+      section 11.8 "Current-gate relevance (state transition boundary)",
+      and 11.6's standing re-evaluation gained a cross-reference to it.
+      Additive: no existing Stage/Gate/step/closure criterion changed.
+      Stays MINOR even though the paired rules_version entry above was
+      corrected to MAJOR — this file is the descriptive policy source
+      (Operating Guide), not the executable guardrail (Rules); it only
+      gained a new described step, it did not itself narrow when an
+      existing Workflow Stage/Gate/closure criterion applies.
     action_required: >-
-      Adopt the paired current-gate relevance behavior together with the
-      rules_version 1.0.0 change.
+      Same as the paired rules_version 1.0.0 entry above — this Workflow
+      bump is the durable-destination half of the same behavior change;
+      adopt both together.
   - field: workflow_version
     from: "0.3.0"
     to: "1.0.0"
     date: "2026-09-04"
     change: >-
-      ADP-054-T10: Weekly Sprint operation changed to Review -> Retrospective
-      -> Backlog Refinement -> Sprint Close -> Sprint Goal review -> Sprint
-      Planning, matching the approved weekly-sprint Composite.
+      ADP-054-T10: docs/operating-guide.md's "Weekly Sprint operation"
+      numbered list changed from Sprint Review -> Backlog Refinement ->
+      Sprint Planning -> Execution -> Retrospective -> Update weekly focus
+      to Sprint Review -> Retrospective -> Backlog Refinement -> Sprint
+      Close -> Sprint Goal review -> Sprint Planning, matching the
+      cloud42-labo/skills weekly-sprint Composite's already-approved order
+      (ADP-054) and the order Notion's Job Schedule|AI自動実行スケジュール
+      has actually run since. MAJOR per docs/versioning-policy.md's
+      Workflow judgment (Codex-reported correction to an initial MINOR
+      classification on this same PR): Execution and Update weekly focus
+      are removed as named steps and Retrospective/Refinement are
+      reordered relative to each other, regardless of whether the new
+      order was already the de facto practice elsewhere -- this file
+      versions what the durable artifact itself asserts, not whether
+      reality had already moved past it.
     action_required: >-
-      Update Routine/Scheduler prompts, checklists, or tooling that still
-      encode the prior six-step order to the new order and step names.
+      An adopter whose own Routine/Scheduler prompt, checklist, or tooling
+      still names or numbers the old six steps (Review / Refinement /
+      Planning / Execution / Retrospective / Update focus) must update it
+      to the new order and step names (Review / Retrospective / Refinement
+      / Close / Goal review / Planning) -- in particular, treating
+      "Retrospective" as the step immediately after Review rather than
+      near the end, and recognizing Sprint Close and Sprint Goal review as
+      their own steps rather than folding them into Planning or Execution.
   - field: rules_version
     from: "1.0.0"
     to: "2.0.0"
     date: "2026-09-05"
     change: >-
-      ADP-053: removed the AI Work Session opened/closed steps and recording
-      subsection from governance/ai-execution-constraints.md because that
-      database duplicated evidence already carried by Stories & Tasks,
-      Task Time Events, and GitHub.
+      ADP-053: removed the "AI Work Session opened" / "AI Work Session
+      closed" steps and the "AI Work Session recording" subsection from
+      governance/ai-execution-constraints.md's managed-work execution
+      pre-flight and completion post-flight (added by the rules_version
+      0.2.0 entry above, ADP-046). The `AI Work Sessions` Notion database
+      had stopped being populated since 2026-08-30 and duplicated
+      information already carried by Stories & Tasks (`Result`, `Pull
+      Request`), Task Time Events (elapsed-time measurement), and GitHub
+      (PR/commit history). MAJOR per docs/versioning-policy.md's Rules
+      judgment ("removes ... a gate an adopter may be relying on for
+      safety"): agent behavior that was required to stay compliant under
+      1.0.0 (opening/closing an `AI Work Sessions` row per Task) is no
+      longer part of this file at all.
     action_required: >-
-      Retire compliance checks, dashboards, or tooling that require new AI
-      Work Sessions rows; retain historical rows only if useful for audit.
+      An adopter who built compliance checks, dashboards, or tooling
+      against the `AI Work Sessions` fields this Rule used to require
+      (`Status = Running`/`Success`/`Failed`/`Needs Human`, `Started
+      At`/`Completed At`, the `⚠ Session Missing Started At` / `⚠ Success
+      Missing Completed At` views) should retire them: per-execution audit
+      evidence now comes from the Task's own `Result`, `Pull Request`/Git
+      commit identifiers, and Task Time Events only. Do not create a
+      replacement session-log database or field to fill the gap — that is
+      the packaged non-goal this bump encodes, not an oversight to correct
+      locally. An adopter with an existing `AI Work Sessions`-equivalent
+      database may keep its historical rows for audit purposes; this bump
+      only removes the requirement to keep writing new ones.
   - field: rules_version
     from: "2.0.0"
     to: "3.0.0"
@@ -192,12 +272,19 @@ migration_path:
     change: >-
       ADP-056: reviewer availability failure no longer forces an indefinite
       stop when another independent reviewer exists; the exact reviewed SHA
-      must equal merge head; review-loop cost is bounded by Approach
-      Refinement at round 3 and a default hard cap at round 5.
+      must equal the merge head; and review-loop cost is bounded by an
+      Approach Refinement trigger at round 3 and a default hard cap at round
+      5. MAJOR because this deliberately loosens the prior Codex-specific
+      review gate while changing previously-compliant repeated-review
+      behavior into a refinement requirement.
     action_required: >-
-      Preserve Author != Reviewer, fallback evidence, current-head review,
-      and the review-loop cap. A sixth substantive automated review requires
-      explicit Owner approval.
+      Adopters must preserve Author != Reviewer, record fallback evidence,
+      verify the exact reviewed SHA again immediately before merge, and must
+      stop patch-by-patch review after three repeated same-area finding
+      rounds. A sixth substantive automated review requires explicit Owner
+      approval; otherwise return to Approach Refinement, split the PR, or
+      redesign the change. Reviewer usage limits do not authorize paid
+      capacity changes without Owner approval.
   - field: workflow_version
     from: "1.0.0"
     to: "1.1.0"
