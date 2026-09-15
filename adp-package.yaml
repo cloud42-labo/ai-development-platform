@@ -41,14 +41,15 @@ rules_version: 3.0.0
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
 # governance/monthly-risk-management-review.md,
-# docs/product-design-doc-standard.md).
-workflow_version: 1.0.0
+# docs/product-design-doc-standard.md,
+# docs/product-vision-quality-standard.md).
+workflow_version: 1.1.0
 
 # Version of the Templates asset class (templates/README.md,
 # templates/monthly-risk-review.md, templates/product-vision.md,
 # templates/inception-deck.md, templates/prd.md, templates/design-doc.md,
 # templates/epic-brief.md).
-templates_version: 0.2.0
+templates_version: 1.0.0
 
 # What an adopting agent/environment must have to operate this package as
 # intended. Not enforced by tooling here (no custom package manager) —
@@ -284,3 +285,37 @@ migration_path:
       approval; otherwise return to Approach Refinement, split the PR, or
       redesign the change. Reviewer usage limits do not authorize paid
       capacity changes without Owner approval.
+  - field: workflow_version
+    from: "1.0.0"
+    to: "1.1.0"
+    date: "2026-09-14"
+    change: >-
+      ADP-044-D: adds the Product Vision Quality Gate and makes an Approved,
+      evidence-backed, solution-neutral Vision with auditable Owner
+      acceptance a required workflow condition for the R05 lifecycle
+      transitions that depend on an Approved Vision. This is an additive
+      Gate, therefore MINOR under docs/versioning-policy.md.
+    action_required: >-
+      Before promoting work through an R05 transition that requires an
+      Approved Vision, run docs/product-vision-quality-standard.md and record
+      the canonical R05 Stage, review context, Gate decision, and stable
+      Owner-acceptance reference. Existing in-flight work does not need to
+      be rewritten unless its next transition or a material pivot invokes
+      the Gate.
+  - field: templates_version
+    from: "0.2.0"
+    to: "1.0.0"
+    date: "2026-09-14"
+    change: >-
+      ADP-044-D: templates/product-vision.md changes the required-fields
+      contract. It replaces the non-canonical Lifecycle Stage field with
+      Canonical R05 Stage + Review Context and requires a traceable Owner
+      Acceptance Reference when acceptance evidence is Present. Prior
+      template instances can therefore be non-conformant; MAJOR per
+      docs/versioning-policy.md.
+    action_required: >-
+      When an existing Product Vision is next evaluated for lifecycle
+      promotion or material pivot, migrate it to include Canonical R05 Stage,
+      Review Context, and an auditable Owner Acceptance Reference. Do not
+      fabricate historical acceptance evidence; use Revise/Unverified until
+      a valid reference exists.
