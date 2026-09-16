@@ -44,3 +44,27 @@ In short: **State = Notion / Artifact = GitHub / Memory = brain**.
 ADP is treated as an **Organization Digital Twin**: roles, authority, decisions, delivery flows, controls and feedback loops are implemented, observed and improved as a working AI organization.
 
 The repository is public. Do not commit secrets, credentials, private personal data, company-confidential information, or content that cannot be intentionally published.
+
+## License / usage terms
+
+This repository does not currently carry an OSS license file. Being publicly
+visible on GitHub does not by itself grant anyone permission to reuse,
+redistribute, or modify its contents — under default copyright, all rights
+are reserved by Cloud42 Labo. Viewing and reading the contents (including
+via `adp-bootstrap`'s dry-run/plan step) is fine; installing or
+redistributing it into another environment requires the repository owner's
+explicit permission until a license is formally adopted.
+
+Candidate OSS licenses for a future formal adoption, for when Cloud42 Labo's
+owner decides to open this package up for third-party/other-org reuse (see
+[`adp-bootstrap`](https://github.com/cloud42-labo/skills/tree/main/.claude/skills/adp-bootstrap)):
+
+| License | Why it could fit | Trade-off |
+|---|---|---|
+| **MIT** (recommended) | Simplest, most widely recognized permissive license; low friction for another org to adopt Rules/Schemas/Workflows/Templates that are mostly documentation and process, not patent-sensitive code | No explicit patent grant (unlikely to matter here) |
+| Apache-2.0 | Adds an explicit patent grant and contribution terms | More legal text than this package's content (docs/templates/rules, not a library) plausibly needs |
+| Keep proprietary (all rights reserved) | No change from today; simplest if third-party redistribution isn't actually intended yet | `adp-bootstrap`'s stated purpose (deploying ADP to other orgs) would need a different distribution mechanism (e.g. a signed agreement per adopter) instead of "clone and go" |
+
+Which license (if any) to formally adopt is an Owner decision, not an AI
+one — see the Human Request below. This section states the current default
+status and the options; it does not itself grant a license.
