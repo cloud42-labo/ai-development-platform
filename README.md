@@ -66,5 +66,8 @@ owner decides to open this package up for third-party/other-org reuse (see
 | Keep proprietary (all rights reserved) | No change from today; simplest if third-party redistribution isn't actually intended yet | `adp-bootstrap`'s stated purpose (deploying ADP to other orgs) would need a different distribution mechanism (e.g. a signed agreement per adopter) instead of "clone and go" |
 
 Which license (if any) to formally adopt is an Owner decision, not an AI
-one — see the Human Request below. This section states the current default
-status and the options; it does not itself grant a license.
+one — tracked as a Notion Task under this repository's Product/Epic (per
+this README's own Source-of-truth model above), not linked here to avoid
+embedding an org-specific Notion page reference in a package meant for
+other adopters. This section states the current default status and the
+options; it does not itself grant a license.

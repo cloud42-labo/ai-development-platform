@@ -36,7 +36,7 @@ schema_version: 0.1.0-experimental
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 3.0.0
+rules_version: 3.1.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -284,3 +284,24 @@ migration_path:
       approval; otherwise return to Approach Refinement, split the PR, or
       redesign the change. Reviewer usage limits do not authorize paid
       capacity changes without Owner approval.
+  - field: rules_version
+    from: "3.0.0"
+    to: "3.1.0"
+    date: "2026-09-16"
+    change: >-
+      ADP-049-F3: README.md gained a "License / usage terms" section
+      stating that no OSS license is currently granted (default copyright
+      applies) and that installing or redistributing this package into
+      another environment requires the repository owner's explicit
+      permission until a license is formally adopted. MINOR per
+      docs/versioning-policy.md's Rules judgment: this is a new,
+      previously-undocumented constraint on redistribution, but it adds a
+      permission requirement rather than invalidating any prior
+      compliant behavior (installing/reading the package as adp-bootstrap
+      already does was never itself redistribution to a third party).
+    action_required: >-
+      An adopter who intends to redistribute this package (or a fork of
+      it) to another organization beyond their own installation must first
+      confirm license/permission status with this repository's owner —
+      adp-bootstrap's own dry-run/install/upgrade into an adopter's own
+      environment is not itself redistribution and needs no such check.
