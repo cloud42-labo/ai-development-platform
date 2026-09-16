@@ -423,6 +423,7 @@ function queryCompletedTasksForRange_(startIso, endIsoExclusive) {
         and: [
           { property: 'Completed At', date: { on_or_after: startIso } },
           { property: 'Completed At', date: { before: endIsoExclusive } },
+          { property: 'Status', select: { equals: 'Done' } },
         ],
       },
     }
@@ -466,10 +467,13 @@ function productNamesForTask_(task, productMap) {
   return names.length > 0 ? names : [UNKNOWN_LABEL];
 }
 
-// Groups completed Tasks (Status left unfiltered on purpose: Completed At
-// being set in range is the membership test, matching what Done-gate
-// evidence rules already treat as authoritative) by Product, counting them
-// and averaging `Lead Time (h)`.
+// Groups completed Tasks by Product, counting them and averaging
+// `Lead Time (h)`. Membership requires Status = Done, not just Completed At
+// being set in range: a Task that was Done, Reopened, and later closed as
+// Superseded can keep its earlier Completed At (Notion's Reopen guard does
+// not clear it automatically — see integrations/notion-time-events/README.md),
+// so Completed-At-in-range alone would wrongly count a Superseded Task as a
+// Done completion.
 function aggregateTasksByProduct_(tasks, productMap) {
   const byProduct = {};
 
@@ -478,7 +482,9 @@ function aggregateTasksByProduct_(tasks, productMap) {
     return byProduct[name];
   }
 
-  tasks.forEach(function (task) {
+  const doneTasks = tasks.filter(function (task) { return selectName_(task.properties.Status) === 'Done'; });
+
+  doneTasks.forEach(function (task) {
     const names = productNamesForTask_(task, productMap);
     const leadTime = formulaNumber_(task.properties['Lead Time (h)']);
     const hasLeadTime = task.properties['Lead Time (h)'] &&
