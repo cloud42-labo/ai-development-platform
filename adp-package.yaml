@@ -72,9 +72,20 @@ skills_version: 0.1.0
 # Where the Skills asset class physically lives. Unlike the other four
 # classes, this one is not resolvable by a path relative to this repository,
 # so an adopter (or a doctor/plan run) needs the repository named explicitly.
+#
+# `ref` pins skills_version 0.1.0 to the exact commit that content was at
+# when this field was added — the last commit under `path` before this
+# manifest change (`git log --oneline -- .claude/skills/adp-bootstrap` in
+# cloud42-labo/skills). `repository` + `path` alone point at a mutable
+# branch: checking out this ADP commit later would silently resolve to
+# whatever `cloud42-labo/skills#main` has become by then, while still
+# reporting `skills_version: 0.1.0`. Bump `ref` in lockstep with every
+# `skills_version` change; never leave it pointing past what that version
+# number claims.
 skills_source:
   repository: cloud42-labo/skills
   path: .claude/skills/adp-bootstrap
+  ref: 9043914 # cloud42-labo/skills@9043914 — content matching skills_version 0.1.0
   index: package/skills.md
 
 # What an adopting agent/environment must have to operate this package as

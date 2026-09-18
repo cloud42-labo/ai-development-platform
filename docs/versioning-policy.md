@@ -4,7 +4,7 @@
 
 ## Why one version number is not enough
 
-`ai-development-platform` is not one artifact — it is four independently-evolving asset classes (Rules, Schemas, Workflows, Templates; see `docs/v1-asset-inventory.md`). A Rules change (e.g. tightening the Human Gate Pre-check) and a Templates change (e.g. adding a new reusable template) have different blast radii for an adopter. Forcing them onto one shared version number would mean every adopter re-evaluates their whole integration on every change, including changes that don't touch what they depend on.
+`ai-development-platform` is not one artifact — it is five independently-evolving asset classes (Rules, Schemas, Workflows, Templates, and Skills; see `docs/v1-asset-inventory.md`; Skills is hosted outside this repository — see below). A Rules change (e.g. tightening the Human Gate Pre-check) and a Templates change (e.g. adding a new reusable template) have different blast radii for an adopter. Forcing them onto one shared version number would mean every adopter re-evaluates their whole integration on every change, including changes that don't touch what they depend on.
 
 `adp-package.yaml` therefore carries six version fields: an overall `version` for the package as a whole, plus `schema_version`, `rules_version`, `workflow_version`, `templates_version`, and `skills_version` for each asset class. All follow SemVer (`MAJOR.MINOR.PATCH`).
 
