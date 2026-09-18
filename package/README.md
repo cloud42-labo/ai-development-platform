@@ -4,13 +4,19 @@
 > asset inventory from `ADP-049-A` (`../docs/v1-asset-inventory.md`) and the manifest
 > from `ADP-049-B` (`../adp-package.yaml`).
 
-This directory is the **single entry point for locating this repository's four
-versioned asset classes** — Rules, Schemas, Workflows, Templates (see
-`../docs/v1-asset-inventory.md` for why these four and not Skills/Adapters/
-Environment-specific config, none of which currently have content here).
+This directory is the **single entry point for locating this package's five
+versioned asset classes** — Rules, Schemas, Workflows, Templates, Skills.
+
+Four of those five have their content in this repository. Skills does not: it
+is hosted in `cloud42-labo/skills` and was added to the package after
+`../docs/v1-asset-inventory.md` was written, which is why that document still
+lists Skills as "not present in this repo" and defers it as a cross-repo
+dependency. [`skills.md`](skills.md) is where that deferred dependency is now
+resolved. Adapters and Environment-specific config remain unversioned, for the
+reasons the inventory gives.
 
 It does not move or duplicate the underlying documents. Each class file below
-(`rules.md`, `schemas.md`, `workflows.md`, `templates.md`) is a short index of
+(`rules.md`, `schemas.md`, `workflows.md`, `templates.md`, `skills.md`) is a short index of
 relative links into the canonical files, which stay where they already live
 (mostly `governance/`, `docs/`, `templates/`, and the repository root). Two
 files — `AGENTS.md` and `README.md` — stay at the repository root rather than
@@ -42,6 +48,7 @@ this file as the map for that move, not a blocker to it.
 | Schemas | [`schemas.md`](schemas.md) | Structured, machine-interpretable definitions |
 | Workflows | [`workflows.md`](workflows.md) | Multi-step operating processes |
 | Templates | [`templates.md`](templates.md) | Reusable starting points for new artifacts |
+| Skills | [`skills.md`](skills.md) | Executable install/upgrade/doctor procedures — **hosted in `cloud42-labo/skills`**, not here |
 
 ## Environment-specific values
 

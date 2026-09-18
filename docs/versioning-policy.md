@@ -6,7 +6,11 @@
 
 `ai-development-platform` is not one artifact — it is four independently-evolving asset classes (Rules, Schemas, Workflows, Templates; see `docs/v1-asset-inventory.md`). A Rules change (e.g. tightening the Human Gate Pre-check) and a Templates change (e.g. adding a new reusable template) have different blast radii for an adopter. Forcing them onto one shared version number would mean every adopter re-evaluates their whole integration on every change, including changes that don't touch what they depend on.
 
-`adp-package.yaml` therefore carries five version fields: an overall `version` for the package as a whole, plus `schema_version`, `rules_version`, `workflow_version`, and `templates_version` for each asset class. All follow SemVer (`MAJOR.MINOR.PATCH`). Skills and Adapters have no version field yet because neither asset class has any content in this repository (`docs/v1-asset-inventory.md`); add fields for them when content first exists, not preemptively.
+`adp-package.yaml` therefore carries six version fields: an overall `version` for the package as a whole, plus `schema_version`, `rules_version`, `workflow_version`, `templates_version`, and `skills_version` for each asset class. All follow SemVer (`MAJOR.MINOR.PATCH`).
+
+`skills_version` was added later than the other four, under the rule stated here originally: add a field for an asset class when content first exists, not preemptively. When `ADP-049-B` wrote this file, Skills and Adapters both had no content. Skills now does — `ADP-049-D/E/F1/F2` built the `adp-bootstrap` Skill — so the field exists. Adapters still has none and still has no field; leave it that way until one exists.
+
+Note the asymmetry `skills_version` introduces: it is the only class whose content lives outside this repository (`cloud42-labo/skills`, named by `skills_source`). This file governs *how that version number moves*; it does not make this repository the place those files are edited. See `package/skills.md`.
 
 ## SemVer judgment per asset class
 
@@ -42,6 +46,16 @@ Multi-step processes (`docs/operating-guide.md`, `governance/postmortem-improvem
 - **MAJOR** — a template's required-fields contract changes in a way that makes prior instances non-conformant.
 - **MINOR** — a new optional section or a new template is added.
 - **PATCH** — formatting/wording fixes to an existing template.
+
+### Skills (`skills_version`)
+
+Executable procedures that install, upgrade, validate or safety-check this package (currently the `adp-bootstrap` Skill only: `SKILL.md` plus `plan.py`, `apply.py`, `doctor.py`, `scan_secrets.py`). Judge a change by what it does to an adopter who already installed this package using the previous version, not by how much code moved.
+
+- **MAJOR** — an install/upgrade run that previously succeeded would now fail or produce a different result: a CLI flag or its meaning changes, the config keys in `references/config-mapping.md` are renamed or removed, the manifest fields the Skill requires change, or a check that previously passed now fails (a stricter `doctor`/`scan_secrets` is MAJOR for this class, even though a stricter Rule would also be MAJOR for a different reason — here the breakage is that an adopter's working pipeline stops).
+- **MINOR** — a new capability an existing adopter can ignore: a new subcommand, a new optional flag, an additional check that only reports and does not change an existing exit code, support for a new asset class.
+- **PATCH** — a bug fix that makes the Skill do what it already claimed, a message/wording change, or a refactor with no observable difference in plan output or exit codes.
+
+Because this class is versioned here but edited in `cloud42-labo/skills`, a change there is not reflected until `skills_version` is bumped in this manifest. Treat that bump as part of the change, not as bookkeeping to do later — an unbumped `skills_version` is indistinguishable from "no change" to an adopter, and (until the tooling gap in `package/skills.md` is closed) `doctor` will not catch the discrepancy either.
 
 ### Overall `version`
 
