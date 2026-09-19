@@ -151,10 +151,12 @@ self-flagged as superseded by brain's own `CLAUDE.md`, so it is functioning as d
   root-cause input → Step 4 `backlog-refinement` receives Retrospective's Improvement
   Experiments as MISC). What is **not** yet present is a periodic, non-upstream-triggered
   Instruction/Skill Debt check — i.e. nothing currently prompts a re-read of an inventory
-  like this one on a cadence when no vendor change occurred. Checked `ADP-054`'s Subtasks
-  (T01–T19, the Skill-extraction Story referenced as a possible owner of this) for overlap:
-  none of them mention Instruction/Skill Debt review; there is no duplicate work in flight.
-  Not implemented in this pass, deliberately: the Story's own design principle is to
+  like this one on a cadence when no vendor change occurred. `ADP-054` (the Skill-extraction
+  Story) was checked as a possible existing owner of this gap; its Notion Task state at
+  the time of this pass is the evidence for "no overlap found", not restated here per
+  this repo's own source-of-truth rule against copying live task status into durable
+  artifacts (`AGENTS.md`'s Source-of-truth rules) — see the ADP-057 Notion Story's Result
+  for that point-in-time finding. Not implemented in this pass, deliberately: the Story's own design principle is to
   prefer deletion/consolidation over new rule addition, and AC#10 explicitly warns against
   the watch itself becoming a source of rule bloat. Adding a mandatory new step to a Skill
   that already runs every week is exactly the kind of addition that principle cautions
