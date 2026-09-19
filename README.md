@@ -47,27 +47,15 @@ The repository is public. Do not commit secrets, credentials, private personal d
 
 ## License / usage terms
 
-This repository does not currently carry an OSS license file. Being publicly
-visible on GitHub does not by itself grant anyone permission to reuse,
-redistribute, or modify its contents — under default copyright, all rights
-are reserved by Cloud42 Labo. Viewing and reading the contents (including
-via `adp-bootstrap`'s dry-run/plan step) is fine; installing or
-redistributing it into another environment requires the repository owner's
-explicit permission until a license is formally adopted.
+This repository is licensed under the [MIT License](LICENSE). Cloud42 Labo's
+owner adopted MIT so that another org or individual can reuse, modify, and
+redistribute the Rules/Schemas/Workflows/Templates/Skills in this package —
+including installing it into their own environment via
+[`adp-bootstrap`](https://github.com/cloud42-labo/skills/tree/main/.claude/skills/adp-bootstrap) —
+without needing to request separate permission, subject only to the license's
+own terms (retain the copyright notice and license text; no warranty).
 
-Candidate OSS licenses for a future formal adoption, for when Cloud42 Labo's
-owner decides to open this package up for third-party/other-org reuse (see
-[`adp-bootstrap`](https://github.com/cloud42-labo/skills/tree/main/.claude/skills/adp-bootstrap)):
-
-| License | Why it could fit | Trade-off |
-|---|---|---|
-| **MIT** (recommended) | Simplest, most widely recognized permissive license; low friction for another org to adopt Rules/Schemas/Workflows/Templates that are mostly documentation and process, not patent-sensitive code | No explicit patent grant (unlikely to matter here) |
-| Apache-2.0 | Adds an explicit patent grant and contribution terms | More legal text than this package's content (docs/templates/rules, not a library) plausibly needs |
-| Keep proprietary (all rights reserved) | No change from today; simplest if third-party redistribution isn't actually intended yet | `adp-bootstrap`'s stated purpose (deploying ADP to other orgs) would need a different distribution mechanism (e.g. a signed agreement per adopter) instead of "clone and go" |
-
-Which license (if any) to formally adopt is an Owner decision, not an AI
-one — tracked as a Notion Task under this repository's Product/Epic (per
-this README's own Source-of-truth model above), not linked here to avoid
-embedding an org-specific Notion page reference in a package meant for
-other adopters. This section states the current default status and the
-options; it does not itself grant a license.
+MIT was chosen over Apache-2.0 or staying proprietary because this package is
+mostly documentation, process, and configuration rather than patent-sensitive
+code, so Apache-2.0's additional patent-grant and contribution machinery
+would add legal text without a corresponding benefit here.
