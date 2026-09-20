@@ -39,7 +39,9 @@ Notion page.
   the same governed predicate as `governance/ai-execution-constraints.md`'s
   "Human Queue WIP constraint" and the Notion "Human Queue｜Actionable"
   view), plus Human Request Tasks whose `Completed At` falls inside the
-  target month. It is **not**
+  target month AND whose `Status` is `Done` (a Human Request Reopened and
+  later closed as `Superseded` keeps its earlier `Completed At` but is
+  excluded — see `queryCompletedTasksForRange_`). It is **not**
   the weekly Blocked-reason classification (AI Dependency / True Human Gate
   / External Condition / Stale Blocker) the KPI Framework defines for Sprint
   Review — that classification reads free-text `Blocker` and requires

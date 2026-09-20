@@ -4270,3 +4270,206 @@ function churnCandidateExecutionMatches_(outgoingEvent, expectedExecutionId) {
   if (!meta.execution) return true;
   return meta.execution === expectedExecutionId;
 }
+
+// =============================================================================
+// ADP-051-B5: Sync Log projection I/O — bounded reads, poll-wide lazy cache
+// =============================================================================
+//
+// Sheet I/O and projection responsibilities extracted from PR #50
+// (ADP-051-B2/B3, Superseded after reaching the 9-round review hard cap —
+// docs/regulations/R06-project-management-regulation.md §11) as their own
+// independent change objective, per docs/review-fix-state-model.md §3
+// step 2. Boundary/cutoff/tie semantics are ADP-051-B4's scope (this block
+// calls none of B4's functions — it only reads and windows raw Sync Log
+// rows); churn inheritance is ADP-051-B6's; wiring into the live poll path
+// is ADP-051-B7's. Nothing here is called from the live poll path yet —
+// this ships as tested, unwired functions until B4/B6 exist for B7 to
+// assemble the full resolver.
+//
+// `SYNC_LOG_PROJECTION_WINDOW_ROWS` bounds both service-call count (one
+// `getValues()` per poll, via the poll-wide lazy loader) and transferred/
+// held row count (a fixed-size tail window, never the whole sheet) — see
+// Finding D and Finding I below for why either alone is insufficient.
+// `readSyncLogRowsForTask_`'s `.truncated` flag is the caller-facing signal
+// that a Task's relevant history may extend beyond this window: turning
+// that into an `unresolved` classification (rather than a confident
+// `Initial Work` default) is resolveWorkType_'s responsibility once B7
+// assembles it — this block only guarantees the signal is never silently
+// dropped between the sheet read and whatever consumes it.
+// Finding D (ADP-051-B2/B3 fixup round 3, corrects round 2's `getRangeList`
+// fix — this is the THIRD review round on this exact performance issue):
+// round 1's bulk `getRange(minRow..maxRow)` read transferred every
+// UNRELATED row between a Task's first and last match. Round 2's fix
+// (`getRangeList` grouped by contiguous row runs) stopped transferring
+// unrelated rows, but `Range#getValues()` is one HTTP round-trip PER Range
+// object, even when the Ranges came from one `getRangeList()` call —
+// `getRangeList` only batches range *construction* (a client-side
+// convenience), never value *retrieval*. When a mature Task's matched rows
+// are sparse/scattered — interleaved with other Tasks' rows across many
+// separate polls, so every match is its own isolated, non-contiguous run —
+// round 2's fix still costs one `getValues()` service call PER MATCHED
+// ROW, restoring the exact Apps Script timeout risk round 1 already fixed
+// once (Codex's reproduction: 500 alternating matched/unrelated rows ->
+// 500 value-fetch calls). No per-task read strategy (one bulk range, or
+// grouped contiguous runs) can bound service-call count against an
+// adversarially sparse match pattern, because in the worst case every
+// match is isolated with no way to know that ahead of cheaply reading it.
+//
+// The actual fix does not read per-task at all: `loadSyncLogProjection_`
+// reads the Sync Log sheet's ENTIRE data range in ONE bulk call, and every
+// Task's rows are filtered out of that single in-memory array. This makes
+// Sync Log cost exactly ONE spreadsheet read TOTAL per poll invocation,
+// regardless of how many Tasks are reconciled or how sparse/scattered
+// their matches are — the only shape that actually bounds the cost Codex
+// keeps (correctly) flagging.
+//
+// `makeSyncLogProjectionLoader_` wraps that one-shot read in a memoized,
+// LAZY zero-arg loader: the actual `getValues()` call only ever happens on
+// the loader's first invocation (if any), and every later call within the
+// same poll reuses the same in-memory result — never a second read, and
+// never a read at all for a poll where nothing ends up needing Sync Log
+// history (e.g. every reconciled Task's own history is served entirely by
+// a genuine Time-Event-side boundary, or no Task opens a new execution
+// this run at all). A top-level entry point that reconciles more than one
+// Task (pollTaskChanges) builds ONE loader at the start of that call and
+// threads it down through reconcileTaskPage_ ->
+// reconcileAuthoritativeTimeEvents_ -> resolveNewTimeEventWorkTypeSafely_
+// -> resolveWorkType_ -> resolveSyncLogCandidate_ -> here, as an explicit
+// parameter — never a persistent cross-poll cache (Apps Script script
+// instances are not guaranteed to persist state between trigger firings,
+// and a genuinely stale cross-poll cache would be its own correctness
+// bug: this loader's memoized result is scoped to, and discarded with,
+// the single poll invocation that created it). A caller reconciling only
+// one Task (reconcileTaskById, an isolated test) may omit the loader
+// entirely; `readSyncLogRowsForTask_` then falls back to a one-off,
+// unmemoized load for that single call — still exactly one bulk read,
+// never the old per-match-row cost this fix retires.
+//
+// Finding I (ADP-051-B2/B3 fixup round 6, SIXTH review round on this exact
+// performance area): round 3's fix above bounds SERVICE-CALL COUNT to
+// exactly one per poll, but a single `getRange(2, 1, lastRow-1, 8)` over an
+// ever-growing, append-only sheet still transfers/holds an UNBOUNDED amount
+// of data — call count and data size are different things, and bounding one
+// says nothing about the other. `SYNC_LOG_PROJECTION_WINDOW_ROWS` fixes the
+// latter: only the most recent N rows are ever read, so both transfer size
+// and in-memory footprint are a constant, independent of how large the log
+// has grown. 5000 mirrors `QUERY_PAGE_SAFETY_LIMIT` (50 pages x 100/page,
+// ~line 3092) — this codebase's own existing convention for "how much of an
+// append-only/paginated source is reasonable to hold in memory at once,"
+// including that same function's `truncated: true` shape this constant's
+// own `truncated` flag below deliberately mirrors, rather than inventing an
+// unrelated bound. Kept as its own constant (not a reference to
+// QUERY_PAGE_SAFETY_LIMIT) so a future change to Notion-query pagination
+// cannot silently move this unrelated Sheet-read bound too.
+//
+// This is a documented, deliberate tradeoff, not a "read slightly less"
+// patch: a Task whose relevant history sits entirely outside this window is
+// NOT silently treated as "no history" (which `resolveWorkType_` reads as a
+// confident `Initial Work`) — `truncated` below tells
+// `resolveSyncLogCandidate_` that older, unread history may exist, so it
+// can route that case to the same `unresolved` outcome §3 step 4 already
+// uses for every other genuinely-unknowable case (failure #28's
+// principle), rather than inventing a new kind of silent default.
+const SYNC_LOG_PROJECTION_WINDOW_ROWS = 5000;
+
+function loadSyncLogProjection_() {
+  const sheet = ensureSyncLogSheet_();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    const empty = [];
+    empty.truncated = false;
+    return empty;
+  }
+  // Bounded tail window: read at most SYNC_LOG_PROJECTION_WINDOW_ROWS rows,
+  // ending at the sheet's current last row — never the full `2..lastRow`
+  // range a mature log would otherwise force. `truncated` is true whenever
+  // this window's start had to move past row 2, i.e. older history exists
+  // that this read did not load (see the header comment above for why
+  // callers must not treat that the same as "no history at all").
+  const startRow = Math.max(2, lastRow - SYNC_LOG_PROJECTION_WINDOW_ROWS + 1);
+  const rowCount = lastRow - startRow + 1;
+  const rows = sheet.getRange(startRow, 1, rowCount, 8).getValues().map(function (values, index) {
+    return {
+      row: startRow + index,
+      snapshotId: String(values[0] || ''),
+      source: String(values[1] || ''),
+      taskId: String(values[2] || ''),
+      rawStatus: String(values[3] || ''),
+      receivedAt: parseTimestamp_(values[4]),
+      outcome: String(values[5] || ''),
+      type: String(values[6] || ''),
+      write: (values[7] === '' || values[7] === undefined || values[7] === null) ? '' : String(values[7]),
+    };
+  });
+  rows.truncated = startRow > 2;
+  return rows;
+}
+
+function makeSyncLogProjectionLoader_() {
+  let loaded = false;
+  let cached = null;
+  return function () {
+    if (!loaded) {
+      cached = loadSyncLogProjection_();
+      loaded = true;
+    }
+    return cached;
+  };
+}
+
+// Every Sync Log row ever logged for `taskId`, in the log's own append-only
+// (ascending) order, filtered out of the array `syncLogProjectionLoader`
+// (see `makeSyncLogProjectionLoader_` above) returns — a poll-wide,
+// memoized, lazily-loaded projection shared across every Task this same
+// poll reconciles, rather than a fresh spreadsheet read per Task. When
+// `syncLogProjectionLoader` is not supplied (a caller reconciling only this
+// one Task, or a test exercising this resolver in isolation), a one-off,
+// unmemoized projection is loaded for this call alone.
+//
+// Finding I (ADP-051-B2/B3 fixup round 6): the returned array's own
+// `.truncated` property (mirroring `loadSyncLogProjection_`'s, see there)
+// is always propagated, even after `.filter()` — a filtered array is a new
+// array and would otherwise silently lose it. `resolveSyncLogCandidate_`
+// reads this to tell "this Task genuinely has no such history" apart from
+// "this Task has none WITHIN the bounded window; older history may exist
+// but was not read."
+function readSyncLogRowsForTask_(taskId, syncLogProjectionLoader) {
+  if (!taskId) {
+    const empty = [];
+    empty.truncated = false;
+    return empty;
+  }
+  const rows = syncLogProjectionLoader ? syncLogProjectionLoader() : loadSyncLogProjection_();
+  const wanted = String(taskId);
+  const filtered = rows.filter(function (row) { return row.taskId === wanted; });
+  filtered.truncated = Boolean(rows.truncated);
+  return filtered;
+}
+
+// docs/review-fix-state-model.md §3 step 2 (failure #46): a
+// `done_gate_rejected:...:rollback=<Status>` row's logged Status column
+// always reads `Done` (logSnapshot_ is called with the Task's
+// PRE-reconciliation status), even though enforceDoneGate_ rolled the Task
+// back to the rollback status in that very same pass, recording it in the
+// `outcome` column instead. Every consumer of a Sync Log row's effective
+// status for this resolver must go through this function rather than
+// reading `rawStatus` directly, so the rollback is never hidden behind a
+// `Done` value this model was never meant to see as a candidate at all
+// (`Done` is a terminal gate result, out of scope per §1).
+//
+// Finding C (ADP-051-B2/B3 fixup round 2): `enforceDoneGate_` builds this
+// outcome as `'done_gate_rejected:' + failures.join('+') + ':rollback=' +
+// rollbackStatus`, with `rollback=` appended at the very end of the
+// outcome string. `rollbackStatus` is `DEFAULTS.START_STATUS` ('In
+// Progress') or `DEFAULTS.REVIEW_STATUS` ('Review') — a multi-word value
+// is a real, reachable case, not a hypothetical. A `\S+` capture stops at
+// the first whitespace and would extract only 'In' from 'In Progress',
+// leaving that row un-recognized as the DEFAULTS.START_STATUS rollback it
+// actually is (so it isn't skipped by the `In Progress`-row check in
+// resolveSyncLogCandidate_) and misclassifying later executions. Since the
+// rollback value runs to the end of the outcome string, capture everything
+// after `rollback=` rather than stopping at the first non-whitespace run.
+function effectiveSyncLogStatus_(row) {
+  const match = /rollback=(.+)$/.exec(row.outcome || '');
+  return match ? match[1].trim() : row.rawStatus;
+}
