@@ -423,6 +423,7 @@ function queryCompletedTasksForRange_(startIso, endIsoExclusive) {
         and: [
           { property: 'Completed At', date: { on_or_after: startIso } },
           { property: 'Completed At', date: { before: endIsoExclusive } },
+          { property: 'Status', select: { equals: 'Done' } },
         ],
       },
     }
@@ -466,10 +467,13 @@ function productNamesForTask_(task, productMap) {
   return names.length > 0 ? names : [UNKNOWN_LABEL];
 }
 
-// Groups completed Tasks (Status left unfiltered on purpose: Completed At
-// being set in range is the membership test, matching what Done-gate
-// evidence rules already treat as authoritative) by Product, counting them
-// and averaging `Lead Time (h)`.
+// Groups completed Tasks by Product, counting them and averaging
+// `Lead Time (h)`. Membership requires Status = Done, not just Completed At
+// being set in range: a Task that was Done, Reopened, and later closed as
+// Superseded can keep its earlier Completed At (Notion's Reopen guard does
+// not clear it automatically — see integrations/notion-time-events/README.md),
+// so Completed-At-in-range alone would wrongly count a Superseded Task as a
+// Done completion.
 function aggregateTasksByProduct_(tasks, productMap) {
   const byProduct = {};
 
@@ -478,7 +482,9 @@ function aggregateTasksByProduct_(tasks, productMap) {
     return byProduct[name];
   }
 
-  tasks.forEach(function (task) {
+  const doneTasks = tasks.filter(function (task) { return selectName_(task.properties.Status) === 'Done'; });
+
+  doneTasks.forEach(function (task) {
     const names = productNamesForTask_(task, productMap);
     const leadTime = formulaNumber_(task.properties['Lead Time (h)']);
     const hasLeadTime = task.properties['Lead Time (h)'] &&
@@ -524,6 +530,10 @@ function aggregateHumanQueueSnapshot_(tasks, productMap) {
   return { total: tasks.length, byProduct: byProduct };
 }
 
+// completedTasks is queryCompletedTasksForRange_'s result, so Status = Done
+// is already enforced upstream (see that function's Notion filter) — a
+// Human Request Reopened and later closed as Superseded is excluded the
+// same way a non-Human-Request Task is, not just filtered by Type here.
 function aggregateHumanCompletedInMonth_(completedTasks, productMap) {
   const humanRequests = completedTasks.filter(function (task) {
     return selectName_(task.properties.Type) === 'Human Request';
@@ -835,7 +845,8 @@ function buildReportBlocks_(report) {
     'ここでの「Blocked」「Human Queue」は本レポート生成時点のスナップショットであり、対象月中の推移ではありません。' +
     'また Blocked理由（AI Dependency / True Human Gate / External Condition / Stale Blocker）の分類は行っていません — ' +
     'この分類は週次Sprint ReviewでのHuman/AI判断を要するため、本自動集計の対象外です（推測分類はしません）。' +
-    '「Human Request完了」は対象月中にCompleted Atが入ったType=Human Requestの件数です。',
+    '「Human Request完了」は対象月中にCompleted Atが入り、かつStatus=DoneのType=Human Requestの件数です' +
+    '（Reopen後Supersededで閉じたTaskはCompleted Atが残っていても対象外）。',
     '⚠️'
   ));
   blocks.push(textBlock_('paragraph', '現在Blocked件数（全Product合計）: ' + report.blocked.total +

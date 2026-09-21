@@ -4,9 +4,9 @@
 > **規程ID:** R02  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-06 JST  
+> **最終改定日:** 2026-09-19 JST  
 > **関連規程:** R01 組織規程 / R03 決裁規程  
-> **移管元:** `docs/operating-guide.md` §6、§11、§12 / Owner方針 ADP-058
+> **移管元:** `docs/operating-guide.md` §6、§11、§12 / Owner方針 ADP-058 / Owner方針 2026-09-12（`cloud42-labo/skills`のself-merge、ADP-057で規程へ同期）
 
 ## 第1条 目的
 
@@ -39,8 +39,11 @@ R03に定める決裁事項、Human-only事項、課金・契約・本人性・�
 
 - `cloud42-labo/brain`
 - `cloud42-labo/experimental`
+- `cloud42-labo/skills`（2026-09-12、Owner指示により明文化。個人用の設定・手順置き場であり、
+  本番運用や外部公開を直接伴わないための例外。詳細は当該Repositoryの`CLAUDE.md`「GitHub操作・
+  PRレビュー・マージ」）
 
-両Repositoryでは、journal、notes、decisions、code、docs、root運用ファイルその他の変更種別によってself-merge可否を分けない。
+各Repositoryでは、journal、notes、decisions、code、docs、root運用ファイルその他の変更種別によってself-merge可否を分けない。
 
 作業Agentは原則としてBranch → commit → Pull Request → mergeの履歴を残す。self-merge権限は通常のdirect `main` pushを標準化するものではない。
 
