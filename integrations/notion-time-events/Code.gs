@@ -4579,8 +4579,19 @@ const WORK_TYPE_REVIEW_FIX = 'Review Fix';
 // corrections require.
 //
 // Returns:
-//   - `null` when no eligible row exists at all (every row is Type=Story,
-//     at/before the cutoff, or In Progress all the way back).
+//   - `null` when no eligible row exists at all AND the read Sync Log
+//     window was NOT truncated — i.e. this Task genuinely has no eligible
+//     history, confirmed by having seen all of it (every row is
+//     Type=Story, at/before the cutoff, or In Progress all the way back).
+//   - `{ truncated: true }` when no eligible row was found WITHIN the
+//     bounded tail window (`readSyncLogRowsForTask_`'s own `.truncated`
+//     flag), so the absence of a candidate is not evidence of anything —
+//     this Task's actual eligible history, if any, may sit entirely
+//     beyond the window. Conflating this with genuine `null` would let a
+//     hidden Sync Log run silently reappear as "no candidate" — the same
+//     class of mistake failure #5 already ruled out for a plain missing
+//     Sync Log lookup, reintroduced here via truncation instead (found
+//     during ADP-051-B7's own review).
 //   - `{ ambiguousCutoffTie: true }` when `syncLogScanCutoff_` itself could
 //     not resolve its own cutoff (propagated verbatim — see its own doc
 //     comment for what this means).
@@ -4615,7 +4626,7 @@ function resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, re
     i--;
     while (i >= 0 && !eligible(rows[i])) i--;
   }
-  if (i < 0) return null;
+  if (i < 0) return rows.truncated ? { truncated: true } : null;
 
   const candidateStatus = effectiveSyncLogStatus_(rows[i]);
   let runStart = rows[i];
@@ -4752,6 +4763,18 @@ function resolveWorkType_(options) {
   const syncLogCandidate = resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride);
   if (syncLogCandidate && syncLogCandidate.ambiguousCutoffTie) {
     return unresolvedWorkType_('sync_log_cutoff_ambiguous_tie');
+  }
+  // A truncated "no candidate" is not evidence of anything (see
+  // resolveSyncLogCandidate_'s own doc comment) — every branch below that
+  // would otherwise treat a missing Sync Log candidate as license to trust
+  // something else confidently (defaulting to Initial Work with no
+  // boundary at all, or falling back to a genuine boundary's own End
+  // Status per failure #5's principle) must not do so when the omission
+  // might be hiding real history. Checked once, here, rather than at each
+  // of those call sites, so no future branch can reintroduce the gap by
+  // skipping it (found during ADP-051-B7's own review, Codex round 1).
+  if (syncLogCandidate && syncLogCandidate.truncated) {
+    return unresolvedWorkType_('sync_log_truncated');
   }
 
   if (!boundary) {

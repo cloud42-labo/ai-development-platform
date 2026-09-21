@@ -145,6 +145,28 @@ test('failure #35 (Sync-Log-side half): the genuine close\'s own paired logSnaps
   assert.equal(result.timestamp.toISOString(), '2026-08-01T09:00:00.000Z');
 });
 
+test('resolveSyncLogCandidate_ (Codex round 1): no eligible row found WITHIN a truncated window returns { truncated: true }, never null — the omission is not evidence of anything', () => {
+  const { sandbox, spreadsheet } = harness();
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  sandbox.ensureSyncLogSheet_();
+  const SYNC_LOG_PROJECTION_WINDOW_ROWS = 5000; // mirrors Code.gs's own constant
+  for (let i = 0; i < SYNC_LOG_PROJECTION_WINDOW_ROWS + 100; i++) {
+    // This Task's own history, if any, sits entirely before this window —
+    // every row visible to the bounded tail read belongs to another Task.
+    syncLogSheet.rows.push(['snap-' + i, 'test', 'unrelated-task', 'Review', '2026-01-01T00:00:00.000Z', '', 'Task', String(1000 + i)]);
+  }
+  const result = sandbox.resolveSyncLogCandidate_(TASK_ID, [], null, null);
+  assert.notEqual(result, null);
+  assert.equal(result.truncated, true);
+});
+
+test('resolveSyncLogCandidate_: no eligible row AND the window is NOT truncated still returns plain null (non-regression)', () => {
+  const { sandbox } = harness();
+  logRow(sandbox, { status: 'Review', receivedAt: '2026-08-01T08:00:00.000Z', type: 'Story' }); // ineligible, but the whole log fits in the window
+  const result = sandbox.resolveSyncLogCandidate_(TASK_ID, [], null, null);
+  assert.equal(result, null);
+});
+
 // ---------------------------------------------------------------------------
 // resolveWorkType_ — §3 fresh classification (steps 1/3/4/5)
 // ---------------------------------------------------------------------------
@@ -154,6 +176,38 @@ test('resolveWorkType_: no boundary and no Sync Log candidate at all defaults to
   const result = sandbox.resolveWorkType_({ taskId: 'never-seen-task', allEvents: [] });
   assert.equal(result.unresolved, false);
   assert.equal(result.workType, 'Initial Work');
+});
+
+test('resolveWorkType_ (Codex round 1): no boundary and a TRUNCATED Sync Log window with no candidate must surface unresolved, never default to Initial Work', () => {
+  const { sandbox, spreadsheet } = harness();
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  sandbox.ensureSyncLogSheet_();
+  const SYNC_LOG_PROJECTION_WINDOW_ROWS = 5000;
+  for (let i = 0; i < SYNC_LOG_PROJECTION_WINDOW_ROWS + 100; i++) {
+    syncLogSheet.rows.push(['snap-' + i, 'test', 'unrelated-task', 'Review', '2026-01-01T00:00:00.000Z', '', 'Task', String(1000 + i)]);
+  }
+  const result = sandbox.resolveWorkType_({ taskId: TASK_ID, allEvents: [] });
+  assert.equal(result.unresolved, true, 'expected an explicit unresolved result — the truncated window cannot rule out hidden history ending in Review');
+  assert.notEqual(result.workType, 'Initial Work');
+});
+
+test('resolveWorkType_ (Codex round 1, failure #5 via truncation): a genuine Review boundary with a TRUNCATED, candidate-less Sync Log window must not fall back to the boundary\'s own stale status — hidden Backlog/Ready history could have followed it', () => {
+  const { sandbox, spreadsheet } = harness();
+  const genuineOldReviewClose = eventPage('evt-trunc', {
+    endedAt: '2026-08-01T05:00:00.000Z',
+    note: note('End Status=Review', 'Reason=left_in_progress'),
+  });
+  const syncLogSheet = spreadsheet.getSheetByName('Sync Log');
+  sandbox.ensureSyncLogSheet_();
+  const SYNC_LOG_PROJECTION_WINDOW_ROWS = 5000;
+  for (let i = 0; i < SYNC_LOG_PROJECTION_WINDOW_ROWS + 100; i++) {
+    // A real Backlog/Ready row for this Task, logged after the genuine
+    // close, could exist here — it is simply outside the visible window.
+    syncLogSheet.rows.push(['snap-' + i, 'test', 'unrelated-task', 'Review', '2026-01-01T00:00:00.000Z', '', 'Task', String(1000 + i)]);
+  }
+  const result = sandbox.resolveWorkType_({ taskId: TASK_ID, allEvents: [genuineOldReviewClose] });
+  assert.equal(result.unresolved, true, 'expected unresolved, never a confident Review Fix read off the stale genuine boundary alone');
+  assert.notEqual(result.workType, 'Review Fix');
 });
 
 test('failure #2: assignee cleared mid-In Progress, boundary stamped retroactively with no open events, and no Sync Log row at all — must surface unresolved, never read the stale End Status=In Progress as Initial Work', () => {
