@@ -6,8 +6,8 @@
 # repository currently is, what it depends on, and how it is versioned.
 #
 # See docs/versioning-policy.md for what changes MAJOR/MINOR/PATCH on each
-# version field below, and for why Rules/Schemas/Workflows/Templates version
-# independently rather than sharing one number.
+# version field below, and for why Rules/Schemas/Workflows/Templates/Skills
+# version independently rather than sharing one number.
 
 package: ai-development-platform
 description: >-
@@ -49,6 +49,44 @@ workflow_version: 1.0.0
 # templates/inception-deck.md, templates/prd.md, templates/design-doc.md,
 # templates/epic-brief.md).
 templates_version: 0.2.0
+
+# Version of the Skills asset class: the executable procedures that install,
+# upgrade, validate and safety-check this package. Currently one Skill,
+# `adp-bootstrap`, which is hosted in cloud42-labo/skills (see
+# package/skills.md for the file-level index and `skills_source` below) and
+# NOT in this repository.
+#
+# This is the first version this class has carried. docs/v1-asset-inventory.md
+# (ADP-049-A) classified Skills as "not present in this repo" and deferred it
+# as an explicit cross-repo dependency; docs/versioning-policy.md's rule is to
+# "add fields for them when content first exists, not preemptively". Content
+# now exists — ADP-049-D/E/F1/F2 built plan/apply/doctor/scan_secrets — so the
+# field is added here rather than left implicit.
+#
+# 0.1.0, not 1.0.0: the Skill is functionally complete for install, upgrade,
+# doctor and secret-scanning, but has not yet been validated by a clean install
+# into an isolated environment (ADP-049-G, still Backlog). Treat it as
+# pre-release on the same footing as this file's own `version`.
+skills_version: 0.1.0
+
+# Where the Skills asset class physically lives. Unlike the other four
+# classes, this one is not resolvable by a path relative to this repository,
+# so an adopter (or a doctor/plan run) needs the repository named explicitly.
+#
+# `ref` pins skills_version 0.1.0 to the exact commit that content was at
+# when this field was added — the last commit under `path` before this
+# manifest change (`git log --oneline -- .claude/skills/adp-bootstrap` in
+# cloud42-labo/skills). `repository` + `path` alone point at a mutable
+# branch: checking out this ADP commit later would silently resolve to
+# whatever `cloud42-labo/skills#main` has become by then, while still
+# reporting `skills_version: 0.1.0`. Bump `ref` in lockstep with every
+# `skills_version` change; never leave it pointing past what that version
+# number claims.
+skills_source:
+  repository: cloud42-labo/skills
+  path: .claude/skills/adp-bootstrap
+  ref: 9043914 # cloud42-labo/skills@9043914 — content matching skills_version 0.1.0
+  index: package/skills.md
 
 # What an adopting agent/environment must have to operate this package as
 # intended. Not enforced by tooling here (no custom package manager) —
@@ -328,3 +366,35 @@ migration_path:
       license text; no warranty) now apply instead. No action is needed
       for an adopter who was only installing/reading the package for
       their own use, since that was never gated on this constraint.
+  - field: skills_version
+    from: null
+    to: "0.1.0"
+    date: "2026-09-18"
+    change: >-
+      ADP-049: added the Skills asset class (`skills_version`,
+      `skills_source`, and the package/skills.md index) to this manifest.
+      ADP-049-A classified Skills as "not present in this repo" and deferred
+      it as an explicit cross-repo dependency; ADP-049-C then normalized only
+      the four in-repo classes. Since then ADP-049-D/E/F1/F2 built the
+      `adp-bootstrap` Skill (plan / apply / doctor / scan_secrets) in
+      cloud42-labo/skills, so the class now has content and
+      docs/versioning-policy.md's own rule ("add fields for them when content
+      first exists") applies. Additive: no existing field changed meaning, no
+      asset content changed, and no other version field is bumped by this
+      entry. Notably this is not a MAJOR event for any other class — it
+      records that a fifth class became versionable, not that an existing
+      one changed.
+    action_required: >-
+      An adopter who previously installed this package by resolving only the
+      four in-repo classes (Rules/Schemas/Workflows/Templates) now has a
+      fifth component to account for: the `adp-bootstrap` Skill named by
+      `skills_source`, which must be fetched from cloud42-labo/skills
+      separately because it is not reachable by a path relative to this
+      repository. Record its installed `skills_version` alongside the other
+      four so a later upgrade can tell whether it drifted. Note the current
+      tooling limitation: the adp-bootstrap scripts hardcode their own
+      four-entry ASSET_CLASSES map, so a `skills_version` change is parsed
+      but does NOT yet trigger change detection in plan.py/doctor.py —
+      extending that map lives in cloud42-labo/skills and is tracked as
+      follow-up, so until then, compare `skills_version` by hand at upgrade
+      time rather than assuming doctor will flag it.
