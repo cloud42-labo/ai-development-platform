@@ -187,6 +187,13 @@ function pollIntervalMinutes_() {
 function pollTaskChanges() {
   return withPollLock_(function () {
     const props = PropertiesService.getScriptProperties();
+    // ADP-051-B7/B5: one poll-wide, lazily-loaded, memoized Sync Log
+    // projection loader for this entire run — the actual bulk sheet read
+    // only ever happens on its first use (if any Task this run even needs
+    // Work Type's Sync Log side at all), and every Task reconciled by this
+    // run afterward reuses the same in-memory result rather than paying its
+    // own read (see makeSyncLogProjectionLoader_'s own doc comment).
+    const syncLogProjectionLoader = makeSyncLogProjectionLoader_();
     const runStartedAt = new Date();
     const cursor = props.getProperty('LAST_SYNC_CURSOR');
     const isBootstrap = !cursor;
@@ -271,7 +278,7 @@ function pollTaskChanges() {
       } catch (e) {
         continue;
       }
-      if (page && page.id) retryOutcomeById[id] = reconcileTaskPage_(page);
+      if (page && page.id) retryOutcomeById[id] = reconcileTaskPage_(page, { syncLogProjectionLoader: syncLogProjectionLoader });
     }
 
     // A capped run (MAX_TASKS_PER_RUN or MAX_RUN_DURATION_MS) can stop
@@ -321,7 +328,7 @@ function pollTaskChanges() {
       (Date.now() - runStartedAt.getTime()) < MAX_RUN_DURATION_MS
     ) {
       const task = tasksToProcess[iterated];
-      const outcome = reconcileTaskPage_(task);
+      const outcome = reconcileTaskPage_(task, { syncLogProjectionLoader: syncLogProjectionLoader });
       outcomes.push(outcome);
       lastScannedEdit = String(task.last_edited_time || '');
       iterated++;
@@ -676,6 +683,15 @@ function reconcileTaskPage_(task, options) {
   // an extra, harmless re-check, never a different outcome for unchanged
   // data.
   const bypassDedup = Boolean(options && options.bypassDedup);
+  // ADP-051-B7: an optional poll-wide, memoized Sync Log projection loader
+  // (makeSyncLogProjectionLoader_, ADP-051-B5) — threaded straight through
+  // to reconcileAuthoritativeTimeEvents_'s Work Type resolver so every Task
+  // this same poll run reconciles shares one bulk Sync Log read rather than
+  // paying its own. Omitted by every caller that reconciles a single Task
+  // in isolation (reconcileTaskById, the backfills below); that resolver
+  // path already falls back to its own one-off, unmemoized read in that
+  // case (readSyncLogRowsForTask_'s own documented fallback).
+  const syncLogProjectionLoader = options && options.syncLogProjectionLoader;
 
   const pageId = task.id;
   const currentStatus = propertyText_(task.properties.Status);
@@ -756,7 +772,8 @@ function reconcileTaskPage_(task, options) {
         desiredActor,
         changedBy,
         snapshotId,
-        when
+        when,
+        syncLogProjectionLoader
       );
 
   syncTaskProjection_(pageId, title, task.url || '', currentStatus, changedBy, snapshotId);
@@ -1724,7 +1741,7 @@ function isFreeOutcome_(outcome) {
   });
 }
 
-function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when) {
+function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, changedBy, snapshotId, when, syncLogProjectionLoader) {
   const taskId = task.id;
   const taskTitle = propertyText_(task.properties.Title) || taskId;
   const taskType = propertyText_(task.properties.Type);
@@ -1790,6 +1807,20 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
     // enforceDoneGate_'s Execution= pass permanently exclude it from Done
     // evidence the moment Started At is (correctly) refreshed for the new
     // actor's own execution, since the two would no longer match.
+    // ADP-051-B7: every event closed in this loop is stale in `allEvents`
+    // (closeNotionTimeEvent_ only ever PATCHes Notion, never mutates the
+    // object it was given — see resolveChurnInheritedWorkType_'s own header
+    // comment), so resolveWorkType_'s §6 churn check cannot find these via
+    // mostRecentlyClosedEvent_(allEvents, ...) at all. Recorded here, with
+    // the exact Reason= each was actually closed with, so
+    // resolveNewTimeEventWorkTypeSafely_ below can check them directly via
+    // resolveChurnInheritedWorkType_'s own `options.closeReason` override.
+    // `sameCallRestartBoundaries` mirrors the same staleness gap for
+    // syncLogScanCutoff_'s own ambiguous_provenance_restart cutoff (§3
+    // step 2) — a restart closed this same call is likewise invisible to a
+    // scan over the stale `allEvents`.
+    const sameCallChurnEvents = [];
+    const sameCallRestartBoundaries = [];
     otherActor.forEach(function (eventPage) {
       if (eventProvenanceIsAmbiguous_(eventPage)) {
         const restartBoundary = when.getTime() >= eventStartedAt_(eventPage).getTime()
@@ -1797,10 +1828,13 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
           : eventStartedAt_(eventPage);
         closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart');
         actions.push('closed_ambiguous_provenance_restart:' + eventPage.id);
+        sameCallChurnEvents.push({ event: eventPage, closeReason: 'ambiguous_provenance_restart' });
+        sameCallRestartBoundaries.push(restartBoundary);
         return;
       }
       closeNotionTimeEvent_(eventPage, currentStatus, changedBy, snapshotId, when, 'reassignment');
       actions.push('closed_reassigned:' + eventPage.id);
+      sameCallChurnEvents.push({ event: eventPage, closeReason: 'reassignment' });
     });
 
     if (!desiredActor) {
@@ -1857,6 +1891,12 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         : eventStartedAt_(ambiguousOpenEvent);
       closeNotionTimeEvent_(ambiguousOpenEvent, currentStatus, changedBy, snapshotId, restartBoundary, 'ambiguous_provenance_restart');
       actions.push('closed_ambiguous_provenance_restart:' + ambiguousOpenEvent.id);
+      // ADP-051-B7: same staleness/hard-cutoff reasoning as the otherActor
+      // loop above — an ambiguous_provenance_restart never inherits (§6
+      // third bullet), so this is never pushed onto sameCallChurnEvents,
+      // but it IS a hard cutoff for §3 step 2's Sync Log scan, same as one
+      // already sitting in `allEvents` from a prior poll.
+      sameCallRestartBoundaries.push(restartBoundary);
     }
 
     if (sameActor.length && !ambiguousOpenEvent) {
@@ -2055,7 +2095,36 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
       const executionId = otherActor.length
         ? outgoingExecutionId
         : startAt.toISOString();
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType);
+      // ADP-051-B7: whether `executionId` above is trustworthy enough to
+      // gate churn-identity matching with — mirrors
+      // churnCandidateExecutionMatches_'s own documented contract (Finding
+      // G vs Finding H). Verified whenever this call itself just inherited
+      // it from a same-call reassignment (otherActor.length), OR the
+      // Task's own Started At was independently confirmed fresh
+      // (trustedTaskStart) — both are real, corroborated evidence this IS
+      // (or continues) a specific, known execution. Otherwise `executionId`
+      // is `startAt.toISOString()` built from the observed-edit fallback
+      // (`when`), a manufactured value with nothing behind it — passing it
+      // as a strict identity gate would wrongly reject a legitimate
+      // cross-poll churn continuation (Finding H) whose outgoing close
+      // happened on an earlier poll and so is invisible to
+      // sameCallChurnEvents above.
+      const executionIdIsVerified = otherActor.length > 0 || Boolean(trustedTaskStart);
+      const restartCutoffOverride = sameCallRestartBoundaries.length
+        ? { timestamp: sameCallRestartBoundaries.reduce(function (latest, candidate) {
+            return candidate.getTime() > latest.getTime() ? candidate : latest;
+          }, sameCallRestartBoundaries[0]) }
+        : null;
+      const workTypeResult = resolveNewTimeEventWorkTypeSafely_({
+        taskId: taskId,
+        allEvents: allEvents,
+        expectedExecutionId: executionIdIsVerified ? executionId : '',
+        sameCallOutgoingChurnEvents: sameCallChurnEvents,
+        syncLogProjectionLoader: syncLogProjectionLoader,
+        restartCutoffOverride: restartCutoffOverride,
+      });
+      const resolvedWorkType = (workTypeResult && !workTypeResult.unresolved) ? workTypeResult.workType : '';
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, resolvedWorkType);
       actions.push('opened:' + created.id);
     }
   } else if (openEvents.length) {
@@ -2740,7 +2809,7 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, taskType) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, taskType, workType) {
   const note = buildNote_({
     source: 'notion_reconcile',
     execution: executionId,
@@ -2772,23 +2841,35 @@ function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId,
     changedBy: changedBy,
   });
 
+  const properties = {
+    Event: {
+      title: [{ type: 'text', text: { content: clip_(actor + '｜' + taskTitle, 300) } }],
+    },
+    Actor: { select: { name: actor } },
+    State: { select: { name: 'Active' } },
+    'Started At': { date: { start: when.toISOString() } },
+    Task: { relation: [{ id: taskId }] },
+    Note: {
+      rich_text: [{ type: 'text', text: { content: clip_(note, 1800) } }],
+    },
+  };
+  // ADP-051-B7: set only when resolveNewTimeEventWorkTypeSafely_ actually
+  // resolved a classification for this execution — an `unresolved` result,
+  // or the caller omitting this argument entirely (every pre-B7 test
+  // fixture and call path), must leave `Work Type` unset on the new page
+  // exactly as it always has, never write an empty/placeholder select
+  // value. This never blocks event creation itself: the resolver runs, and
+  // any failure inside it is swallowed, before this function is ever
+  // called (see resolveNewTimeEventWorkTypeSafely_).
+  if (workType) {
+    properties['Work Type'] = { select: { name: workType } };
+  }
   return notionRequest_('post', '/v1/pages', {
     parent: {
       type: 'data_source_id',
       data_source_id: timeEventsDataSourceId_(),
     },
-    properties: {
-      Event: {
-        title: [{ type: 'text', text: { content: clip_(actor + '｜' + taskTitle, 300) } }],
-      },
-      Actor: { select: { name: actor } },
-      State: { select: { name: 'Active' } },
-      'Started At': { date: { start: when.toISOString() } },
-      Task: { relation: [{ id: taskId }] },
-      Note: {
-        rich_text: [{ type: 'text', text: { content: clip_(note, 1800) } }],
-      },
-    },
+    properties: properties,
   });
 }
 
@@ -4472,4 +4553,290 @@ function readSyncLogRowsForTask_(taskId, syncLogProjectionLoader) {
 function effectiveSyncLogStatus_(row) {
   const match = /rollback=(.+)$/.exec(row.outcome || '');
   return match ? match[1].trim() : row.rawStatus;
+}
+
+// =============================================================================
+// ADP-051-B7: Work Type resolver — assembles B4 (boundary/cutoff/tie
+// semantics), B5 (Sync Log projection I/O) and B6 (churn inheritance) into
+// the single shared resolver docs/review-fix-state-model.md §9's checklist
+// requires ("Implement §3's shared resolver ... rather than two independent
+// Sync-Log lookups"), and wires it into the live poll path
+// (reconcileAuthoritativeTimeEvents_'s open-Task branch) for the first
+// time. Review Source (§5) is ADP-051-C's scope — nothing here resolves it,
+// though `resolvedAt` on a successful result is exactly the evidence
+// instance §3 step 5 requires a future Review Source caller to reuse
+// as-is, never re-derive independently (failure #13).
+// =============================================================================
+
+const WORK_TYPE_INITIAL_WORK = 'Initial Work';
+const WORK_TYPE_REVIEW_FIX = 'Review Fix';
+
+// docs/review-fix-state-model.md §3 step 2: the Sync-Log-side candidate for
+// a freshly-opened execution — the most recent same-(effective-)status run
+// of Sync Log rows for this Task, bounded by the same hard cutoff
+// (`syncLogScanCutoff_`: the most recent Type=Story observation or
+// ambiguous_provenance_restart close, whichever is later) step 2's own two
+// corrections require.
+//
+// Returns:
+//   - `null` when no eligible row exists at all (every row is Type=Story,
+//     at/before the cutoff, or In Progress all the way back).
+//   - `{ ambiguousCutoffTie: true }` when `syncLogScanCutoff_` itself could
+//     not resolve its own cutoff (propagated verbatim — see its own doc
+//     comment for what this means).
+//   - `{ status, timestamp, write }` — the run's own EARLIEST row (failure
+//     #14: "where the interval actually started," never "the last
+//     re-observed row").
+function resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride) {
+  const rows = readSyncLogRowsForTask_(taskId, syncLogProjectionLoader);
+  const cutoff = syncLogScanCutoff_(rows, allEvents, restartCutoffOverride);
+  if (cutoff && cutoff.ambiguousCutoffTie) return { ambiguousCutoffTie: true };
+
+  // failure #45/#48/#51: a Type=Story observation, or an
+  // ambiguous_provenance_restart close, is a HARD cutoff for this scan —
+  // never crossed, even to reach an otherwise-eligible row on its far side.
+  // A Story-typed row is additionally never itself an eligible candidate
+  // regardless of position — Work Type only ever applies to executable
+  // Tasks/Subtasks.
+  const eligible = function (row) {
+    if (row.type === 'Story') return false;
+    if (!cutoff) return true;
+    return compareInstants_({ timestamp: row.receivedAt, write: row.write }, cutoff) > 0;
+  };
+
+  let i = rows.length - 1;
+  while (i >= 0 && !eligible(rows[i])) i--;
+  // failure #8: an unmapped/empty-actor `In Progress` row observed before a
+  // mapped actor is assigned must be skipped EXPLICITLY, walking further
+  // back — `In Progress` is never itself a valid run status (only
+  // Review/Blocked/Ready/Backlog are), so it can never be mistaken for "the
+  // previous row" this scan is looking for.
+  while (i >= 0 && effectiveSyncLogStatus_(rows[i]) === DEFAULTS.START_STATUS) {
+    i--;
+    while (i >= 0 && !eligible(rows[i])) i--;
+  }
+  if (i < 0) return null;
+
+  const candidateStatus = effectiveSyncLogStatus_(rows[i]);
+  let runStart = rows[i];
+  let j = i - 1;
+  // failure #15: any DIFFERENT status (including `In Progress`) strictly
+  // ends the contiguous run right here — two Review periods separated by an
+  // In-Progress spell must never fold into one via this walk.
+  while (j >= 0 && eligible(rows[j]) && effectiveSyncLogStatus_(rows[j]) === candidateStatus) {
+    runStart = rows[j];
+    j--;
+  }
+  return { status: candidateStatus, timestamp: runStart.receivedAt, write: runStart.write };
+}
+
+// docs/review-fix-state-model.md §3 step 3 (failures #36/#39/#40): whether a
+// Sync Log row with a status OTHER than `excludedStatus` was actually
+// observed strictly between `fromInstant` and `toInstant` (open interval —
+// the two candidates' own timestamps never count as "intervening" relative
+// to themselves). Positive, actually-logged evidence of a different status
+// in between proves two genuinely distinct periods sharing the same status
+// label (failure #36/#40: §4's ordinary "more recent wins" then applies);
+// its ABSENCE proves nothing either way (failure #39: the documented
+// polling model can silently skip an entire transition inside one interval)
+// and must never be read as proof the two candidates are the same
+// transition merely re-observed.
+function syncLogHasInterveningDifferentStatusRow_(taskId, syncLogProjectionLoader, fromInstant, toInstant, excludedStatus) {
+  const rows = readSyncLogRowsForTask_(taskId, syncLogProjectionLoader);
+  const lowMs = Math.min(fromInstant.timestamp.getTime(), toInstant.timestamp.getTime());
+  const highMs = Math.max(fromInstant.timestamp.getTime(), toInstant.timestamp.getTime());
+  return rows.some(function (row) {
+    const t = row.receivedAt.getTime();
+    if (t <= lowMs || t >= highMs) return false;
+    return effectiveSyncLogStatus_(row) !== excludedStatus;
+  });
+}
+
+// docs/review-fix-state-model.md §3 step 4: classify a resolved status into
+// the Work Type enum. `instant` is carried forward completely unchanged
+// (§3 step 5) — never re-derived by a future Review Source caller.
+function classifyWorkTypeStatus_(status, instant) {
+  return {
+    unresolved: false,
+    workType: status === DEFAULTS.REVIEW_STATUS ? WORK_TYPE_REVIEW_FIX : WORK_TYPE_INITIAL_WORK,
+    resolvedAt: instant,
+  };
+}
+
+function unresolvedWorkType_(reasonCode) {
+  return { unresolved: true, workType: '', resolvedAt: null, reasonCode: reasonCode };
+}
+
+// docs/review-fix-state-model.md §3 + §6: the single shared resolver
+// classifying a freshly-opened execution as `Initial Work` vs `Review Fix`
+// — or explicitly `unresolved`, never a silent default (failures #28/#39).
+// Assembles:
+//   - §6 churn inheritance (`resolveChurnInheritedWorkType_` /
+//     `mostRecentlyClosedEvent_` / `churnCandidateExecutionMatches_` —
+//     ADP-051-B6), checked FIRST: a genuine reassignment replacement is the
+//     SAME execution and inherits directly, never re-resolved via §3.
+//   - §3 steps 1-5 fresh classification otherwise, using §4's
+//     `compareInstants_`/`compareWriteOnly_` (ADP-051-B4) exactly as
+//     specified — no new comparison algorithm.
+//
+// `options`:
+//   - `taskId` (required for the Sync Log side).
+//   - `allEvents` — every Time Event page on file BEFORE this call's own
+//     writes (`reconcileAuthoritativeTimeEvents_`'s own `allEvents`,
+//     fetched at the top of that call). `closeNotionTimeEvent_`/
+//     `stampExecutionBoundary_` only ever PATCH Notion, never mutate the
+//     objects handed to them, so this array is stale for anything closed
+//     THIS SAME call — see `sameCallOutgoingChurnEvents` below for the
+//     workaround, mirroring `resolveChurnInheritedWorkType_`'s own
+//     `options.closeReason` override.
+//   - `expectedExecutionId` — the new event's own about-to-be-stamped
+//     `Execution=` identity, or `''` when the caller's own identity is
+//     itself UNVERIFIED (a manufactured `startAt`-derived fallback with no
+//     independent evidence behind it) — mirrors
+//     `churnCandidateExecutionMatches_`'s own documented contract, and is
+//     what makes a legitimate cross-poll churn continuation (Finding H)
+//     distinguishable from a genuinely new execution (Finding G).
+//   - `sameCallOutgoingChurnEvents` — `[{ event, closeReason }]` for every
+//     outgoing event THIS SAME reconciliation call already closed
+//     (`reassignment`/`ambiguous_provenance_restart`) — checked before
+//     falling back to `mostRecentlyClosedEvent_(allEvents, ...)`, which
+//     cannot see them (see `allEvents` above).
+//   - `syncLogProjectionLoader` — optional poll-wide memoized loader
+//     (`makeSyncLogProjectionLoader_`, ADP-051-B5); omitted for an isolated
+//     single-Task call, which then pays one unmemoized read of its own.
+//   - `restartCutoffOverride` — forwarded to `syncLogScanCutoff_` for a
+//     same-call `ambiguous_provenance_restart` `allEvents` cannot yet
+//     reflect (mirrors `sameCallOutgoingChurnEvents`'s own staleness
+//     workaround, applied to the §3 step 2 cutoff instead of §6
+//     inheritance).
+//
+// Returns `{ unresolved: false, workType, resolvedAt, source }` or
+// `{ unresolved: true, workType: '', resolvedAt: null, reasonCode }`.
+// Never throws by design, but callers on the live poll path still go
+// through `resolveNewTimeEventWorkTypeSafely_` below as defense in depth —
+// a resolver bug must never block Time Event creation.
+function resolveWorkType_(options) {
+  const opts = options || {};
+  const allEvents = opts.allEvents || [];
+  const taskId = opts.taskId;
+  const expectedExecutionId = opts.expectedExecutionId || '';
+  const syncLogProjectionLoader = opts.syncLogProjectionLoader;
+  const restartCutoffOverride = opts.restartCutoffOverride;
+
+  // §6 churn inheritance, checked first — a genuine reassignment
+  // replacement is the SAME execution and is never re-resolved via §3.
+  const sameCallCandidates = opts.sameCallOutgoingChurnEvents || [];
+  for (let k = 0; k < sameCallCandidates.length; k++) {
+    const candidate = sameCallCandidates[k];
+    if (!candidate || !candidate.event) continue;
+    if (!churnCandidateExecutionMatches_(candidate.event, expectedExecutionId)) continue;
+    const churn = resolveChurnInheritedWorkType_(candidate.event, { closeReason: candidate.closeReason });
+    if (churn.inherits) {
+      return { unresolved: false, workType: churn.workType || '', resolvedAt: null, source: 'churn_same_call' };
+    }
+  }
+  const crossPollCandidate = mostRecentlyClosedEvent_(allEvents, expectedExecutionId);
+  if (crossPollCandidate && churnCandidateExecutionMatches_(crossPollCandidate, expectedExecutionId)) {
+    const churn = resolveChurnInheritedWorkType_(crossPollCandidate);
+    if (churn.inherits) {
+      return { unresolved: false, workType: churn.workType || '', resolvedAt: null, source: 'churn_cross_poll' };
+    }
+  }
+
+  // §3 steps 1-5: fresh classification.
+  const boundary = mostRecentBoundaryCandidate_(allEvents);
+  if (boundary && boundary.conflictingTie) {
+    return unresolvedWorkType_('boundary_conflicting_tie');
+  }
+
+  const syncLogCandidate = resolveSyncLogCandidate_(taskId, allEvents, syncLogProjectionLoader, restartCutoffOverride);
+  if (syncLogCandidate && syncLogCandidate.ambiguousCutoffTie) {
+    return unresolvedWorkType_('sync_log_cutoff_ambiguous_tie');
+  }
+
+  if (!boundary) {
+    if (!syncLogCandidate) {
+      return { unresolved: false, workType: WORK_TYPE_INITIAL_WORK, resolvedAt: null, source: 'no_candidate' };
+    }
+    return Object.assign(
+      classifyWorkTypeStatus_(syncLogCandidate.status, { timestamp: syncLogCandidate.timestamp, write: syncLogCandidate.write }),
+      { source: 'sync_log' }
+    );
+  }
+
+  if (boundary.kind === 'retroactive') {
+    // §3 step 3: a retroactively-stamped boundary's own End Status=/Ended
+    // At are stale (they still hold whatever the original reassignment
+    // close wrote) — never read directly (failure #28). Fall back to the
+    // Sync Log candidate, but first verify it is not itself stale relative
+    // to this boundary's own discovery `Write=` — a `Write=`-to-`Write=`
+    // comparison, never routed through `compareInstants_`'s general
+    // Notion-minute-first hierarchy (failures #32/#42).
+    if (!syncLogCandidate) return unresolvedWorkType_('retroactive_boundary_no_sync_log_candidate');
+    const writeOrder = compareWriteOnly_(syncLogCandidate.write, boundary.write);
+    if (writeOrder === null || writeOrder < 0) {
+      return unresolvedWorkType_('sync_log_candidate_stale_relative_to_boundary_discovery');
+    }
+    return Object.assign(
+      classifyWorkTypeStatus_(syncLogCandidate.status, { timestamp: syncLogCandidate.timestamp, write: syncLogCandidate.write }),
+      { source: 'sync_log_after_retroactive_boundary' }
+    );
+  }
+
+  // boundary.kind === 'genuine': its own End Status=/Ended At are real (if
+  // only minute-granular) evidence, readable directly.
+  const boundaryInstant = { timestamp: boundary.endedAt, write: boundary.write };
+  if (!syncLogCandidate) {
+    return Object.assign(classifyWorkTypeStatus_(boundary.endStatus, boundaryInstant), { source: 'genuine_boundary' });
+  }
+
+  const syncLogInstant = { timestamp: syncLogCandidate.timestamp, write: syncLogCandidate.write };
+  const cmp = compareInstants_(boundaryInstant, syncLogInstant);
+
+  if (boundary.endStatus === syncLogCandidate.status) {
+    if (cmp === 0) {
+      // Harmless tie: both candidates already agree on status, so it makes
+      // no difference which timestamp "wins" for classification purposes.
+      return Object.assign(classifyWorkTypeStatus_(boundary.endStatus, boundaryInstant), { source: 'genuine_boundary_and_sync_log_tied' });
+    }
+    // §3 step 3: same status, different timestamp — check for an
+    // intervening, differently-labeled Sync Log row between the two.
+    const hasIntervening = syncLogHasInterveningDifferentStatusRow_(
+      taskId, syncLogProjectionLoader, boundaryInstant, syncLogInstant, boundary.endStatus
+    );
+    if (hasIntervening) {
+      // failure #36/#40: positive evidence of a real intervening
+      // transition — these are genuinely different periods of the same
+      // status label. Ordinary §4 "more recent wins" applies.
+      return cmp > 0
+        ? Object.assign(classifyWorkTypeStatus_(boundary.endStatus, boundaryInstant), { source: 'genuine_boundary_wins_intervening_row' })
+        : Object.assign(classifyWorkTypeStatus_(syncLogCandidate.status, syncLogInstant), { source: 'sync_log_wins_intervening_row' });
+    }
+    // failure #39: no intervening row is not proof of anything — the
+    // documented polling model can silently skip an entire transition.
+    // Genuinely unresolvable; never silently coalesce to either timestamp.
+    return unresolvedWorkType_('same_status_no_intervening_row_ambiguous');
+  }
+
+  // Different statuses: ordinary §4 comparison. A genuine tie (cmp === 0)
+  // between two candidates reporting DIFFERENT statuses is a real,
+  // unresolvable ambiguity (§4: no comparison-operator choice is correct
+  // for all cases) — never silently favor either side (failures #18/#19).
+  if (cmp > 0) return Object.assign(classifyWorkTypeStatus_(boundary.endStatus, boundaryInstant), { source: 'genuine_boundary_wins' });
+  if (cmp < 0) return Object.assign(classifyWorkTypeStatus_(syncLogCandidate.status, syncLogInstant), { source: 'sync_log_wins' });
+  return unresolvedWorkType_('boundary_sync_log_tie_different_statuses');
+}
+
+// Non-blocking wrapper for the live poll path
+// (`reconcileAuthoritativeTimeEvents_`): a resolver bug, or an explicit
+// `unresolved` result, must never prevent Time Event creation or the Done
+// gate/polling idempotency built on top of it — it only ever means the new
+// event's `Work Type` property is left unset for later (manual, or a
+// future Task's) classification. Never throws.
+function resolveNewTimeEventWorkTypeSafely_(options) {
+  try {
+    return resolveWorkType_(options);
+  } catch (e) {
+    return { unresolved: true, workType: '', resolvedAt: null, reasonCode: 'resolver_error:' + (e && e.message ? e.message : String(e)) };
+  }
 }
