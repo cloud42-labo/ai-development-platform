@@ -2,10 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadCodeGsSandbox } from './support/gas-sandbox.mjs';
 
-function task({ productIds = [], leadTime = null, type = 'Technical Task' }) {
+function task({ productIds = [], leadTime = null, type = 'Technical Task', status = 'Done' }) {
   const props = {
     Product: { type: 'relation', relation: productIds.map((id) => ({ id })) },
     Type: { type: 'select', select: type ? { name: type } : null },
+    Status: { type: 'select', select: status ? { name: status } : null },
   };
   props['Lead Time (h)'] = leadTime === null
     ? { type: 'formula', formula: { type: 'number' } } // Notion omits `number` when not computable
@@ -42,6 +43,24 @@ test('aggregateTasksByProduct_ splits a Task related to multiple Products instea
 
   assert.equal(byProduct.ADP.completedCount, 0.5);
   assert.equal(byProduct.AOD.completedCount, 0.5);
+});
+
+test('aggregateTasksByProduct_ excludes a Reopened-then-Superseded Task even though Completed At is still set', () => {
+  // Notion's Reopen guard does not clear a prior Completed At automatically
+  // (integrations/notion-time-events/README.md), so a Task that was Done,
+  // Reopened, and later closed as Superseded can still match a Completed-At
+  // date-range query. Status = Done must be the actual membership test.
+  const { sandbox } = loadCodeGsSandbox();
+  const productMap = { 'prod-A': 'ADP' };
+  const tasks = [
+    task({ productIds: ['prod-A'], leadTime: 10, status: 'Done' }),
+    task({ productIds: ['prod-A'], leadTime: 999, status: 'Superseded' }),
+  ];
+
+  const byProduct = sandbox.aggregateTasksByProduct_(tasks, productMap);
+
+  assert.equal(byProduct.ADP.completedCount, 1);
+  assert.equal(byProduct.ADP.avgLeadTimeH, 10);
 });
 
 test('aggregateHumanCompletedInMonth_ only counts Type = Human Request', () => {
