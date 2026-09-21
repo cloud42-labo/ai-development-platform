@@ -36,7 +36,7 @@ schema_version: 0.1.0-experimental
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md).
-rules_version: 3.0.0
+rules_version: 3.2.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -322,6 +322,50 @@ migration_path:
       approval; otherwise return to Approach Refinement, split the PR, or
       redesign the change. Reviewer usage limits do not authorize paid
       capacity changes without Owner approval.
+  - field: rules_version
+    from: "3.0.0"
+    to: "3.1.0"
+    date: "2026-09-16"
+    change: >-
+      ADP-049-F3: README.md gained a "License / usage terms" section
+      stating that no OSS license is currently granted (default copyright
+      applies) and that installing or redistributing this package into
+      another environment requires the repository owner's explicit
+      permission until a license is formally adopted. MINOR per
+      docs/versioning-policy.md's Rules judgment: this is a new,
+      previously-undocumented constraint on redistribution, but it adds a
+      permission requirement rather than invalidating any prior
+      compliant behavior (installing/reading the package as adp-bootstrap
+      already does was never itself redistribution to a third party).
+    action_required: >-
+      An adopter who intends to redistribute this package (or a fork of
+      it) to another organization beyond their own installation must first
+      confirm license/permission status with this repository's owner —
+      adp-bootstrap's own dry-run/install/upgrade into an adopter's own
+      environment is not itself redistribution and needs no such check.
+  - field: rules_version
+    from: "3.1.0"
+    to: "3.2.0"
+    date: "2026-09-19"
+    change: >-
+      ADP-049-F3-02: Cloud42 Labo's owner adopted the MIT License. A
+      LICENSE file was added and README.md's "License / usage terms"
+      section was rewritten from "no license — contact the owner for
+      redistribution permission" to "MIT — reuse/redistribution permitted
+      under the license's own terms". Classified MINOR per
+      docs/versioning-policy.md's Rules judgment: this replaces the prior
+      entry's owner-permission requirement with a standing grant, so no
+      previously-compliant adopter (one who had already obtained the
+      owner's permission, or one who had not yet redistributed at all)
+      is made non-compliant by the change — it only removes a step
+      (asking) that MIT no longer requires.
+    action_required: >-
+      An adopter who previously required the repository owner's explicit
+      permission before reusing or redistributing this package no longer
+      needs to ask — MIT's own terms (retain the copyright notice and
+      license text; no warranty) now apply instead. No action is needed
+      for an adopter who was only installing/reading the package for
+      their own use, since that was never gated on this constraint.
   - field: skills_version
     from: null
     to: "0.1.0"

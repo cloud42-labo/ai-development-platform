@@ -44,3 +44,18 @@ In short: **State = Notion / Artifact = GitHub / Memory = brain**.
 ADP is treated as an **Organization Digital Twin**: roles, authority, decisions, delivery flows, controls and feedback loops are implemented, observed and improved as a working AI organization.
 
 The repository is public. Do not commit secrets, credentials, private personal data, company-confidential information, or content that cannot be intentionally published.
+
+## License / usage terms
+
+This repository is licensed under the [MIT License](LICENSE). Cloud42 Labo's
+owner adopted MIT so that another org or individual can reuse, modify, and
+redistribute the Rules/Schemas/Workflows/Templates/Skills in this package —
+including installing it into their own environment via
+[`adp-bootstrap`](https://github.com/cloud42-labo/skills/tree/main/.claude/skills/adp-bootstrap) —
+without needing to request separate permission, subject only to the license's
+own terms (retain the copyright notice and license text; no warranty).
+
+MIT was chosen over Apache-2.0 or staying proprietary because this package is
+mostly documentation, process, and configuration rather than patent-sensitive
+code, so Apache-2.0's additional patent-grant and contribution machinery
+would add legal text without a corresponding benefit here.
