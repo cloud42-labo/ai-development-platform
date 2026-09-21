@@ -84,12 +84,14 @@ Memory = brain split).
 
 ## Size & Milestones
 
-Currently pre-1.0 (`adp-package.yaml`'s `version: 0.1.0`). The `ADP-049`
-chain (A: inventory, B: manifest, C: distribution structure — this session;
-D–H: migration/upgrade, doctor/licensing, clean-install E2E) is the path to
-a `v1.0.0` release milestone, at which point per-asset-class versions
-(`rules_version`, `schema_version`, `workflow_version`, `templates_version`)
-continue moving independently (`docs/versioning-policy.md`).
+The `ADP-049` chain (A: inventory, B: manifest, C: distribution structure,
+D–G: migration/upgrade, doctor/licensing, clean-install E2E, H: fixing the
+overall version) closed the path to `v1.0.0`: `adp-package.yaml`'s overall
+`version` is `1.0.0` as of ADP-049-H, pending Owner merge of that PR and the
+corresponding Git tag/Release. Per-asset-class versions (`rules_version`,
+`schema_version`, `workflow_version`, `templates_version`, `skills_version`)
+continue moving independently of the overall version
+(`docs/versioning-policy.md`).
 
 ## Trade-off Sliders
 
