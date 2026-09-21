@@ -4,7 +4,7 @@
 > **規程ID:** R06  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-14 JST  
+> **最終改定日:** 2026-09-21 JST  
 > **関連規程:** R01 組織規程 / R02 職務権限規程 / R03 決裁規程 / R04 文書管理規程 / R05 システム開発管理規程  
 > **移管元:** `docs/operating-guide.md` §1、§7、§8、§9、§10、§11、§13、§14
 
@@ -112,13 +112,16 @@ Backlog Refinementでは、少なくとも次を確認する。
 
 Weekly Sprintは、原則として次の順で管理する。
 
-1. **Upstream Change Review** — 公式一次情報から外部前提の変化を確認する。
-2. **Sprint Review** — 成果、未完了、Blockerを確認する。
-3. **Retrospective** — Keep / Problem / Tryと改善入力を記録する。
-4. **Backlog Refinement** — MISC受付の正式配置、構造とHowを再評価する。
-5. **Sprint Close** — 未完了項目の扱いを明示してSprintを閉じる。
-6. **Sprint Goal Review** — 新しい事実に基づきGoalを再評価する。
-7. **Sprint Planning** — Ready workから次Sprintを構成する。
+1. **Notion Weekly Maintenance** — 現在有効なNotion表示と現行規程・GitHub main・実Schedulerのドリフトを先に監査する。最低限、Vibe Product Development top、規程集、R01〜R06、Job Schedule、各Product current page、当週Active Sprintを確認する。古いcurrent記述、停止済みJobのActive残留、正本/controlled copy不一致、リンク・参照不整合、二重管理を検出し、根拠が明確で可逆なものは同一Weekly Sprint内で修正する。歴史的記録は改ざんしない。
+2. **Upstream Change Review** — 公式一次情報から外部前提の変化を確認する。
+3. **Sprint Review** — 成果、未完了、Blockerを確認する。
+4. **Retrospective** — Keep / Problem / Tryと改善入力を記録する。
+5. **Backlog Refinement** — MISC受付の正式配置、構造とHowを再評価する。
+6. **Sprint Close** — 未完了項目の扱いを明示してSprintを閉じる。
+7. **Sprint Goal Review** — 新しい事実に基づきGoalを再評価する。
+8. **Sprint Planning** — Ready workから次Sprintを構成する。
+
+Notion Weekly Maintenanceの必須対象が未確認、またはJob Scheduleと実Scheduler/Automation/Routineの状態差分が未処置・未記録のままの場合、Weekly Sprintを完了扱いにしない。
 
 実行Howは `cloud42-labo/skills` の `weekly-sprint` Compositeおよび構成Skillを正本とし、Scheduler / Routineには詳細手順を重複保持しない。
 
