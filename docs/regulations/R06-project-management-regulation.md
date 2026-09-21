@@ -121,7 +121,7 @@ Weekly Sprintは、原則として次の順で管理する。
 7. **Sprint Goal Review** — 新しい事実に基づきGoalを再評価する。
 8. **Sprint Planning** — Ready workから次Sprintを構成する。
 
-Notion Weekly Maintenanceの必須対象が未確認、またはJob Scheduleと実Scheduler/Automation/Routineの状態差分が未処置・未記録のままの場合、Weekly Sprintを完了扱いにしない。
+Notion Weekly Maintenanceの必須対象が未確認、または検出したdrift（Product current page、controlled copy、Job Schedule / Scheduler / Automation / Routine、link / reference、duplicate管理その他）が未修正かつ未記録のままの場合、Weekly Sprintを完了扱いにしない。即時修正が安全でないdriftも、対象・Evidence・Owner・Next Actionを同一Weekly Sprint内で記録してDispositionを確定する。
 
 実行Howは `cloud42-labo/skills` の `weekly-sprint` Compositeおよび構成Skillを正本とし、Scheduler / Routineには詳細手順を重複保持しない。
 
