@@ -42,7 +42,7 @@ rules_version: 3.2.0
 # governance/postmortem-improvement-loop.md,
 # governance/monthly-risk-management-review.md,
 # docs/product-design-doc-standard.md).
-workflow_version: 1.0.0
+workflow_version: 1.1.0
 
 # Version of the Templates asset class (templates/README.md,
 # templates/monthly-risk-review.md, templates/product-vision.md,
@@ -328,3 +328,16 @@ migration_path:
       license text; no warranty) now apply instead. No action is needed
       for an adopter who was only installing/reading the package for
       their own use, since that was never gated on this constraint.
+
+  - field: workflow_version
+    from: "1.0.0"
+    to: "1.1.0"
+    date: "2026-09-21"
+    change: >-
+      Weekly Sprint gained Notion Weekly Maintenance as a mandatory first stage,
+      and completion now requires every detected drift to be corrected or explicitly
+      dispositioned with Evidence, Owner and Next Action. Additive MINOR workflow change.
+    action_required: >-
+      Adopters must run Notion Weekly Maintenance before the rest of Weekly Sprint
+      and must not close the Sprint while any detected drift lacks either a safe fix
+      or an explicit recorded disposition.
