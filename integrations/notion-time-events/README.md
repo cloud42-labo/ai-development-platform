@@ -16,16 +16,23 @@ Flow:
 
 There is **no webhook, no public endpoint, and no receiver credential** anywhere in this integration. The reconciler is driven by a time-based trigger inside the bound Apps Script project and reads Notion over the authenticated API. See **Why there is no webhook receiver** below for the reasoning and the constraint it comes from.
 
-Work Type (Initial Work / Review Fix) and Review Source (Codex / Claude /
-Human / Other) classification is planned but not yet implemented in this
-file — see [`docs/review-fix-state-model.md`](docs/review-fix-state-model.md)
-for the state-transition and evidence model that `ADP-051-B`/`C`/`D` build
-against before adding that code here. **Review Source resolution requires
-a `GITHUB_TOKEN`, a second secret this file does not yet mention** — when
-`ADP-051-C` implements it, the "one secret, one place" claim in
-**Security model** and **Success criteria** below stops being true and
-both sections need updating in the same change, not left stale (this
-integration made the identical README update once already, in PR #21).
+Work Type (`Initial Work` / `Review Fix`) classification (`ADP-051-B`,
+landed through `ADP-051-B7`) is implemented — `reconcileAuthoritativeTimeEvents_`
+resolves it (`resolveWorkType_`) for every freshly-opened execution and
+sets it on the new Task Time Event's `Work Type` property, non-blockingly
+(`resolveNewTimeEventWorkTypeSafely_`: a resolver error or an explicit
+`unresolved` result never prevents Time Event creation, it only leaves
+`Work Type` unset). See
+[`docs/review-fix-state-model.md`](docs/review-fix-state-model.md) for the
+full decision procedure. Review Source (Codex / Claude / Human / Other)
+classification is still planned but not yet implemented — that is
+`ADP-051-C`'s scope, building against the same document's §5.
+**Review Source resolution requires a `GITHUB_TOKEN`, a second secret this
+file does not yet mention** — when `ADP-051-C` implements it, the "one
+secret, one place" claim in **Security model** and **Success criteria**
+below stops being true and both sections need updating in the same change,
+not left stale (this integration made the identical README update once
+already, in PR #21).
 
 ## Behavior
 
@@ -85,7 +92,7 @@ A self-reported event's `Note` must be exactly `Task Origin=<Type>` (the Task's 
 
 Every Time Event `Note` write from `closeNotionTimeEvent_`/`stampExecutionBoundary_`, and every `Sync Log` row from `logSnapshot_`, now also stamps `Write=<Apps Script Date.now() in ms>` (Note) or an 8th `Write` column (Sheet). This is **not** a transition-boundary timestamp and must never be read as one: it times when the Apps Script process performed *this write*, nothing about when the real-world Status change it describes actually happened. Its only purpose is breaking a same-Notion-minute tie between two candidate boundaries/rows that `last_edited_time`'s minute granularity cannot otherwise resolve — see the design doc for the full decision procedure this feeds into. `Write=` joins `Execution=`/`Boundary=`/`Task Origin=` in `appendNote_`'s protected-field list (never evicted by the same-`Note` length cap while any ordinary segment or old `Result Fingerprint=` remains), but unlike `Task Origin=` it is not immutable: `stampExecutionBoundary_` deliberately appends a fresh `Write=` when it retroactively discovers a boundary, and `noteField_`'s existing last-occurrence lookup means that later stamp — the boundary's own discovery time, not the stale original close's — is what any reader gets back. A legacy Note/Sync Log row written before this field existed simply has none; per §4, that is the only case where the older best-effort "was this ever logged elsewhere" heuristic still applies.
 
-**This field is infrastructure only as of `ADP-051-B`'s first landing — nothing in `Code.gs` yet reads it.** Work Type classification (`Initial Work` vs. `Review Fix`) and Review Source resolution, the consumers `docs/review-fix-state-model.md` §3–§5 specify against this evidence, are follow-on work; see that document's own status note and Notion `ADP-051-B`/`C`/`D` for what has actually landed against it so far. Landing the write side first, alone, keeps this PoC's existing Done-gate/polling behavior completely unchanged while giving the resolver work a real, already-tested clock to read once it lands.
+This field was infrastructure-only as of `ADP-051-B`'s first landing; `ADP-051-B7` is the first consumer — `resolveWorkType_`/`resolveSyncLogCandidate_` read it (via `compareInstants_`/`compareWriteOnly_`) to resolve Work Type classification. Review Source resolution, `docs/review-fix-state-model.md` §5's other named consumer of this evidence, remains follow-on work (`ADP-051-C`); see that document's own status note and Notion `ADP-051-B`/`C`/`D` for what has landed against it so far.
 
 ## Why there is no webhook receiver
 

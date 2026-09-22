@@ -4204,9 +4204,21 @@ test('storyConversionHappenedWhileInProgress_ makes no Sync Log row-data transfe
 
   sandbox.pollTaskChanges();
 
+  // ADP-051-B7: this Task's very first Time Event now also goes through
+  // resolveNewTimeEventWorkTypeSafely_/resolveWorkType_, which (with no
+  // Time-Event-side boundary candidate at all — allEvents is empty)
+  // consults the Sync Log side (§3 step 2) to rule out a stale Review/
+  // Blocked/Ready/Backlog history before defaulting to `Initial Work` —
+  // storyConversionHappenedWhileInProgress_'s own zero-transfer guarantee
+  // (still true for ITS OWN, narrower Story-history check, see below) no
+  // longer means the WHOLE reconciliation makes no Sync Log transfer at
+  // all. The poll-wide loader (makeSyncLogProjectionLoader_) still bounds
+  // this to exactly ONE bulk read for the entire run, never one per Task or
+  // one per resolver call within it (Finding D's own cost guarantee,
+  // unchanged) — this pins that count at 1, not 0.
   assert.equal(
-    syncLogSheet.getValuesCallCount, 0,
-    'expected no Sync Log row-data transfer for a Task ID that has never appeared in the log, however large the log has grown'
+    syncLogSheet.getValuesCallCount, 1,
+    'expected exactly ONE poll-wide Sync Log row-data transfer (ADP-051-B7\'s Work Type resolver), not the pre-B7 zero, and not one per Task'
   );
   const creates = requestsTo(fetchLog, 'POST', '/v1/pages').map((entry) => JSON.parse(entry.options.payload));
   assert.equal(creates.length, 1);

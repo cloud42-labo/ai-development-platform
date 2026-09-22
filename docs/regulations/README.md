@@ -3,7 +3,7 @@
 > **文書区分:** 規程体系の正本（Normative Index）  
 > **承認権者:** Owner  
 > **適用開始:** 2026-09-06 JST  
-> **移行状態:** `docs/operating-guide.md` から段階移行中（ADP-059）
+> **移行状態:** 完了（ADP-059）
 
 ## 1. 目的
 
@@ -38,7 +38,7 @@ Human / AI を別制度として扱わず、Owner、ChatGPT / Chris、Claude、C
 
 ## 3. 規程一覧
 
-ADP-059では、既存Operating Guideを次の規程へ分解する。
+ADP-059で、既存Operating Guideを次の規程へ分解した。
 
 | ID | 規程 | 主な対象 | 移行Task |
 |---|---|---|---|
@@ -53,7 +53,7 @@ ADP-059では、既存Operating Guideを次の規程へ分解する。
 
 ## 4. 既存 Operating Guide 移管マップ
 
-`docs/operating-guide.md` の現行章を以下へ移す。完全移管が終わるまで旧文書を削除しない。
+`docs/operating-guide.md` の旧章は以下へ移管した。
 
 | Operating Guide | 主な移管先 | 下位文書 |
 |---|---|---|
@@ -83,16 +83,17 @@ ADP-059では、既存Operating Guideを次の規程へ分解する。
 
 Ownerが明示的に既存ルールを変更した場合、その判断をNotion Decisionまたは対象Taskへ記録し、規程の正本へ速やかに反映する。**Decisionを残しただけで恒久Policyの改定完了とはみなさない。**
 
-## 6. 移行期間の扱い
+## 6. 移行完了後の扱い
 
-ADP-059完了までは `docs/operating-guide.md` を**旧規程の互換正本**として残す。
+ADP-059の移行完了後は、`docs/regulations/README.md` と R01〜R06 を正式な規程正本として扱う。`docs/operating-guide.md` は既存リンクを維持するための**互換入口**であり、詳細ルールの正本ではない。
 
-- 個別規程へ正式移管済みの条項は、新しい規程を優先する。
-- 未移管の条項は、引き続きOperating Guideを参照する。
-- 同じルールを両方で恒久運用しない。移管後はOperating Guide側を参照リンクへ置換する。
-- 最終Task ADP-059-EでOperating Guideを「規程体系への入口」に縮退し、重複した規定を除去する。
+- R01〜R06へ移管済みの正式ルールは各規程を参照する。
+- 既存リンクは `docs/operating-guide.md` の互換入口から規程体系へ辿れる状態を維持する。
+- 新しい詳細ルールや手順をOperating Guideへ追加しない。
+- 規程とOperating Guideが矛盾する場合は規程を優先する。
+- 規程改定は、権限を持つ主体のDecision / Review / Versioningを経てGitHub正本へ反映する。
 
-この段階移行により、規程再編の途中で統制の空白や二重の正本を作らない。
+この構成により、Operating Guideを二重の正本へ戻さず、規程・基準・手順・記録の責任分界を維持する。
 
 ## 7. 規程文書の標準ヘッダ
 
@@ -110,6 +111,6 @@ ADP-059完了までは `docs/operating-guide.md` を**旧規程の互換正本**
 
 規程改定の理由と経緯は本文へ累積させず、Notion Decision / Task / GitHub PRの変更履歴で追跡する。
 
-## 8. 本Taskの完了境界
+## 8. 継続運用
 
-ADP-059-Aは**規程体系・文書階層・移管マップの定義まで**を対象とする。個別規程の条文化はADP-059-B〜D、旧Operating Guideの縮退はADP-059-Eで行う。
+規程体系の移行後は、正式ルールの変更を該当するR01〜R06のGitHub原本へ反映し、必要なレビュー・版管理を通した後にNotionの人間向け規程集へ同期する。移行Task固有の暫定ルールを恒久的な規程本文へ残さない。
