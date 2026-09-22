@@ -1,7 +1,7 @@
 # Software Product design-document standard
 
-> **Artifact status:** durable reference. Produced for `ADP-050` and extended by `ADP-044-D`. Cross-references
-> `../package/workflows.md`, `product-vision-quality-standard.md`, and the five templates in `../templates/`.
+> **Artifact status:** durable reference. Produced for `ADP-050` and extended by `ADP-044-D` and `ADP-054-T19`. Cross-references
+> `../package/workflows.md`, `product-vision-quality-standard.md`, `epic-goal-quality-standard.md`, and the five templates in `../templates/`.
 
 ## Why
 
@@ -74,7 +74,7 @@ or full PRD/Design Doc, only the scope of that Epic's change.
 | Inception Deck | `docs/inception-deck.md` | Product | Product start after Approved Vision | Major pivot only |
 | PRD | `docs/PRD.md` | Product | Product requirement definition | Any Epic that changes a requirement |
 | Design Doc | `design-doc.md` (repository root, matching this repository's and `management-simulation-game`'s existing convention) | Product | Development start | Any Epic that changes the design |
-| Epic Brief | Inside the Epic's own Notion page | Epic | Epic start | N/A |
+| Epic Brief | Inside the Epic's own Notion page; its Objective/Success Metric must pass `docs/epic-goal-quality-standard.md` | Epic | Epic start | N/A |
 
 Only the first four are GitHub files; the Epic Brief is deliberately kept in
 Notion because an Epic itself has no GitHub-side artifact to attach it to and
