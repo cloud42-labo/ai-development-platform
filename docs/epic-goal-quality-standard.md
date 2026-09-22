@@ -114,5 +114,5 @@ Success Metric (as actually pursued): 損益分岐点と事業目標を確定し
 ## 8. Usage
 
 - `hierarchical-refinement` step 2 ("Epic") invokes this Gate for every Epic under review and records the Section 4 output contract alongside its existing Epic decision.
-- `templates/epic-brief.md`'s Outcome/Scope/Non-goals sections should be filled so this Gate can be evaluated directly from the Epic Brief without additional interviewing.
+- `templates/epic-brief.md`'s Outcome/Scope/Non-goals sections, plus its `Why Now / Evidence` and `Assumptions / Unknowns` sections, should be filled so this Gate can be evaluated directly from the Epic Brief without additional interviewing.
 - A `Revise` / `Unverified` `Epic Goal Gate Result` is itself the finding to report back to the Epic's owner (Human or AI PM); it is not silently downgraded to a Story-level note.

@@ -6,11 +6,12 @@
 > Written at Epic start. Fill in every section below; delete this
 > blockquote once filled.
 >
-> Outcome, Scope, and Non-goals below must let a reviewer evaluate the
-> Epic Goal Quality Gate (`../docs/epic-goal-quality-standard.md`) directly
-> from this Brief: state the Outcome independent of any specific solution,
-> name the evidence that makes this Epic timely, and don't fix a product
-> form, UI, or mechanism here before it has been validated.
+> The `Why Now / Evidence` and `Assumptions / Unknowns` sections below exist
+> so a reviewer can evaluate the Epic Goal Quality Gate
+> (`../docs/epic-goal-quality-standard.md`) directly from this Brief,
+> without additional interviewing. State the Outcome independent of any
+> specific solution, and don't fix a product form, UI, or mechanism in this
+> Brief before it has been validated.
 
 ## Outcome
 
@@ -23,6 +24,19 @@
 ## Non-goals
 
 <What's explicitly outside this Epic, to keep it from creeping.>
+
+## Why Now / Evidence
+
+<The observed fact or event that makes this Epic timely, separated from
+interpretation — a trial result, a failed real-device check, a market
+signal, an Owner decision. Not required for Epics predating this section;
+fill it going forward and when revising an existing Epic Brief.>
+
+## Assumptions / Unknowns
+
+<What this Epic assumes but has not verified, and what would reduce that
+uncertainty. Not required for Epics predating this section; fill it going
+forward and when revising an existing Epic Brief.>
 
 ## Related PRD Requirements
 
