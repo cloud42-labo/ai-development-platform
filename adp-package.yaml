@@ -16,12 +16,16 @@ description: >-
   models, governance, capability maps, architecture, and reusable
   templates.
 
-# Overall package version. NOT yet 1.0.0: the ADP-049 packaging chain that
-# introduced this manifest (A: inventory, B: this manifest, C–H: normalize
-# distribution structure, migration/upgrade, doctor/licensing, clean-install
-# E2E) is still in progress. ADP-049-H is the task that fixes the actual
-# 1.0.0 release. Bump this file's `version` there, not before.
-version: 0.1.0
+# Overall package version. Fixed at 1.0.0 by ADP-049-H: the ADP-049 packaging
+# chain (A: inventory, B: this manifest, C: package/ index, D: adp-bootstrap
+# Skill install/configure, E: upgrade/migration, F1-F3: doctor, secret-scan,
+# licensing, G: Clean Install E2E, H: this fix-point) is complete. A Clean
+# Install E2E (preflight -> plan -> apply -> doctor -> idempotent re-run ->
+# scan_secrets) passed into a genuinely fresh, isolated target repository —
+# see the ADP-049 Notion Story's Result for the run's concrete evidence.
+# Per-class versions (rules/schemas/workflows/templates/skills, above and
+# below) stay independent of this field going forward, as designed.
+version: 1.0.0
 
 # Version of the Schemas asset class (currently: governance/agent-policy.yaml
 # only). Kept separate from `version` because a schema/policy-format change
@@ -64,10 +68,18 @@ templates_version: 0.2.0
 # now exists — ADP-049-D/E/F1/F2 built plan/apply/doctor/scan_secrets — so the
 # field is added here rather than left implicit.
 #
-# 0.1.0, not 1.0.0: the Skill is functionally complete for install, upgrade,
-# doctor and secret-scanning, but has not yet been validated by a clean install
-# into an isolated environment (ADP-049-G, still Backlog). Treat it as
-# pre-release on the same footing as this file's own `version`.
+# Still 0.1.0: ADP-049-G's Clean Install E2E (2026-09-21) has now run this
+# Skill's install/doctor/scan_secrets path against a genuinely fresh, isolated
+# target and it passed — see this file's `version: 1.0.0` migration_path entry
+# for the run's evidence. That validates the Skill's current content; it is
+# not, by itself, a content change to the Skill (plan.py/apply.py/doctor.py/
+# scan_secrets.py were not modified to pass it), so per
+# docs/versioning-policy.md's Skills judgment (version by what changed for an
+# adopter, not by validation milestones) this field does not bump on that
+# basis alone. Two non-blocking gaps the E2E run surfaced — scan_secrets
+# literals missing from SOURCE_VALUES, and apply.py's up_to_date path not
+# repairing doctor-detected missing_files — are follow-up work tracked in
+# that migration_path entry, not yet fixed here.
 skills_version: 0.1.0
 
 # Where the Skills asset class physically lives. Unlike the other four
@@ -433,3 +445,47 @@ migration_path:
     action_required: >-
       Same as the paired rules_version 3.3.0 entry above — adopt both
       together.
+  - field: version
+    from: "0.1.0"
+    to: "1.0.0"
+    date: "2026-09-21"
+    change: >-
+      ADP-049-H: overall package version fixed at 1.0.0 as a coherent
+      release, per this file's own `version` field comment and
+      docs/versioning-policy.md's "Overall version" rule. This is not
+      derived from any single per-class version bump; it marks that the
+      ADP-049 packaging chain (manifest, package index, adp-bootstrap
+      Skill install/upgrade/doctor/scan_secrets, Clean Install E2E) is
+      now complete and verified end-to-end. ADP-049-G's Clean Install
+      E2E ran preflight -> plan (dry-run) -> apply (dry-run, then real)
+      -> doctor -> idempotent re-run (up_to_date, no file duplication)
+      -> scan_secrets against a genuinely fresh, isolated target
+      repository (no prior `.adp/installed.yaml`), using this commit as
+      `--source-ref`. All steps produced their expected exit codes and
+      output; see the ADP-049 Notion Story's Result for the transcript.
+    action_required: >-
+      None for an adopter already tracking per-class versions
+      (rules_version/schema_version/workflow_version/templates_version/
+      skills_version) individually — this bump changes only the overall
+      `version` field, not any asset content. An adopter who has not yet
+      run adp-bootstrap should now treat this repository plus the
+      `adp-bootstrap` Skill (cloud42-labo/skills) as a verified-installable
+      v1.0.0 package rather than a pre-release snapshot. Two known,
+      non-blocking gaps carried forward from the Clean Install E2E run,
+      to track as follow-up rather than re-litigate here: (1)
+      `scan_secrets.py` flagged two Cloud42-specific repository literals
+      (`cloud42-labo/store-survival-simulator` in
+      docs/product-design-doc-standard.md,
+      `cloud42-labo/serendipity-spot` in
+      governance/state-transition-pre-check-regression-cases.md) that are
+      not in `apply.py`'s `SOURCE_VALUES` substitution table — harmless
+      for cloud42-labo's own re-install/upgrade, but would leak into a
+      different organization's install verbatim; (2) `apply.py`'s
+      `up_to_date` path does not re-render or repair a file that
+      `doctor.py` reports as `missing_files` when the installed version
+      already matches the source version (manually deleting a required
+      file post-install left it missing after a same-version re-apply;
+      only a version bump — or a manual copy — restores it). Neither gap
+      blocked this Clean Install E2E (which exercises the `install`
+      decision path, not drift-repair), but both are real limitations an
+      adopter or maintainer should plan to close.
