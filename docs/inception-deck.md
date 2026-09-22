@@ -87,11 +87,11 @@ Memory = brain split).
 The `ADP-049` chain (A: inventory, B: manifest, C: distribution structure,
 D–G: migration/upgrade, doctor/licensing, clean-install E2E, H: fixing the
 overall version) closed the path to `v1.0.0`: `adp-package.yaml`'s overall
-`version` is `1.0.0` as of ADP-049-H, pending Owner merge of that PR and the
-corresponding Git tag/Release. Per-asset-class versions (`rules_version`,
-`schema_version`, `workflow_version`, `templates_version`, `skills_version`)
-continue moving independently of the overall version
-(`docs/versioning-policy.md`).
+`version` is fixed at `1.0.0` as of ADP-049-H. Per-asset-class versions
+(`rules_version`, `schema_version`, `workflow_version`, `templates_version`,
+`skills_version`) continue moving independently of the overall version
+(`docs/versioning-policy.md`). Live merge/release/tag status for any given
+change belongs in GitHub and Notion, not in this durable deck.
 
 ## Trade-off Sliders
 
