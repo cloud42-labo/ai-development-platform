@@ -70,6 +70,7 @@
 
 - Vision Type / abstraction: <Pass / Revise>
 - Purpose / Problem / Opportunity / Evidence separation: <Pass / Revise / Unverified>
+- Evidence sufficiency for requested transition: <Pass / Revise / Unverified>
 - Outcome quality: <Pass / Revise>
 - Solution neutrality: <Pass / Revise>
 - Success measures: <Pass / Revise / Unverified>
