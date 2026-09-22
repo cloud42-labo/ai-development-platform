@@ -4,8 +4,8 @@
 > **規程ID:** R04  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-06 JST  
-> **関連基準:** `governance/source-of-truth.md`（移行期間中。ADP-059-Eで基準として参照正規化）  
+> **最終改定日:** 2026-09-13 JST  
+> **関連基準:** `governance/source-of-truth.md`  
 > **関連手順:** `cloud42-labo/skills`  
 > **移管元:** `docs/operating-guide.md` §1、§5、§13 / `governance/source-of-truth.md`
 

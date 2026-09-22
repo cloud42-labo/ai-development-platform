@@ -35,14 +35,15 @@ schema_version: 0.1.0-experimental
 # governance/research-security-policy.md,
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
-# docs/human-gate-pre-check-examples.md).
-rules_version: 3.2.0
+# docs/human-gate-pre-check-examples.md, docs/regulations/README.md and
+# R01-R06).
+rules_version: 3.3.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
 # governance/monthly-risk-management-review.md,
 # docs/product-design-doc-standard.md).
-workflow_version: 1.0.0
+workflow_version: 1.1.0
 
 # Version of the Templates asset class (templates/README.md,
 # templates/monthly-risk-review.md, templates/product-vision.md,
@@ -191,19 +192,19 @@ migration_path:
       Human-only and creating the Human Request for it. Added
       governance/state-transition-pre-check-regression-cases.md and
       Pattern 4 in docs/human-gate-pre-check-examples.md. MAJOR per
-      docs/versioning-policy.md's Rules judgment, not MINOR as first
-      classified (corrected after Codex review on ai-development-platform
-      PR #19): the prior gate's own written form (old step 4/5, now
-      renumbered 4/6/7) blocked/permitted a Human Request whenever ANY
-      `Human-only` criterion remained, regardless of which transition it
-      belonged to — the exact behavior that produced PM-8. The new step 5
-      makes that same previously-compliant behavior (creating a Human
-      Request or Blocked state for a `Human-only` criterion that gates a
-      *different*, downstream transition) non-compliant, and narrows the
-      condition under which the existing gate fires. That is a loosening
-      of a relied-upon safety gate per the policy's own MAJOR criteria,
-      not a purely additive new constraint — even though its purpose is
-      to prevent the gate from being *misapplied*, not to remove it from
+      docs/versioning-policy.md's Rules judgment (corrected after Codex
+      review on ai-development-platform PR #19): the prior gate's own
+      written form (old step 4/5, now renumbered 4/6/7) blocked/permitted
+      a Human Request whenever ANY `Human-only` criterion remained,
+      regardless of which transition it belonged to — the exact behavior
+      that produced PM-8. The new step 5 makes that same
+      previously-compliant behavior (creating a Human Request or Blocked
+      state for a `Human-only` criterion that gates a *different*,
+      downstream transition) non-compliant, and narrows the condition
+      under which the existing gate fires. That is a loosening of a
+      relied-upon safety gate per the policy's own MAJOR criteria, not a
+      purely additive new constraint — even though its purpose is to
+      prevent the gate from being *misapplied*, not to remove it from
       cases where it genuinely applies.
     action_required: >-
       An adopter following this Rule must, before setting a task/PR to a
@@ -398,3 +399,37 @@ migration_path:
       extending that map lives in cloud42-labo/skills and is tracked as
       follow-up, so until then, compare `skills_version` by hand at upgrade
       time rather than assuming doctor will flag it.
+  - field: rules_version
+    from: "3.2.0"
+    to: "3.3.0"
+    date: "2026-09-22"
+    change: >-
+      ADP-059-F: package/workflows.md's regulation-index entry
+      (docs/regulations/README.md and R01-R06) was removed and
+      package/rules.md now lists that index and each R01-R06 file
+      individually. R01-R06 are binding constraints, not multi-step
+      processes, so this corrects an asset-class misclassification; no
+      R01-R06 content itself changed. MINOR per docs/versioning-policy.md's
+      Rules judgment: this is new, previously-missing discoverability for
+      already-binding content under the correct class, not a change to
+      what compliance already required.
+    action_required: >-
+      An adopter who tracked the regulation index's location via
+      workflow_version must retarget that tracking to rules_version —
+      the index and R01-R06 no longer appear under Workflows at all.
+  - field: workflow_version
+    from: "1.0.0"
+    to: "1.1.0"
+    date: "2026-09-22"
+    change: >-
+      ADP-059-F: the paired workflow_version half of the rules_version
+      3.3.0 entry above — package/workflows.md lost its (misclassified)
+      regulation-index entry. No genuine Workflow document
+      (postmortem-improvement-loop.md, monthly-risk-management-review.md,
+      product-design-doc-standard.md) changed; bumped only so an adopter
+      watching workflow_version for this repository sees a signal that
+      the class's file list changed, matching the paired rules_version
+      bump.
+    action_required: >-
+      Same as the paired rules_version 3.3.0 entry above — adopt both
+      together.
