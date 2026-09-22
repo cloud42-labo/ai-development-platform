@@ -41,7 +41,7 @@ schema_version: 0.1.0-experimental
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md, docs/regulations/README.md and
 # R01-R06).
-rules_version: 3.4.0
+rules_version: 3.5.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -541,3 +541,24 @@ migration_path:
       reconcile downstream dependencies and affected Story completion before
       allowing the state change to remain isolated; compensation runs must
       converge missing work through Backlog Refinement before Sprint Planning.
+  - field: rules_version
+    from: "3.4.0"
+    to: "3.5.0"
+    date: "2026-09-22"
+    change: >-
+      R06 第9条 Sprint運用 gains Notion Weekly Maintenance as the mandatory
+      first stage of Weekly Sprint, auditing current Notion display against
+      current regulations, GitHub main, and the actual scheduler/automation
+      state before any other stage runs. Weekly Sprint completion now also
+      requires every detected drift to be either safely corrected or
+      explicitly dispositioned with Evidence, Owner and Next Action. R06 is
+      classified under the Rules asset class (rules_version 3.3.0 entry
+      above), so this bump lands there rather than workflow_version. MINOR
+      per docs/versioning-policy.md's Rules judgment: additive new
+      constraint, no existing gate removed or loosened.
+    action_required: >-
+      Adopters must run Notion Weekly Maintenance before any other Weekly
+      Sprint stage and must not close the Sprint while any detected drift
+      lacks either a safe fix or an explicit recorded disposition
+      (Evidence/Owner/Next Action). The executable How is the paired
+      cloud42-labo/skills weekly-sprint Composite's Step 0.
