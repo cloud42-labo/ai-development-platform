@@ -70,7 +70,7 @@ or full PRD/Design Doc, only the scope of that Epic's change.
 
 | Document | Canonical path | Scope | Created | Synced |
 |---|---|---|---|---|
-| Product Vision | `docs/PRD.md` §1/§2 may carry an already-approved Product Vision; a separately-approved Vision may live at `docs/product-vision.md` and be linked from the PRD. In either case the content must pass `docs/product-vision-quality-standard.md`. | Product | provisional during Idea/Vibe/Experimental; Approved before an R05 transition that requires it | Major pivot / material evidence change |
+| Product Vision | `docs/product-vision.md` is the canonical Approved Vision artifact and must pass `docs/product-vision-quality-standard.md`. The PRD may summarize/link it, but does not replace the auditable Vision Gate contract. | Product | provisional during Idea/Vibe/Experimental; Approved before an R05 transition that requires it | Major pivot / material evidence change |
 | Inception Deck | `docs/inception-deck.md` | Product | Product start after Approved Vision | Major pivot only |
 | PRD | `docs/PRD.md` | Product | Product requirement definition | Any Epic that changes a requirement |
 | Design Doc | `design-doc.md` (repository root, matching this repository's and `management-simulation-game`'s existing convention) | Product | Development start | Any Epic that changes the design |
