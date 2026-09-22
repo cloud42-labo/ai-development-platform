@@ -10,3 +10,4 @@ MAJOR/MINOR/PATCH mean for this class (`workflow_version` in
 | [`../governance/monthly-risk-management-review.md`](../governance/monthly-risk-management-review.md) | Monthly risk review cadence, complements the Postmortem loop |
 | [`../docs/product-design-doc-standard.md`](../docs/product-design-doc-standard.md) | Vision → Inception Deck → PRD → Design Doc → Epic Brief flow: where each Product design document lives and when it's synced |
 | [`../docs/product-vision-quality-standard.md`](../docs/product-vision-quality-standard.md) | Product Vision quality and approval Gate |
+| [`../docs/epic-goal-quality-standard.md`](../docs/epic-goal-quality-standard.md) | Epic Goal (Objective/Success Metric) quality Gate, consumed by `hierarchical-refinement` |

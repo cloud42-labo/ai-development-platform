@@ -5,6 +5,12 @@
 > duplicate the Product Vision, Inception Deck, or full PRD/Design Doc.
 > Written at Epic start. Fill in every section below; delete this
 > blockquote once filled.
+>
+> Outcome, Scope, and Non-goals below must let a reviewer evaluate the
+> Epic Goal Quality Gate (`../docs/epic-goal-quality-standard.md`) directly
+> from this Brief: state the Outcome independent of any specific solution,
+> name the evidence that makes this Epic timely, and don't fix a product
+> form, UI, or mechanism here before it has been validated.
 
 ## Outcome
 
