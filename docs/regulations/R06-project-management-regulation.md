@@ -115,10 +115,11 @@ Weekly Sprintは、原則として次の順で管理する。
 1. **Upstream Change Review** — 公式一次情報から外部前提の変化を確認する。
 2. **Sprint Review** — 成果、未完了、Blockerを確認する。
 3. **Retrospective** — Keep / Problem / Tryと改善入力を記録する。
-4. **Backlog Refinement** — MISC受付の正式配置、構造とHowを再評価する。
-5. **Sprint Close** — 未完了項目の扱いを明示してSprintを閉じる。
-6. **Sprint Goal Review** — 新しい事実に基づきGoalを再評価する。
-7. **Sprint Planning** — Ready workから次Sprintを構成する。
+4. **Task / Story State Reconciliation** — terminal Workから後続WorkのDependency ReleaseとParent / affected Storyの完了判定を行う。missing workを検出した場合はMISC / Backlogへ起票する。
+5. **Backlog Refinement** — MISC受付の正式配置、構造とHowを再評価する。直前のReconciliationで発生したmissing workも同一runで正式配置・再評価する。
+6. **Sprint Close** — 未完了項目の扱いを明示してSprintを閉じる。
+7. **Sprint Goal Review** — 新しい事実に基づきGoalを再評価する。
+8. **Sprint Planning** — Ready workとCommitted Storyの依存チェーンから次Sprintを構成する。
 
 実行Howは `cloud42-labo/skills` の `weekly-sprint` Compositeおよび構成Skillを正本とし、Scheduler / Routineには詳細手順を重複保持しない。
 
@@ -129,6 +130,8 @@ Weekly Sprintは、原則として次の順で管理する。
 3. Human Gate、依存関係、Reviewer capacityその他の既知制約を考慮する。
 4. 未完了Taskを自動的に次Sprintへcarry overしない。Sprint Closeで継続、分割、Backlog戻し、Superseded等を明示する。
 5. Refinementの結果、上位構造または外部前提が変わった場合はSprint Goal自体を見直す。
+6. StoryをCommittedにする場合、その時点でReadyなTaskだけを選択して完了計画とみなしてはならない。Story Acceptance Criteria達成に必要なRequired child work、依存順、Future Ready条件およびStory完了判定点をExecution Chainとして明示する。
+7. Planning時点で依存未解消のFuture Ready Taskを先行してReadyへ変更しない。依存条件が満たされた時点で第14条の2に従い再評価する。
 
 ## 第11条 ReviewとRefinement
 
@@ -156,6 +159,7 @@ Taskを分割・置換する場合は、DoneではなくSupersededを用いる�
 4. 後工程だけのHuman-only条件を、現在の開発・Review・mergeを止める理由にしない。
 5. Human Gateは定期的に再評価し、証拠が到着したら速やかに解除する。
 6. Human Queueは高コストな例外処理としてWIPを管理し、AIで縮小できる準備・代替作業を優先する。
+7. Blockerの原因となるTaskまたは条件が解消した場合、`Backlog / Blocked` にある後続Task / StoryのBlocker、Definition of ReadyまたはStory構造を速やかに再評価する。TaskのBlocked解除時は `task-approach-review` のFinalizeを再実行し、fresh `Approved` とDoRを満たした場合だけReadyへ遷移する。Storyは `hierarchical-refinement` でOutcome・依存・配下構造を再評価する。既に `Ready / In Progress / Review / Done / Superseded` 等へ進んだWorkを補償処理でReadyへ巻き戻してはならない。
 
 ## 第14条 Definition of Done
 
@@ -172,6 +176,19 @@ TaskをDoneとするには、原則として次を満たす。
 9. Task自身のAcceptance Criteriaに必要なHuman / 他Agent作業が残っていない。
 
 詳細なDoD判定は下位基準として管理する。
+
+TaskまたはStoryをDone / Superseded / Replaced / Merged / Stopped等のterminal状態へ遷移させたActorは、その状態変更を孤立させず、第14条の2のState Reconciliationを実行する。即時実行が漏れた場合はDaily CloseおよびWeekly Sprintが補償制御として再実行する。
+
+## 第14条の2 Task / Story State Reconciliation
+
+1. **Dependency Release** — terminalになったTask / Storyに依存する後続Task / Storyについて、状態名だけではなく成果・置換関係・依存条件の実質を確認する。Readyへの遷移対象は `Backlog / Blocked` のWorkに限る。Taskは依存解消後に `task-approach-review` をFinalize modeで再実行し、他のBlockerがなく、fresh `Approach Review = Approved`、Definition of Ready、必要なExecution Prompt / Human Action Instructionを満たす場合だけ、Blockerを解消し `Status = Ready` へ遷移する。Storyは `hierarchical-refinement` でOutcome・依存・親Epicとの因果・配下構造を再評価する。既にReady以降へ進んだWorkは状態を後退させない。
+2. Superseded / ReplacedはDependency充足と同義ではない。置換先Taskを追跡し、依存条件が既に満たされたのか、置換先へ移ったのかを確認する。
+3. **Story Completion Roll-up** — terminalになったTaskのParent Story、terminal childを持つactive Story、またはDependency Releaseでwaiting状態から解放されたactive Storyについて、Required child work、置換関係、Human / 外部作業、Story自身のAcceptance Criteriaを評価する。waiting状態から解放されたStoryはterminal predecessor evidenceとして扱わず、別のroll-up候補として即時completion判定へ回す。
+4. StoryをDoneとするには、Story Outcomeに必要なRequired workがすべてterminalで置換関係が収束し、Story Acceptance Criteriaを成果証拠に照らして満たし、Story Outcomeに必要なHuman / 外部作業が残っていないことを要する。
+5. StoryをDoneとする場合は、`Status = Done`、`Closure Reason = Done`、`Completed At`、`Result`のStory Outcomeと主要証拠を記録する。StoryはTask Time Eventを持つ実行単位ではないため、TaskのTime Event完了条件をそのまま適用しない。**新たにterminalとなったStoryは直ちに同一Reconciliation runのterminal候補へ追加し、そのStoryに依存する後続WorkのDependency Releaseまで固定点に到達するまで継続する。**
+6. Story Acceptance Criteriaが未達の場合、子Task件数だけを根拠にStoryをDoneとしてはならない。不足AC、Active child、未解消Blockerまたはmissing workを明示する。
+7. missing workが新たに必要な場合は、第2条の新規Task受付原則に従い `MISC｜... / Backlog` として起票し、Backlog Refinementへ渡す。Weekly Sprintの補償Reconciliationで発見したmissing workは、同一runで後続のBacklog Refinementへ入力し、Sprint Planning前に正式配置・再評価する。
+8. State ReconciliationはTask / Story terminal transition直後を原則とし、新たなterminal Storyを含む依存伝播がなくなるまで固定点へ収束させる。Daily CloseおよびWeekly Sprintでは遷移日ではなく、terminal Dependencyを参照するwaiting Taskやterminal childを持つopen Story等の**未reconcile状態**を基準に補償的に再実行する。詳細手順は `cloud42-labo/skills` の `task-state-reconcile` を正本とする。
 
 ## 第15条 Time Eventと管理計測
 

@@ -41,7 +41,7 @@ schema_version: 0.1.0-experimental
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md, docs/regulations/README.md and
 # R01-R06).
-rules_version: 3.3.0
+rules_version: 3.4.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -524,3 +524,20 @@ migration_path:
       Review Context, and an auditable Owner Acceptance Reference. Do not
       fabricate historical acceptance evidence; use Revise/Unverified until
       a valid reference exists.
+  - field: rules_version
+    from: "3.3.0"
+    to: "3.4.0"
+    date: "2026-09-22"
+    change: >-
+      ADP-054-T18: the R01-R06 regulation hierarchy is now exposed through
+      the Rules package index, and R06 adds binding Task / Story State
+      Reconciliation after terminal transitions. This is additive MINOR:
+      existing Rules are retained while adopters gain a new mandatory
+      reconciliation constraint and a discoverable normative index.
+      Rebased onto current main after the R01-R06 Rules reclassification; this is the next Rules MINOR after rules_version 3.3.0.
+    action_required: >-
+      Adopters must include docs/regulations/README.md and applicable R01-R06
+      in their Rules set. After a Task or Story reaches a terminal state,
+      reconcile downstream dependencies and affected Story completion before
+      allowing the state change to remain isolated; compensation runs must
+      converge missing work through Backlog Refinement before Sprint Planning.
