@@ -1,6 +1,6 @@
 # Human Gate Pre-check — worked examples
 
-> **Artifact status:** durable reference for applying the Human Gate Pre-check defined in [`operating-guide.md`](operating-guide.md) section 11 and [`../governance/ai-execution-constraints.md`](../governance/ai-execution-constraints.md).
+> **Artifact status:** durable reference for applying the Human Gate rules defined by [`regulations/R02-authority-regulation.md`](regulations/R02-authority-regulation.md), [`regulations/R03-approval-regulation.md`](regulations/R03-approval-regulation.md), and [`../governance/ai-execution-constraints.md`](../governance/ai-execution-constraints.md).
 >
 > These examples are **anonymized patterns**, not a snapshot of any task's current status. Notion is the system of record for what state a given task is actually in today; this file exists so the reasoning pattern survives after the concrete tasks it was drawn from are archived or their state has moved on. For the dated, linkable evidence behind each pattern (the actual task IDs, PR numbers, run IDs, and timestamps), see the `Result` field of `ADP-043-H` in Notion Stories & Tasks — that is where operational history belongs, not here.
 
@@ -46,7 +46,7 @@ The pre-check exists because a Human gate is a claim about the present ("no reco
 
 **How it differs from Patterns 1–3:** those patterns are about whether the classification itself is correct (already satisfied, genuinely needed, or partially needed). Pattern 4's classification can be entirely correct — the criterion really is `Human-only` — and the gate is still wrong, because it was applied to the wrong transition.
 
-**Classification approach:** name the transition currently being evaluated precisely (e.g. "PR review → merge", not "ship the feature"). For each `Human-only` criterion, ask whether it is a mandatory prerequisite of *that* transition specifically, or of a transition that comes after it. See Operating Guide section 11.8.
+**Classification approach:** name the transition currently being evaluated precisely (e.g. "PR review → merge", not "ship the feature"). For each `Human-only` criterion, ask whether it is a mandatory prerequisite of *that* transition specifically, or of a transition that comes after it. Authority and approval boundaries are defined by R02/R03; transition-specific regression evidence is kept in governance criteria.
 
 **Action:** if the criterion gates a downstream transition **and no accountable reviewer has already explicitly tied it to the current transition**, do not block the current one on it — let the current transition proceed on its own actual gates, and route the Human-only work as its own request scoped to the transition it actually gates. The downstream gate itself is not removed, only prevented from propagating backward to a transition it does not govern. If an accountable reviewer HAS already explicitly gated the current transition on this criterion (e.g. a standing "will not merge until X"), that stays in force until the same standard of evidence — a dated comment/review from an equally accountable authority — revises it; this pattern narrows an AI-invented over-block, it never authorizes overriding a still-current human decision on the AI's own reasoning.
 
@@ -56,7 +56,7 @@ Two worked regression cases — a criterion that turned out not to be a merge pr
 
 The pre-check was first applied across every open `Type = Human Request` and every task `Blocked` for a Human reason in one pass (28 records). A small minority were false gates (Pattern 1/1b); the large majority were correct and left alone (Pattern 2, or legitimate pending dependencies). See `ADP-043-H`'s `Result` in Notion for the exact count and the specific tasks corrected on that pass.
 
-Every false gate found in that pass had the same shape: **a Human act had completed, and the record pointing at it was never updated.** None were caused by a Human failing to act. Two consequences follow, and both are now rules (see [`operating-guide.md`](operating-guide.md) section 11.6):
+Every false gate found in that pass had the same shape: **a Human act had completed, and the record pointing at it was never updated.** None were caused by a Human failing to act. Two consequences follow, and both are now governed by R02/R03 and the executable `human-gate-preflight` procedure:
 
 - **Check the named dependency first.** A Blocker that names a task or request is verified with one lookup. This is what makes clearing stale gates cheap enough to do daily.
 - **A satisfied Human gate does not mean the task is Done.** Where the Human portion is complete but AI work remains, the correct move is to return the task to `Ready` with the residual AI work named — not to close it, and not to leave it `Blocked`. `Blocked` and `Done` are both wrong answers for "the person finished; the machine has not started".
