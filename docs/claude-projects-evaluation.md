@@ -62,8 +62,12 @@ own governing documents, not paraphrased from memory:
 - **Notion (operational SoT)** — `Stories & Tasks` data source: Status, Priority,
   Blocker, Acceptance Criteria, Result, Started/Completed At.
 - **GitHub implementation/PR** — the actual code and PR record; branch-per-repo
-  convention, PR templates, protected-branch merge policy
-  (`governance/agent-policy.yaml`'s `github-protected-merge`).
+  convention, PR templates, and per-repository GitHub branch protection on the
+  default branch. (`governance/agent-policy.yaml`'s `github-protected-merge`
+  names this intent as a policy draft, but is itself explicitly non-authoritative
+  and unenforced — `docs/v1-asset-inventory.md`'s Freeze-scope exception — so
+  actual enforcement today is whatever branch protection each repository has
+  configured, not this file.)
 - **Codex Review** — automatic PR review + ChatGPT-side hourly merge task
   described in `brain/notes/ai-pr-review-loop.md`.
 - **Human Gate** — `human-gate-preflight` Skill: per-Acceptance-Criterion
@@ -106,7 +110,7 @@ own governing documents, not paraphrased from memory:
 | Skill | Project instructions (≤16,000 chars, per-Project) + autonomous `MEMORY.md` | **Conflict-risk / Keep** | Project instructions are unversioned outside the Project, capped far below a typical `SKILL.md`, and scoped to one Project rather than shared across repos the way Skills already are. Using both without a single owner creates a second, thinner "how" source. |
 | Task decomposition | Coordinator decomposing a request into Threads | **Conflict-risk / Keep** | Coordinator decomposition is conversational and ephemeral — no Priority/Type/Blocker/Acceptance Criteria schema, no Definition-of-Ready check. Letting it originate work in parallel with Notion `Stories & Tasks` is exactly the "二重Task管理" (duplicate task management) risk this Task's Acceptance Criteria asks to flag. |
 | Notion (operational SoT) | Thread state grouping (Ready for review / Waiting on you / Working / Landing / Idle / Resolved), UI-only | **Unknown / Keep** | No confirmed API or webhook (T01 did not find one) to write Thread state into Notion. Until one exists, running Threads outside a Task's normal Notion lifecycle would silently desync Notion Status from actual work state. |
-| GitHub implementation/PR | Thread opens a PR on its Project's repository | **Complement, conditionally Conflict** | The PR itself is still the code/review artifact of record, so this layer is structurally compatible. But the settings.json/hooks non-enforcement on multi-repo Projects directly conflicts with `governance/agent-policy.yaml`'s cross-repo `github-protected-merge` policy, which governs multiple repos at once. Safe only if a Project is restricted to exactly one repository. |
+| GitHub implementation/PR | Thread opens a PR on its Project's repository | **Complement, conditionally Conflict** | The PR itself is still the code/review artifact of record, so this layer is structurally compatible. But the settings.json/hooks non-enforcement on multi-repo Projects means a multi-repo Project's Threads can bypass whatever per-repository branch protection each of those repos actually has configured (`agent-policy.yaml`'s own cross-repo policy intent is not itself an enforced control — see §1). Safe only if a Project is restricted to exactly one repository, and only as safe as that one repository's own GitHub branch protection already is. |
 | Codex Review | Not present; Thread's own "Ready for review" state is a UI signal, not a review mechanism | **Complement** | Codex Review runs on the PR object itself regardless of what opened it, so it is unaffected as long as the repo's existing Actions/Codex configuration is untouched. |
 | Human Gate | "Waiting on you" Thread state + desktop notification | **Complement, not Replace** | This is a coarse "a human is needed" signal with no per-Acceptance-Criterion classification, no Notion `Human Request` record, and no SLA/Due tracking. Replacing `human-gate-preflight`'s structured gate with this would be a regression in auditability. |
 | Brain / Memory | Project `MEMORY.md`, autonomous, per-Project only | **Conflict** | This is a second, ungoverned memory surface: not git-tracked outside the Project, not shared across Products, not human-reviewable the way `brain`'s PARA structure is. Running both is exactly the "二重Memory" (duplicate memory) risk this Task's Acceptance Criteria asks to flag. |
@@ -139,6 +143,11 @@ human editing code directly — and nowhere else:
 Notion Task (Ready, Assigned Agent = Claude, Acceptance Criteria set)
         │
         ▼
+   Caller pre-flight (unchanged, AGENTS.md "Before starting work" / T01/T02's own
+   gate): Task exists and is executable → Status = In Progress + Started At (JST)
+   recorded → Task Time Event opened → actor authority checked
+        │
+        ▼
    Execution Adapter  ── swappable: CLI session | Claude Projects Thread | Codex
         │                 (this Task's only new option)
         ▼
@@ -148,7 +157,8 @@ Notion Task (Ready, Assigned Agent = Claude, Acceptance Criteria set)
    Codex Review + existing merge-authority rules (unchanged)
         │
         ▼
-   Calling agent updates Notion (Status / Result / TTE) — never the Thread itself
+   Calling agent closes Notion (Result → verify + close TTE with Ended At →
+   Completed At → Status = Done last) — never the Thread itself
 ```
 
 Concrete constraints for this Adapter role, each closing one of the risks in
@@ -159,12 +169,29 @@ Concrete constraints for this Adapter role, each closing one of the risks in
    which Task runs next; it is only ever handed one already-Ready Notion Task.
 2. **Single-repository Projects only.** A Project used this way must contain
    exactly one repository, so `.claude/settings.json` permission rules/hooks
-   keep applying to its Threads (per T01 §5) and `agent-policy.yaml`'s
-   multi-repo `github-protected-merge` policy is not silently bypassed.
-3. **No independent task decomposition.** The Thread receives one Notion Task
-   URL as its spec (Acceptance Criteria, Blocker, dependencies already
-   resolved by Notion, not re-derived by the Coordinator). It does not spawn
-   sibling Threads for sub-work Notion hasn't already broken out.
+   keep applying to its Threads (per T01 §5). This is necessary but not
+   sufficient for merge protection on its own: `governance/agent-policy.yaml`'s
+   `github-protected-merge` is explicitly a non-authoritative draft with no
+   enforcement point (`docs/v1-asset-inventory.md`'s Freeze-scope exception),
+   so it cannot be cited as the safeguard against a bypassed merge. The actual
+   enforcement point, if one is needed for a repository used this way, is that
+   repository's own GitHub branch protection on its default branch (required
+   review / required status checks) — configured per-repository today,
+   independent of this document. Single-repo scoping only keeps
+   `settings.json` itself from being silently ignored; it does not by itself
+   guarantee any particular merge policy is enforced.
+3. **No independent task decomposition, and no ungated data transfer.** The
+   Thread receives one Notion Task URL as its spec (Acceptance Criteria,
+   Blocker, dependencies already resolved by Notion, not re-derived by the
+   Coordinator). It does not spawn sibling Threads for sub-work Notion hasn't
+   already broken out. Before that Task's content is supplied to a Thread, the
+   calling agent applies `governance/research-security-policy.md` §1's
+   public-information default: if the Task's Acceptance Criteria, Blocker, or
+   dependencies contain company-confidential, private, or otherwise non-public
+   material, handing it to the external Projects service requires the same
+   explicit transfer authorization any other external-service data transfer
+   would — it is not automatically permitted merely because the Task is
+   `Ready`.
 4. **No memory role.** Project `MEMORY.md` is treated as disposable scratch.
    Anything worth keeping is written to `brain` by the closing agent exactly as
    for a normal CLI-run Task; nothing in Project memory is trusted as a second
@@ -174,8 +201,10 @@ Concrete constraints for this Adapter role, each closing one of the risks in
    the only Human Gate SoT.
 6. **Unchanged completion contract.** On Thread completion (Ready for
    review / Idle / Resolved), the calling agent — not the Thread — performs the
-   same Notion completion transaction (Result, Status, Completed At, TTE close)
-   any other Execution Adapter would.
+   same Notion completion transaction any other Execution Adapter would, in
+   `AGENTS.md`'s required order: verify Acceptance Criteria/artifact, record
+   `Result`, verify and close the Task Time Event with `Ended At`, record
+   `Completed At`, and only then set `Status = Done`.
 
 Because the Adapter boundary is this narrow, removing Projects later (beta
 ends, plan tier changes, a better cloud execution surface appears) requires no
@@ -191,10 +220,13 @@ choice of Adapter for the one step that already varies.
 - Whether Thread state or timing ever becomes API-readable (relevant to the two
   "Unknown" rows above — Notion sync and TTE) should be rechecked against
   official docs before T03/T04, not assumed.
-- If T03/T04 confirm adoption, `governance/agent-policy.yaml` and the relevant
-  product repos' `CLAUDE.md`/`AGENTS.md` would need an explicit clause
-  restricting Projects usage to single-repository Projects, per §5 point 2 —
-  tracked here as a follow-up, not implemented by this Task.
+- If T03/T04 confirm adoption, the relevant product repos' `CLAUDE.md`/
+  `AGENTS.md` would need an explicit clause restricting Projects usage to
+  single-repository Projects with GitHub branch protection already configured
+  on that repository's default branch, per §5 point 2 — tracked here as a
+  follow-up, not implemented by this Task. This is independent of
+  `governance/agent-policy.yaml`'s own fail-closed/enforcement-point gap,
+  which `docs/cloudflare-os-evaluation.md` §10 already tracks separately.
 
 ## Primary sources
 
