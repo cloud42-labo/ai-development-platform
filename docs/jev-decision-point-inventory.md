@@ -58,8 +58,11 @@ alternate implementation of that same interface, reversible the same way
 reversible as an Execution Adapter.
 
 **Inventory result: 10 Decision Point candidates.** 6 Jev向き (as bounded
-triage/pre-filters only), 3 LLM向き, 1 Human専用 (hardcoded, non-negotiable).
-See §4 for the summary table.
+triage/pre-filters only), 3 LLM向き, 1 excluded from Jev's decision space
+entirely — hardcoded and non-negotiable either way, but not uniformly
+Human: DP-5 is Human/Owner for production/destructive/credential authority,
+and deterministic AI cross-authority (not Human) for protected-branch merge
+specifically, per R02 §4. See §4 for the summary table.
 
 ## 1. What counts as a "Decision Point" here
 
@@ -203,26 +206,51 @@ authorization
   deploy/publish/config change, destructive delete/purge, or
   credential/permission/policy change may proceed.
 - **Input state**: same tuple as DP-4, but these five `agent-policy.yaml`
-  rule ids already carry `decision: approve` (i.e. Human) or `decision: deny`
+  rule ids already carry `decision: approve` or `decision: deny`
   (self-authority-escalation) unconditionally — there is no ambiguous middle
-  the classification in DP-4 is meant to resolve.
+  the classification in DP-4 is meant to resolve. **`decision: approve` is not
+  itself "Human" — it means an approval gate is required, and which authority
+  satisfies that gate is defined by R02, not by this policy file.** For
+  `github-protected-merge` specifically, R02 §4 makes that gate a
+  **repo-dependent, deterministic AI/Human split**, not a blanket Human one:
+  self-merge repos (`brain`/`experimental`/`skills`) satisfy it via the
+  acting AI itself (still subject to CI/P0/P1/mergeability gates, §4.1);
+  every other repo — including this one — satisfies it via R02 §4.2's
+  cross-AI Author≠Merger flow (Claude-authored PRs merged by Chris,
+  Chris-authored PRs merged by Claude), with **"Ownerは通常のmerge
+  operatorとしない"** stated explicitly. The other three rule ids
+  (production deploy/publish/config change, destructive delete/purge,
+  credential/permission/policy change) are different: R02 §7 and
+  R03 reserve those specifically for Owner/Human
+  (本人確認・credential発行・権限付与・支払・購入・契約等), with no AI or
+  cross-AI substitute.
 - **Typed output**: does not apply — this is not a probabilistic judgment at
-  all; it is a hardcoded authority boundary.
+  all; it is a hardcoded authority boundary either way (AI cross-authority
+  for protected-branch merge, Human/Owner for the other three).
 - **Confidence threshold**: not applicable. No confidence score changes the
-  outcome.
-- **Authority**: Human/Owner (`R02-authority-regulation.md`,
-  `R03-approval-regulation.md`); no AI, and no calibrated model regardless of
-  confidence, may substitute its own judgment here.
+  outcome, and no calibrated model may substitute its own judgment for any
+  of these four regardless of confidence.
+- **Authority**: protected-branch merge — the repo-dependent AI authority in
+  R02 §4 above (self-merge AI, or cross-AI Chris/Claude), unless a
+  Repository固有ルール or Owner's explicit instruction sets a different
+  merge authority (R02 §4.2 last line). Production deploy/destructive
+  delete/credential change — Human/Owner only (`R02-authority-regulation.md`
+  §7, `R03-approval-regulation.md`).
 - **Fallback**: n/a — this is itself the terminal/fallback state for DP-4's
   low-confidence and out-of-category cases, and for DP-1's genuinely
   Human-only Acceptance Criteria.
 - **Evidence storage location**: `governance/agent-policy.yaml` rule
-  definitions; Human Request records in Notion when the boundary is hit.
-- **Bucket: Human専用** (explicit, non-negotiable — included in this
-  inventory precisely because the task's own acceptance criteria ask for the
-  "anything the existing rules already mark Human-only... merge authority on
-  protected branches" example to be named directly rather than folded into
-  DP-4).
+  definitions; Human Request records in Notion when the Human-only boundary
+  (production/destructive/credential) is hit; PR merge record on GitHub for
+  protected-branch merge.
+- **Bucket: excluded from Jev — hardcoded, non-negotiable either way**
+  (Human専用 for production/destructive/credential; deterministic AI
+  cross-authority, not Human, for protected-branch merge — included in this
+  inventory because the task's own acceptance criteria ask for the
+  "merge authority on protected branches" example to be named directly
+  rather than folded into DP-4, and because getting *who* holds that
+  authority wrong would be exactly the kind of Jev/LLM boundary error §1
+  warns against).
 
 ### DP-6 — Postmortem severity & escalation-category triage
 
@@ -254,28 +282,39 @@ authorization
 ### DP-7 — Review-round same-objective / same-area gate
 
 - **Decision Type**: `governance/review-loop-control.md`'s Round-3
-  ("Approach Refinement trigger") and Round-5 ("hard cap") thresholds, which
-  are pure integer counting against constants (3, 5) — no judgment involved
-  once the round count is known. The judgment that *does* recur is upstream
-  of the count: whether a new review finding is "同一subsystem、state
-  transition、invariant..." as an existing round (§2's round-count-continuity
-  test), which decides whether the counter increments or a new count starts.
+  ("Approach Refinement trigger") and Round-5 ("hard cap") thresholds. Per
+  §2, the round counter itself increments on **every** substantive
+  review round for the same change objective/Task目的, regardless of which
+  subsystem/area a given finding touches — it does **not** reset just
+  because a new finding happens to concern a different subsystem. The
+  counter only starts fresh for an intentional, Notion-recorded
+  Split/Superseded replacement PR (§2's last bullet), never from area
+  similarity/dissimilarity alone. The judgment that *does* recur is a
+  separate, narrower question, upstream only of the **Round-3 trigger**
+  (§3): whether 3 consecutive rounds' findings share "同一subsystem、state
+  transition、invariant、migration、retry/failure mode、provenance model"
+  — that same-area test decides whether Round-3's Approach-Refinement
+  escalation fires, not whether the round counter itself increments or
+  resets.
 - **Input state**: current finding text vs. prior findings' subsystem/area
-  in the same change objective.
+  in the same change objective, for the Round-3 same-area check only; the
+  round counter itself needs just "was this call a substantive review
+  round for this change objective: yes/no" (§2).
 - **Typed output**: the counting itself fits no Jev type (it needs no model
-  at all — a integer comparison). The upstream "same area as prior findings:
-  yes/no" question would be **Noul**.
-- **Confidence threshold**: n/a for the counting; high-only for the "same
-  area" pre-check, with anything ambiguous resolved by the reviewer/acting
-  agent as today.
+  at all — an integer comparison that never resets on area grounds). The
+  Round-3 same-area pre-check ("do 3 consecutive rounds share the same
+  subsystem/area: yes/no") would be **Noul**.
+- **Confidence threshold**: n/a for the counting; high-only for the Round-3
+  same-area pre-check, with anything ambiguous resolved by the
+  reviewer/acting agent as today.
 - **Authority**: the acting agent tracking round count against
   `review-loop-control.md` §2–4; Owner approval required for round 6+.
 - **Fallback**: manual same-area judgment (current behavior).
 - **Evidence storage location**: Notion Task/Result or PR discussion
   (§6 "記録").
-- **Bucket: LLM向き** for the "same area" sub-decision (the counting itself
-  needs no model, Jev or otherwise — noted per §1's rule that not every
-  found Decision Point is a model candidate).
+- **Bucket: LLM向き** for the Round-3 same-area sub-decision (the round
+  counting itself needs no model, Jev or otherwise — noted per §1's rule
+  that not every found Decision Point is a model candidate).
 
 ### DP-8 — Postmortem recurrence / common-mode pattern detection
 
@@ -361,7 +400,7 @@ any existing ADP Policy/Rule to fit Jev" constraint takes in this design.
 | DP-2 | AI-to-AI stop-gate necessity judgment | (Noul-shaped, but needs cited synthesis) | LLM向き |
 | DP-3 | Backlog→Epic/Story placement routing | Choice | Jev向き (existing-target only) |
 | DP-4 | Ambiguous action → policy-category classification | Choice | Jev向き (category triage) |
-| DP-5 | Protected-branch merge / production / destructive / credential authorization | n/a | **Human専用** |
+| DP-5 | Protected-branch merge / production / destructive / credential authorization | n/a | **Excluded from Jev** (Human専用 for production/destructive/credential; AI cross-authority per R02 §4 — not Human — for protected-branch merge) |
 | DP-6 | Postmortem severity & escalation-category triage | Choice / Score | Jev向き (triage) |
 | DP-7 | Review-round same-objective / same-area gate | Noul (upstream judgment only; counting itself needs no model) | LLM向き |
 | DP-8 | Postmortem recurrence / common-mode pattern detection | doesn't fit | LLM向き |
@@ -369,7 +408,9 @@ any existing ADP Policy/Rule to fit Jev" constraint takes in this design.
 | DP-10 | MISC duplicate / supersede detection | Noul | Jev向き (flagging only) |
 
 **Split: 6 Jev向き (all scoped as triage/pre-filter, never final authority) /
-3 LLM向き / 1 Human専用.**
+3 LLM向き / 1 excluded from Jev entirely (DP-5 — mixed Human/Owner and AI
+cross-authority, per R02 §4/§7; never a probabilistic judgment either
+way).**
 
 ## 5. Decision Adapter shape (not implemented by this task)
 
