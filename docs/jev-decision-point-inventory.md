@@ -567,6 +567,25 @@ regression caseは近縁だが、これはstop-gate判断でありpolicy自己�
 
 #### 8.1.3 Jev呼び出しスクリプト仕様
 
+**DP-4の8ルールIDのescalation属性マッピング（決定論的、confidenceとは独立）**:
+
+`governance/agent-policy.yaml`の各ルールIDについて、そのルールの
+`decision`フィールドから決定論的に導かれる「escalate」/「no-escalate」
+の属性を、以下の固定表としてあらかじめ定義する。この属性はJevの出力
+confidenceや実際の分類結果に一切依存しない——ルールIDが決まった時点で
+機械的に一意に決まる。
+
+| ルールID | `agent-policy.yaml`上の`decision` | escalation属性 |
+|---|---|---|
+| `read-connected-resources` | allow | no-escalate |
+| `notion-managed-task-update` | allow（condition付き） | no-escalate |
+| `github-working-branch` | allow（condition付き） | no-escalate |
+| `github-protected-merge` | approve | escalate（承認ゲート要——DP-5参照。self-merge例外リポジトリではAI自身が承認主体だが、ゲートを経由すること自体は変わらないためescalate属性のまま） |
+| `production-change` | approve | escalate |
+| `destructive-delete` | approve | escalate |
+| `credential-or-authority-change` | approve | escalate |
+| `self-authority-escalation` | deny | escalate（自動拒否そのものがescalation経路） |
+
 **state構成**（Jevへ送る`state`フィールド）:
 
 ```json
@@ -605,6 +624,21 @@ regression caseは近縁だが、これはstop-gate判断でありpolicy自己�
 （`docs/cloudflare-os-evaluation.md` §10）に従い`deny`/`require_approval`
 側へフォールバックし、Jevの出力をそのまま実行トリガーにしない。
 
+**false-escalation / missed-escalation指標の定義**: 上記マッピング表の
+「escalation属性」（ルールIDから決定論的に導かれる）を、各実例に別途
+記録された「期待escalation属性」（§8.1.2のground truthルールIDに対応
+する属性。ground truthが`github-working-branch`ならno-escalate、
+`production-change`ならescalateなど）と比較する。Jevの選択したルールID
+のescalation属性が期待escalation属性と一致しない場合のみ
+false-escalation／missed-escalationとしてカウントする。**選択された
+ルールIDがground truthのルールIDと完全一致（exact match）するかどうか
+や、confidenceの高低それ自体は、この指標の判定に使わない**——たとえば
+DP4-07で高confidenceかつ正確に`github-working-branch`が返れば、それは
+exact-match成功であり、同時にescalation属性もno-escalateで期待
+（DP4-07のground truthはno-escalate相当の運用判断）と一致するため、
+missed-escalationにはカウントされない。exact-match成功とescalation属性
+の一致/不一致は独立した2つの軸として別々に集計する。
+
 #### 8.1.4 実行手順（アクセス取得後）
 
 1. **キャリブレーション**: DP4-01・DP4-02・DP4-03・DP4-05・DP4-06・DP4-10
@@ -623,16 +657,21 @@ regression caseは近縁だが、これはstop-gate判断でありpolicy自己�
 6. **Reproducibility**: 同一inputを3回連続で送り、`choice`が3回とも
    一致するか（決定的か）を確認。不一致がある場合はseed/temperature等
    Jev側の非決定性要因を記録する。
-7. **False-escalation rate**: 実際にはJev単独で自動処理してよい水準
-   （ground truthが`allow`側で高confidence）だったのに、confidenceが
-   閾値未満でLLM/Humanへフォールバックした件数の割合。閾値が保守的
-   すぎないかの指標。
-8. **Missed-escalation rate**: 実際には曖昧・Human関与が要る水準
-   （DP4-04, 07, 08, 09のような境界例、またはDP-5に隣接する行為）
-   だったのに、Jevが高confidenceで断定的に`allow`寄りの分類を返して
-   しまった件数の割合。DP-5の「approve ≠ Human」誤読（DP4-04）が実際に
-   発生するかは特に注視する。この指標が悪化する場合、Jevの出力を
-   Adapterインタフェース（§5）でさらに制約する必要がある。
+7. **False-escalation rate**: §8.1.3の「false-escalation /
+   missed-escalation指標の定義」に従い、Jevが選択したルールIDの
+   escalation属性がno-escalateなのに、期待escalation属性がescalate
+   だった件数の割合（本来ゲートすべきだったのに素通りさせた誤り）。
+8. **Missed-escalation rate**: 同定義に従い、Jevが選択したルールIDの
+   escalation属性がescalateなのに、期待escalation属性がno-escalateだった
+   件数の割合（本来不要なゲートを発生させた誤り、false positiveに相当）。
+   ※用語上「missed-escalation」という名だが、本節の定義では「過剰
+   escalation」の意味で使っている点に注意——DP-9側の同名指標（実際に
+   split/escalateが必要な案件を見逃す方）とは意味が異なるため、T04実行
+   時はこの定義（escalation属性のマッピング表基準）をそのまま使う。
+   DP-5の「approve ≠ Human」誤読（DP4-04のような境界例でescalation属性
+   の解釈を誤るケース）が実際に発生するかは特に注視する。この指標が
+   悪化する場合、Jevの出力をAdapterインタフェース（§5）でさらに制約する
+   必要がある。
 
 ### 8.2 DP-9 — Taskサイジング適合判定（Choice/Score型）
 
@@ -642,46 +681,95 @@ regression caseは近縁だが、これはstop-gate判断でありpolicy自己�
 「大きすぎてSuperseded・分割された実例」と「1 Taskとして正しく収まった
 実例」の両方を実データから収集した。
 
-| # | Input state（Task概要） | 出典 |
+各例について、(a) **Pre-execution input**（着手前にJevへ送る、実行前に
+分かっていたはずの情報のみ——Task title / body / Acceptance Criteria相当
+のテキスト。ラウンド数・分割結果・hard cap到達等の結果情報は一切含めない）
+と、(b) **Outcome / ground truth label**（採点にのみ使う、着手後に判明した
+結果）を明確に分離して記録する。§8.2.2でground truthとしてのみ使う情報を、
+本節のPre-execution inputへ混入させない。
+
+| # | Pre-execution input（着手前に分かっていた情報のみ） | 出典 |
 |---|---|---|
-| DP9-01 | `ADP-051`（Time Events状態モデル実装）/ PR #21。34 substantive review roundsを経ても同一subsystem（Time Events状態・出自・タイムスタンプ）で新規指摘が続いた。 | journal `2026-09-05-pr21-parallel-session.md` |
-| DP9-02 | `ADP-051-B2/B3` / PR #50。9 roundsの収束レビュー末、「5-round hard cap」（`review-loop-control.md` §4）に到達。 | journal `2026-09-19-weekly.md`、`projects/adp/README.md` |
-| DP9-03 | `ADP-051-B`（Work Type判定の状態モデル実装）。分割後のTaskで、AC自体が「1 AI稼働日以内」と見積もる規模と明記。 | journal `2026-09-08.md`、`2026-09-11.md` |
-| DP9-04 | `BUG-ADP-TTE-01-B`（Execution Eventのopen/close実装）。実装途中でstop側の複雑性が判明し、open側のみに最終スコープを縮小、stop側は別Taskへ切り出し。 | journal `2026-09-11.md` |
-| DP9-05 | `ADP-057`（`docs/instruction-skill-debt-inventory.md`作成）/ PR #61。単一Task・単一PRで完結。 | journal `2026-09-19.md`、branch `claude/adp-057-instruction-skill-debt-inventory` |
-| DP9-06 | `ADP-053`（AI Work Sessions廃止）。単一セッション内で完結。 | journal `2026-09-05.md`、branch `adp-053-deprecate-ai-work-sessions` |
-| DP9-07 | `ADP-055`（月次KPIレポート）。単一branch/PRで完結。 | branch `claude/adp-055-monthly-kpi`（リポジトリのbranch一覧で確認） |
-| DP9-08 | `ADP-044-D`（Vision品質基準）。単一branch/PRで完結。 | branch `adp-044-d-vision-quality-standard` |
-| DP9-09 | `ADP-059-E`（Operating Guide entry）。`ADP-059`はA〜Eの独立Subtaskとして最初から設計され（事後分割ではない）、各Subtaskが単独で1 AI working day枠に収まった。 | branch `chris/adp-059-finalize-index`ほかADP-059系列のbranch一覧、`docs/operating-guide.md`（ADP-059 migration言及） |
-| DP9-10 | `BUG-ADP-TTE-01-A`（Active waiting aggregation）。TTE bug系列の最初の切片で、`-B`より先に独立して完結。 | branch `claude/bug-adp-tte-01-a-active-waiting-aggregation` |
+| DP9-01 | `ADP-051`（Time Events状態モデル実装）。PR #21のTask本文・AC相当のfrozen snapshotはGitHub検索のみでは復元できなかった。**frozen snapshot not available from GitHub-only source; needs verification against Notion Task history before T04 runs it live。** | journal `2026-09-05-pr21-parallel-session.md`（結果情報のみ言及、着手前本文は未収録） |
+| DP9-02 | `ADP-051-B2/B3`（PR #50）。同上、Task本文・AC相当のfrozen snapshotはGitHub検索のみでは復元できなかった。**frozen snapshot not available from GitHub-only source; needs verification against Notion Task history before T04 runs it live。** | journal `2026-09-19-weekly.md`、`projects/adp/README.md`（結果情報のみ言及） |
+| DP9-03 | `ADP-051-B`（Work Type判定の状態モデル実装）。AC自体が「1 AI稼働日以内」と見積もる規模と明記されたTask本文。 | journal `2026-09-08.md`、`2026-09-11.md` |
+| DP9-04 | `BUG-ADP-TTE-01-B`（Execution Eventのopen/close実装）。着手前のTask本文はopen/close両方を1つのACとして要求。 | journal `2026-09-11.md`（着手前スコープの記述） |
+| DP9-05 | `ADP-057`（`docs/instruction-skill-debt-inventory.md`作成）。着手前Task本文＝instruction/skill debtの棚卸しドキュメント作成、単一成果物。 | journal `2026-09-19.md`、branch `claude/adp-057-instruction-skill-debt-inventory` |
+| DP9-06 | `ADP-053`（AI Work Sessions廃止）。着手前Task本文＝書き込み必須ゲート除去・参照除去・DEPRECATED化の3手順。 | journal `2026-09-05.md`、branch `adp-053-deprecate-ai-work-sessions` |
+| DP9-07 | `ADP-055`（月次KPIレポート）。着手前Task本文＝月次KPIレポート作成。 | branch `claude/adp-055-monthly-kpi`（リポジトリのbranch一覧で確認） |
+| DP9-08 | `ADP-044-D`（Vision品質基準）。着手前Task本文＝Vision品質基準ドキュメント作成。 | branch `adp-044-d-vision-quality-standard` |
+| DP9-09 | `ADP-059-E`（Operating Guide entry）。`ADP-059`はA〜Eの独立Subtaskとして最初から設計され、各Subtaskの着手前Task本文はそれぞれ単一の成果物単位で記述。 | branch `chris/adp-059-finalize-index`ほかADP-059系列のbranch一覧、`docs/operating-guide.md`（ADP-059 migration言及） |
+| DP9-10 | `BUG-ADP-TTE-01-A`（Active waiting aggregation）。着手前Task本文＝TTE bug系列の最初の切片としてaggregation実装。 | branch `claude/bug-adp-tte-01-a-active-waiting-aggregation` |
+
+**DP9-01/02の注記**: この2件は§8.1で他8件と異なり、本セッションが
+GitHub検索のみで到達できたのは結果情報（レビューラウンド数、hard cap
+到達、Supersededという顛末）だけであり、着手前のNotion Task
+title/body/ACそのものの凍結コピーには到達できなかった。したがって
+Pre-execution inputを「それらしいテキストを捏造する」のではなく、
+未確認である旨を明記した。T04実行前に、Notionアクセスを持つセッション
+でこの2件の実際の着手前本文を取得し、Pre-execution inputを補完する
+必要がある。
+
+**フィールド作成時の運用ルール（今後のフィクスチャ拡充向け）**: 今後
+DP-9のデータセットへ実例を追加する際は、着手前に分かっていた情報
+（Pre-execution input）と、着手後にのみ判明する結果情報
+（Outcome/ground truth label）を、収集の時点から別フィールドとして記録
+し、両者を混在させたテキストを1つのフィールドに書かない。
 
 #### 8.2.2 期待出力（ground truth）と根拠
 
-| # | Ground truth（Choice） | 根拠・理由 |
+| # | Ground truth（Choice） | 根拠・理由（採点専用。Jevへの入力には使わない） |
 |---|---|---|
-| DP9-01 | `needs-split` | Owner裁定により`Superseded`としてクローズ、`ADP-051-A`〜`E`へ分割。「round 34まで同一subsystemで指摘が終わらなかったこと自体が単一実行単位として大きすぎたことの証明」という明示判断。 |
+| DP9-01 | `needs-split` | Owner裁定により`Superseded`としてクローズ、`ADP-051-A`〜`E`へ分割。34 substantive review roundsを経ても同一subsystem（Time Events状態・出自・タイムスタンプ）で新規指摘が終わらなかったこと自体が、単一実行単位として大きすぎたことの証明という明示判断。 |
 | DP9-02 | `needs-split` | `review-loop-control.md` §4の5-round hard capに到達し、3つの独立Taskへ分割。見つかった実バグ20件超が単一のバグパターンの複数箇所への波及であったと判明。 |
 | DP9-03 | `fits-as-is`（分割後の粒度としては適正） | AC自体が1 AI稼働日以内と見積もり。（着手自体は別リスク要因＝53件failure matrixの複雑さで日次自律実行では見送られたが、これはサイジング適合性とは別軸の判断であり、DP-9が問うサイズ適合の判定結果は「適正」）。 |
 | DP9-04 | `needs-split`（部分的） | 実装中にCodexレビューでP1指摘2件が入り、open/close両方を1つのAC内でCode.gs無変更のまま実現するという当初設計が過大と判明。stop側を切り出し、open側のみで完了。 |
-| DP9-05 | `fits-as-is` | 単一PR #61として完結。分割・Supersededの記録なし。 |
-| DP9-06 | `fits-as-is` | 単一branch/PRで、廃止手順（書き込み必須ゲート除去→参照除去→DEPRECATED化）を一括完了。 |
-| DP9-07 | `fits-as-is` | 単一branch/PR。 |
-| DP9-08 | `fits-as-is` | 単一branch/PR。 |
-| DP9-09 | `fits-as-is`（かつ、事前分割の好例） | 34ラウンド/5ラウンドhard capのような事後的失敗を経ずに、最初からA〜Eの独立Subtaskとして設計された点がDP9-01/02との対比として重要。 |
-| DP9-10 | `fits-as-is` | `-B`と分離した最初の切片として独立完結。 |
+| DP9-05 | `fits-as-is` | PR作成時刻ベースの所要期間（次項参照）が1 AI稼働日相当に収まっており、分割・Supersededの記録もない。 |
+| DP9-06 | `fits-as-is` | PR作成時刻ベースの所要期間が1 AI稼働日相当に収まっており、廃止手順（書き込み必須ゲート除去→参照除去→DEPRECATED化）を一括完了。 |
+| DP9-07 | `fits-as-is` | PR作成時刻ベースの所要期間が1 AI稼働日相当に収まっている。 |
+| DP9-08 | `fits-as-is` | PR作成時刻ベースの所要期間が1 AI稼働日相当に収まっている。 |
+| DP9-09 | `fits-as-is`（かつ、事前分割の好例） | 34ラウンド/5ラウンドhard capのような事後的失敗を経ずに、最初からA〜Eの独立Subtaskとして設計された点がDP9-01/02との対比として重要。PR作成時刻ベースの所要期間も1 AI稼働日相当。 |
+| DP9-10 | `fits-as-is` | `-B`と分離した最初の切片として独立完結。PR作成時刻ベースの所要期間も1 AI稼働日相当。 |
+
+**DP9-05〜10の所要時間エビデンス（トポロジーではなくタイムスタンプ根拠）**:
+「単一branch/PRで完結した」というリポジトリ構造上の事実だけでは、
+branch/PRが何日にまたがったかを保証しない。そこでDP9-05〜10の
+`fits-as-is`ラベルは、各branchの最初のcommit時刻→そのPRのmerge時刻
+（GitHubから取得可能な場合）または最初のcommit時刻→最後のcommit時刻を
+所要期間の代理指標として明示する。**GitHubのみで取得したこれらの
+タイムスタンプは代理指標（proxy）であり、真の確定にはNotion Task Time
+Events（Started At/Completed At）の照合が必要。この段階では未取得のため、
+以下は代理指標としての位置づけであることを明記する。**
+
+| # | 代理指標（コミット/PRタイムスタンプ、GitHub由来・T04実行時に実値を取得して記入） | 判定 |
+|---|---|---|
+| DP9-05 | branch `claude/adp-057-instruction-skill-debt-inventory`の最初のcommit時刻→PR #61のmerge時刻（T04実行時にGitHub APIから実際の日時を取得し記入） | 要実測。複数暦日にまたがる場合は`fits-as-is`ラベルを格下げ、またはNotion Task Time Events照合待ちとして明示的にフラグする。 |
+| DP9-06 | branch `adp-053-deprecate-ai-work-sessions`の最初のcommit時刻→対応PRのmerge時刻（同上、要実測） | 同上 |
+| DP9-07 | branch `claude/adp-055-monthly-kpi`の最初のcommit時刻→対応PRのmerge時刻（同上、要実測） | 同上 |
+| DP9-08 | branch `adp-044-d-vision-quality-standard`の最初のcommit時刻→対応PRのmerge時刻（同上、要実測） | 同上 |
+| DP9-09 | branch `chris/adp-059-finalize-index`等ADP-059系列の該当branchの最初のcommit時刻→対応PRのmerge時刻（同上、要実測） | 同上 |
+| DP9-10 | branch `claude/bug-adp-tte-01-a-active-waiting-aggregation`の最初のcommit時刻→対応PRのmerge時刻（同上、要実測） | 同上 |
+
+本セッションはGitHub MCPツールでの追加のcommit/PRタイムスタンプ取得を
+今回のPR修正スコープでは行っていない（Codex指摘への対応としてまず
+「トポロジーではなくタイムスタンプ根拠に基づく」という評価手順自体を
+確立することを優先した）。**T04実行前に、上表の「要実測」セルへ実際の
+GitHub commit/PR日時を埋め、暦日をまたぐ場合は`fits-as-is`ラベルを
+見直すこと。真の確定にはNotion Task Time Events（Started At/Completed
+At）の確認が必要である点も併記する。**
 
 #### 8.2.3 Jev呼び出しスクリプト仕様
 
-**state構成**:
+**state構成（Pre-execution inputのみを含む。結果情報は含めない）**:
 
 ```json
 {
   "task_id": "<Notion Task ID>",
-  "task_title": "<タイトル>",
-  "task_description": "<Task本文・AC>",
+  "task_title": "<着手前のタイトル>",
+  "task_description": "<着手前のTask本文・AC>",
   "dependency_count": <整数>,
   "prior_review_rounds_if_reattempt": <整数、初回試行なら0>,
-  "similar_task_split_history": "<過去の類似Taskの分割履歴要約>"
+  "similar_task_split_history": "<過去の類似Taskの分割履歴要約（当該Task自身の結果は含めない）>"
 }
 ```
 
@@ -710,18 +798,28 @@ Finalizeモードへ必ずフォールバックする（Jevは分割案そのも
 1. **Accuracy/Agreement**: 10件のChoice出力とground truthを比較。
    `needs-split`（DP9-01, 02, 04）を`fits-as-is`と誤判定するケースを
    最重要視する（false-negativeがレビューラウンド浪費に直結するため）。
-2. **Calibration**: DP9-01/02（34/9ラウンド後にsupersededされた実例）は
-   「着手前」の入力状態（Task本文のみ）から予測する必要がある点に注意
-   ——実際の34/9ラウンドという結果はground truthのためだけに使い、
-   Jevへ渡すstateには含めない。confidenceがこの2件で他の`fits-as-is`
-   8件より明確に低い（≒閾値未満）かを確認する。
-3. **Latency/Cost**: DP-4と同じ方法（§8.1.4 手順4・5）で記録。
-4. **Reproducibility**: 同一Task本文を3回送り、Choice/Scoreの一致率を
+2. **DP9-01/02の入力凍結の前提確認**: DP9-01/02は§8.2.1の注記の通り
+   frozen pre-execution inputが未確認のまま。T04を実際に走らせる前に、
+   Notionアクセスを持つセッションで両Taskの着手前title/body/ACを取得し、
+   Pre-execution inputフィールドを確定させること。確定できないまま
+   T04を実行する場合、この2件は「参考値」として結果を分離集計し、
+   Accuracy/false-escalation/missed-escalation等の主要指標には含めない
+   （未確認の入力から出た予測を確定指標に混ぜない）。
+3. **Calibration**: confidenceと実際の正誤（step 1）をbin化し、
+   reliability diagram（confidence 0.1刻み）を作成する。**この際、
+   confidenceはpredicted Choiceがground truthと一致したか（正解/不正解）
+   を基準にbin化し、predicted Choiceが`needs-split`か`fits-as-is`かという
+   クラスラベル自体では区別しない。** 正しく`needs-split`を高confidenceで
+   当てた予測（望ましいsafety的判断）を、単に`needs-split`であることを
+   理由に低く評価してはならない。
+4. **Latency/Cost**: DP-4と同じ方法（§8.1.4 手順4・5）で記録。
+5. **Reproducibility**: 同一Task本文を3回送り、Choice/Scoreの一致率を
    記録。
-5. **False-escalation rate**: DP9-05〜10（実際は`fits-as-is`だった6件）
-   のうち、confidence不足でLLM側（task-approach-review）へ回された件数
-   の割合。
-6. **Missed-escalation rate**: DP9-01, 02, 04（実際は`needs-split`
+6. **False-escalation rate**: DP9-05〜10（§8.2.2のタイムスタンプ代理
+   指標で`fits-as-is`と判定された6件、ただしT04実行前に実測・暦日確認
+   を済ませたもの限定）のうち、confidence不足でLLM側
+   （task-approach-review）へ回された件数の割合。
+7. **Missed-escalation rate**: DP9-01, 02, 04（実際は`needs-split`
    だった3件）のうち、Jevが高confidenceで`fits-as-is`と誤判定した件数
    の割合。この指標が0でない場合、DP-9をJev向きから外す再検討が必要
    （本文書§2のDP-9エントリ自体が「actual decomposition design stays
@@ -805,7 +903,15 @@ Task内容を変更するためLLM向きのまま）。
 - **DP-4**: 10件確保。うち4件（DP4-04, 07, 08, 09）は境界が実際に曖昧な
   実例であり、`self-authority-escalation`カテゴリに該当する実インシデ
   ントは本セッションの検索範囲では発見できなかった（10件には含めていない）。
-- **DP-9**: 10件確保。`needs-split`側3件、`fits-as-is`側7件。
+- **DP-9**: 10件確保。`needs-split`側3件、`fits-as-is`側7件。**ただし
+  DP9-01/02の2件はPre-execution inputがGitHub検索のみでは未確認
+  （§8.2.1参照、T04実行前にNotionでの確認が必要）。DP9-05〜10の
+  `fits-as-is`ラベルは、リポジトリのトポロジー（単一branch/PRで完結した
+  こと）ではなく、commit/PRタイムスタンプを所要期間の代理指標として
+  明示する方針へ改めたが、実際のタイムスタンプ値の取得（§8.2.2の表の
+  「要実測」セル）はT04実行前に別途行う必要があり、本セッションでは
+  未実施のまま残っている。真の確定にはNotion Task Time Events
+  （Started At/Completed At）の照合が要る。**
 - **DP-10**: **5件のみ確保、目標10件に対し不足。** 本セッションが
   `cloud42-labo/ai-development-platform`と`cloud42-labo/brain`の
   GitHubコード検索で発見できた、Notion Stories & Tasksの実MISC/Task
