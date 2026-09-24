@@ -624,20 +624,51 @@ confidenceや実際の分類結果に一切依存しない——ルールIDが�
 （`docs/cloudflare-os-evaluation.md` §10）に従い`deny`/`require_approval`
 側へフォールバックし、Jevの出力をそのまま実行トリガーにしない。
 
-**false-escalation / missed-escalation指標の定義**: 上記マッピング表の
-「escalation属性」（ルールIDから決定論的に導かれる）を、各実例に別途
-記録された「期待escalation属性」（§8.1.2のground truthルールIDに対応
-する属性。ground truthが`github-working-branch`ならno-escalate、
-`production-change`ならescalateなど）と比較する。Jevの選択したルールID
-のescalation属性が期待escalation属性と一致しない場合のみ
-false-escalation／missed-escalationとしてカウントする。**選択された
-ルールIDがground truthのルールIDと完全一致（exact match）するかどうか
-や、confidenceの高低それ自体は、この指標の判定に使わない**——たとえば
-DP4-07で高confidenceかつ正確に`github-working-branch`が返れば、それは
-exact-match成功であり、同時にescalation属性もno-escalateで期待
-（DP4-07のground truthはno-escalate相当の運用判断）と一致するため、
-missed-escalationにはカウントされない。exact-match成功とescalation属性
-の一致/不一致は独立した2つの軸として別々に集計する。
+**最終決定（final decision）の定義**: この指標は、Jevの生の出力
+（raw Choice）ではなく、閾値・フォールバックを適用した後の**最終決定**
+から計算する。上のマッピングの通り、`choice`が8ルールIDのいずれかに
+一致し、かつ`confidence`が閾値以上であれば、そのルールIDの
+escalation属性（上記マッピング表）を最終決定のescalation属性とする。
+`confidence`が閾値未満、または`choice`が8ルールID以外（unmatched）の
+場合は、fail-closed方針により最終決定は`deny`/`require_approval`側へ
+フォールバックし、これは`self-authority-escalation`と同様に必ず
+ゲートを経由する経路であるため、最終決定のescalation属性は
+**escalate**として扱う（raw Choiceがno-escalate属性のルールIDだった
+としても、低confidenceでフォールバックした以上、実際にデプロイされる
+経路はescalateする）。
+
+**false-escalation / missed-escalation指標の定義**: 上記の最終決定の
+escalation属性を、各実例に別途記録された「期待escalation属性」
+（§8.1.2のground truthルールIDに対応する属性。ground truthが
+`github-working-branch`ならno-escalate、`production-change`なら
+escalateなど）と比較し、標準的な意味（DP-9側の同名指標と同じ向き）で
+以下のように定義する。
+
+- **missed escalation（false negative、見逃し）**: 最終決定の
+  escalation属性がno-escalateなのに、期待escalation属性がescalate
+  だった場合。本来ゲートすべきだったのに素通りさせた、安全上見逃して
+  はならない誤り。
+- **false escalation（false positive、過剰escalation）**: 最終決定の
+  escalation属性がescalateなのに、期待escalation属性がno-escalateだった
+  場合。本来不要なゲートを発生させた、過剰統制だが安全側の誤り。
+
+**選択されたルールIDがground truthのルールIDと完全一致（exact match）
+するかどうかは、この指標の判定に使わない**——exact-match成功と
+escalation属性の一致/不一致は独立した2つの軸として別々に集計する。
+たとえばDP4-07で高confidenceかつ正確に`github-working-branch`が返り、
+閾値以上のためフォールバックが発生しない場合、それはexact-match成功
+であり、同時に最終決定のescalation属性もno-escalateで期待（DP4-07の
+ground truthはno-escalate相当の運用判断）と一致するため、missed
+escalationにもfalse escalationにもカウントされない。一方、たとえば
+confidenceが閾値未満でフォールバックが発生した場合は、raw Choiceが
+no-escalate属性のルールID（例: `read-connected-resources`）であっても、
+最終決定はescalate属性として扱われる。この場合、期待escalation属性が
+no-escalateであれば最終決定との不一致によりfalse escalationとして
+カウントし（raw Choiceだけを見ればno-escalateで一致しているように
+見えるが、実際にデプロイされる経路はゲートを経由するため見逃さない）、
+期待escalation属性がescalateであればフォールバックにより結果的に
+ゲートされるためmissed escalationにはカウントしない（フォールバックが
+安全側に機能した、狙い通りの挙動）。
 
 #### 8.1.4 実行手順（アクセス取得後）
 
@@ -657,17 +688,18 @@ missed-escalationにはカウントされない。exact-match成功とescalation
 6. **Reproducibility**: 同一inputを3回連続で送り、`choice`が3回とも
    一致するか（決定的か）を確認。不一致がある場合はseed/temperature等
    Jev側の非決定性要因を記録する。
-7. **False-escalation rate**: §8.1.3の「false-escalation /
-   missed-escalation指標の定義」に従い、Jevが選択したルールIDの
-   escalation属性がno-escalateなのに、期待escalation属性がescalate
-   だった件数の割合（本来ゲートすべきだったのに素通りさせた誤り）。
-8. **Missed-escalation rate**: 同定義に従い、Jevが選択したルールIDの
-   escalation属性がescalateなのに、期待escalation属性がno-escalateだった
-   件数の割合（本来不要なゲートを発生させた誤り、false positiveに相当）。
-   ※用語上「missed-escalation」という名だが、本節の定義では「過剰
-   escalation」の意味で使っている点に注意——DP-9側の同名指標（実際に
-   split/escalateが必要な案件を見逃す方）とは意味が異なるため、T04実行
-   時はこの定義（escalation属性のマッピング表基準）をそのまま使う。
+7. **Missed-escalation rate**: §8.1.3の「false-escalation /
+   missed-escalation指標の定義」に従い、最終決定（confidence閾値・
+   フォールバック適用後）のescalation属性がno-escalateなのに、期待
+   escalation属性がescalateだった件数の割合（本来ゲートすべきだったのに
+   素通りさせた、安全上見逃してはならない誤り）。この指標はDP-9側の
+   同名指標（実際にsplit/escalateが必要な案件を見逃す方）と同じ向きで
+   定義しており、安全ゲートとしてはこのレートが0であることを確認する
+   ことが最重要。
+8. **False-escalation rate**: 同定義に従い、最終決定のescalation属性が
+   escalateなのに、期待escalation属性がno-escalateだった件数の割合
+   （本来不要なゲートを発生させた誤り、false positiveに相当。低
+   confidenceでのフォールバックによる過剰escalateもここに含まれる）。
    DP-5の「approve ≠ Human」誤読（DP4-04のような境界例でescalation属性
    の解釈を誤るケース）が実際に発生するかは特に注視する。この指標が
    悪化する場合、Jevの出力をAdapterインタフェース（§5）でさらに制約する
@@ -795,32 +827,62 @@ Finalizeモードへ必ずフォールバックする（Jevは分割案そのも
 
 #### 8.2.4 実行手順（アクセス取得後）
 
-1. **Accuracy/Agreement**: 10件のChoice出力とground truthを比較。
-   `needs-split`（DP9-01, 02, 04）を`fits-as-is`と誤判定するケースを
-   最重要視する（false-negativeがレビューラウンド浪費に直結するため）。
+1. **主要指標の対象範囲の確定（最初に行う）**: 見出しとなる主要指標
+   （Accuracy／Agreement／Calibration／False-escalation rate／
+   Missed-escalation rate、以下すべて）は、**Pre-execution inputと
+   ground truthの両方が検証済みの実例に限って計算する**。false-escalation
+   rateだけを限定するのではなく、10件中どの実例が主要指標に入るかを
+   ここで先に確定させる。現時点で無条件に検証済みなのはDP9-03・DP9-04
+   の2件のみ（AC本文自体に規模記述があり、GitHubのみで着手前情報・
+   結果情報とも確認済み）。DP9-01/02はstep 2、DP9-05〜10はstep 3の
+   検証が完了するまで主要指標のいずれにも含めない。**したがって、
+   これら追加検証なしにT04を最初に（Notionアクセス取得前の分岐で）
+   実行した場合、主要指標の母数はDP9-03・DP9-04の2件にとどまり、
+   残り8件（DP9-01/02とDP9-05〜10）は検証が完了するまで参考値扱いの
+   まま主要指標から除外される。** 10件全件のChoice出力とground truthの
+   比較自体は記録するが、見出しの数値に混ぜない。`needs-split`
+   （DP9-01, 02, 04）を`fits-as-is`と誤判定するケースは、検証が完了し
+   主要指標に含められる場合に最重要視する（false-negativeがレビュー
+   ラウンド浪費に直結するため）。
 2. **DP9-01/02の入力凍結の前提確認**: DP9-01/02は§8.2.1の注記の通り
    frozen pre-execution inputが未確認のまま。T04を実際に走らせる前に、
    Notionアクセスを持つセッションで両Taskの着手前title/body/ACを取得し、
    Pre-execution inputフィールドを確定させること。確定できないまま
    T04を実行する場合、この2件は「参考値」として結果を分離集計し、
-   Accuracy/false-escalation/missed-escalation等の主要指標には含めない
-   （未確認の入力から出た予測を確定指標に混ぜない）。
-3. **Calibration**: confidenceと実際の正誤（step 1）をbin化し、
-   reliability diagram（confidence 0.1刻み）を作成する。**この際、
-   confidenceはpredicted Choiceがground truthと一致したか（正解/不正解）
-   を基準にbin化し、predicted Choiceが`needs-split`か`fits-as-is`かという
-   クラスラベル自体では区別しない。** 正しく`needs-split`を高confidenceで
-   当てた予測（望ましいsafety的判断）を、単に`needs-split`であることを
-   理由に低く評価してはならない。
-4. **Latency/Cost**: DP-4と同じ方法（§8.1.4 手順4・5）で記録。
-5. **Reproducibility**: 同一Task本文を3回送り、Choice/Scoreの一致率を
-   記録。
-6. **False-escalation rate**: DP9-05〜10（§8.2.2のタイムスタンプ代理
-   指標で`fits-as-is`と判定された6件、ただしT04実行前に実測・暦日確認
-   を済ませたもの限定）のうち、confidence不足でLLM側
+   Accuracy/Calibration/False-escalation rate/Missed-escalation rate等の
+   主要指標のいずれにも含めない（未確認の入力から出た予測を確定指標に
+   混ぜない）。
+3. **DP9-05〜10の所要時間の前提確認**: §8.2.2の「DP9-05〜10の所要時間
+   エビデンス」表は現時点で「要実測」のプレースホルダのままであり、
+   実際のGitHub commit/PRタイムスタンプもNotion Task Time Events
+   （Started At/Completed At）による確定も行われていない。T04を実際に
+   走らせる前に、この表の「要実測」セルへ実測値を埋め、暦日をまたいで
+   いないか確認すること。確認できない、または暦日をまたぐと判明した
+   実例は、**false-escalation rateだけでなく、Accuracy・Agreement・
+   Calibration・Missed-escalation rateを含むすべての主要指標から除外
+   する**（DP9-01/02と同じ扱い）。確認が取れた実例のみ、該当する
+   指標の母数へ順次追加する。
+4. **Calibration**: confidenceと実際の正誤（step 1で主要指標の対象に
+   含まれた実例のみ）をbin化し、reliability diagram（confidence 0.1
+   刻み）を作成する。**この際、confidenceはpredicted Choiceがground
+   truthと一致したか（正解/不正解）を基準にbin化し、predicted Choice
+   が`needs-split`か`fits-as-is`かというクラスラベル自体では区別
+   しない。** 正しく`needs-split`を高confidenceで当てた予測（望ましい
+   safety的判断）を、単に`needs-split`であることを理由に低く評価しては
+   ならない。
+5. **Latency/Cost**: DP-4と同じ方法（§8.1.4 手順4・5）で記録。
+   検証未了の実例を含む10件全件で計測してよい（Latency/Costは
+   ground truthの正誤に依存しないため主要指標の対象範囲の制約を
+   受けない）。
+6. **Reproducibility**: 同一Task本文を3回送り、Choice/Scoreの一致率を
+   記録。こちらもground truthに依存しないため10件全件で行ってよい。
+7. **False-escalation rate**: DP9-05〜10のうちstep 3で検証済みかつ
+   `fits-as-is`と判定された実例に限り、confidence不足でLLM側
    （task-approach-review）へ回された件数の割合。
-7. **Missed-escalation rate**: DP9-01, 02, 04（実際は`needs-split`
-   だった3件）のうち、Jevが高confidenceで`fits-as-is`と誤判定した件数
+8. **Missed-escalation rate**: DP9-01, 02, 04（実際は`needs-split`
+   だった3件）のうち、step 2/step 1の検証条件を満たす実例（現時点では
+   DP9-04のみ。DP9-01/02はstep 2の入力凍結が確認できた場合に限り
+   加える）について、Jevが高confidenceで`fits-as-is`と誤判定した件数
    の割合。この指標が0でない場合、DP-9をJev向きから外す再検討が必要
    （本文書§2のDP-9エントリ自体が「actual decomposition design stays
    LLM向き」と明記している境界を、判定の入口でも越えてはならない）。
