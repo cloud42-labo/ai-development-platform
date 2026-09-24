@@ -830,10 +830,13 @@ At）の確認が必要である点も併記する。**
 ```
 質問: "このTaskの完了に要する概算AI稼働日数は？"
 スケール: 2–10（Jevのスケールに合わせ、0.5日刻みの実数ではなく
-「1日未満=2」「1〜2日=4」……とラベル付けした順序尺度にマッピング）
+「1日以内（ちょうど1日を含む）=2」「1日超〜2日=4」……とラベル付けした
+順序尺度にマッピング。判定基準が「1 AI working day以内に収まるか」で
+ある以上、ちょうど1日と見積もられたTaskは最低帯（スコア2）に含め、
+1〜2日帯（スコア4）へ繰り上げない——境界は両端を排他的にしない）
 ```
 
-Choiceが`fits-as-is`かつScoreが最低帯（1日未満相当）の場合のみ、
+Choiceが`fits-as-is`かつScoreが最低帯（1日以内相当、ちょうど1日を含む）の場合のみ、
 高confidence自動判定の対象とする。`needs-split`/`needs-more-design`、
 またはScoreが2日相当以上の場合は、現行の`task-approach-review`
 Finalizeモードへ必ずフォールバックする（Jevは分割案そのものを生成しない）。
@@ -847,7 +850,7 @@ task-approach-reviewへ回さない）」とする。
 
 - `choice`が`fits-as-is`である、かつ
 - `confidence`が閾値以上である、かつ
-- `Score`が最低帯（1日未満相当、スケール値2）である
+- `Score`が最低帯（1日以内相当、ちょうど1日を含む、スケール値2）である
 
 上記いずれか1つでも満たさない場合（`choice`が`needs-split`/
 `needs-more-design`である、`confidence`が閾値未満である、または
@@ -948,6 +951,13 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
    となった件数の割合。raw Choiceのconfidenceだけでは判定しない——
    高confidenceで正しく`fits-as-is`を返していても、Scoreが2日相当以上
    であれば最終決定はescalateであり、これもfalse escalationに数える。
+   **現時点でstep 1〜4により無条件で検証済みの実例はDP9-04の1件のみで、
+   そのground truthは`needs-split`である。ground truthが`fits-as-is`の
+   検証済み実例が0件のため、この指標の分母は0であり計算不能。この状態を
+   「0%」と報告せず、DP-10の§8.3.4手順6と同じ扱いで「検証待ちのため
+   計測不能——検証済みの`fits-as-is`実例が0件」と明記すること。**
+   DP9-01/02/03/05〜10のいずれかで`fits-as-is`側の検証済み実例が
+   1件以上加わった時点で、初めて数値としての算出に移る。
 9. **Missed-escalation rate**: 同じく§8.2.3の最終決定を用いる。主要指標
    対象（step 1〜4で検証済み）かつground truthが`needs-split`
    （DP9-01, 02, 04のうち検証済みの実例に限る。現時点ではDP9-04のみ。
@@ -964,9 +974,35 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
 
 #### 8.3.1 評価データセット（実例5件、目標10件に対し不足——詳細は§8.4）
 
-DP-10は「新規MISC/Backlogアイテムが既存Open Taskと重複するか」を問う。
-本セッションが`cloud42-labo/ai-development-platform`・
-`cloud42-labo/brain`から発見できた、検証可能な実例は以下5件。
+DP-10が実際に定義する対象は§2の記述どおり**「新規MISC/Backlogアイテム」対
+「既存のOpen Task」**というペアであり、PR対commit、PR対PRのような
+GitHub成果物同士の比較ではない。本セッションが
+`cloud42-labo/ai-development-platform`・`cloud42-labo/brain`から発見できた、
+検証可能な実例は以下5件だが、**このうちDP-10本来の母集団（新規MISC/Backlog
+アイテム 対 既存Open Task）に該当するものは1件も無い**。内訳は、DP10-01が
+PR対「既にmainへ入っていたcommit」、DP10-05がPR対「後から固まった別解の
+設計変更」であり、いずれもGitHub上の成果物同士の比較でTask管理系の対象
+（MISC/Backlogアイテムまたは Open Task）を含まない。DP10-02〜04はTask/Subtask
+側を含むため母集団としては近いが、下記の通りPre-decision inputが未確認のため
+除外している。
+
+**母集団適合実例の追加探索（今回のCodex指摘への対応として実施）**: 上記の
+population mismatchを踏まえ、`cloud42-labo/ai-development-platform`・
+`cloud42-labo/brain`に対しGitHub検索（`重複`・`MISC`・`Backlog Refinement`・
+`類似Task`・`supersede`・`既存Task`等のキーワード）で、「新規MISC/Backlog
+アイテムを既存Open Taskと比較した」記録を追加で探索した。
+`journal/2026-09-06.md`の「`ADP-054-T01`着手前に`ADP-057`との重複範囲を
+先に確認する」という記述や、`journal/2026-09-11.md`〜`2026-09-13.md`の
+「新設MISC『Execution EventのpauseをCode.gsが安全にclose/resumeできる
+ようにする』のBacklog Refinementでの正式配置」を待つ記述など、母集団に
+近い言及は見つかったが、いずれも（a）判定前のTask本文原文が個別に凍結
+されていない、または（b）判定結果（duplicate Yes/No）そのものが
+GitHub側の記録として確定していない（Notion `Approach Decision`側にのみ
+存在する）。**duplicate = Yes・duplicate = Noのいずれについても、GitHub
+検索のみでPre-decision inputとOutcomeの両方を満たす新規の母集団適合実例は
+発見できなかった。** 正直にこの結果を記録し、それらしいテキストを
+無理に実例へ仕立てない。追加探索には§8.4が既に指摘するとおりNotion
+`Stories & Tasks`の`Approach Decision`履歴への直接アクセスが要る。
 
 **§8.3.3が要求する`new_item_text`・`candidate_existing_task_text`は、
 判定が行われた時点（着手前・決定前）に存在していたテキストに限定し、
@@ -975,15 +1011,18 @@ DP-10は「新規MISC/Backlogアイテムが既存Open Taskと重複するか」
 判明した結果はすべて§8.3.2「Outcome / ground truth」側にのみ記録し、
 本節のPre-decision inputへ混入させない。この分離が確認できない実例は
 「未確認——除外対象」と明記し、それらしいテキストを再構成しない
-（DP9-01/02/05〜10で確立した扱いと同じ）。
+（DP9-01/02/05〜10で確立した扱いと同じ）。**さらに、テキストはPRの
+要旨・リンクではなく、判定時点で存在した原文をそのまま埋め込む
+（本文・PR本文とも編集可能な外部状態であり、リンク＋要旨では取得時点の
+本文が後から変わっても本節が追随できないため）。**
 
 | # | Pre-decision input: `new_item_text`（新規アイテム、判定前のテキスト） | Pre-decision input: `candidate_existing_task_text`（比較対象、判定前の既存状態） | 出典 |
 |---|---|---|---|
-| DP10-01 | `experimental` PR [#90](https://github.com/cloud42-labo/experimental/pull/90)（2026-08-26作成）のタイトル・本文全文。要旨: 「オーナー（駒場さん）の明示的な判断により、このリポジトリのマージ運用を変更／『Claudeはmergeせずchatgpt側の毎時タスクに委ねる』という従来ルールを、このリポジトリに限り上書きし、Claude自身がその場でsquashマージする運用に戻す／Codex Automatic reviewsは引き続き有効のまま維持」。 | `experimental`の`main`へPR #90作成時点で既に反映済みだったcommit [`cb4c73d`](https://github.com/cloud42-labo/experimental/commit/cb4c73d7079fd6a20cc439ea3ae26e1f12bf7340)（2026-08-26 13:42:47 UTC、Chris側push、コミットメッセージ"Fix experimental self-merge policy"、`CLAUDE.md`への+17/-24差分）。 | PR #90、commit `cb4c73d` |
-| DP10-02 | **未確認——除外対象。** journal `2026-09-19.md`は「`ADP-054`のSubtaskを確認したが重複なし」とのみ記録しており、当時作成中だった`docs/instruction-skill-debt-inventory.md`（PR #61）の該当節の正確な原文、および比較対象として個別照合した特定のcandidate（`ADP-054`配下19件のSubtaskのうちどれか）のどちらも、GitHub検索のみでは特定・復元できない。 | 同上（特定不能。「`ADP-054`のSubtask」という集合への言及のみで、個別のcandidate 1件へは絞り込めない） | journal `2026-09-19.md`（PR #61へのCodex P2指摘対応の文脈） |
+| DP10-01 | **参考実例のみ——主要指標対象外（population mismatch）。** `experimental` PR [#90](https://github.com/cloud42-labo/experimental/pull/90)（2026-08-26作成、タイトル・本文全文を版管理外のPR本文から取得日時点でそのまま埋め込み）:<br>タイトル: `docs: PRマージ運用を自己マージへ切り替え（オーナー承認、デモ環境のため）`<br>本文:<br>`## Summary`<br>`- オーナー（駒場さん）の明示的な判断により、このリポジトリのマージ運用を変更`<br>`- 「Claudeはmergeせずchatgpt側の毎時タスクに委ねる」という従来ルールを、このリポジトリに限り上書きし、Claude自身がその場でsquashマージする運用に戻す`<br>`- Codex Automatic reviewsは引き続き有効のまま維持`<br>`- 経緯: brain/decisions/0021・brain/decisions/0022`<br>`## Note`<br>`このPR自体は、本ルール変更をオーナーがチャットで直接指示した直後のものであり、新ルールに従いClaude自身がマージします。` | commit [`cb4c73d`](https://github.com/cloud42-labo/experimental/commit/cb4c73d7079fd6a20cc439ea3ae26e1f12bf7340)（2026-08-26 13:42:47 UTC、`experimental`の`main`へPR #90作成時点で既に反映済み、Chris側push、コミットメッセージ`Fix experimental self-merge policy`）の`CLAUDE.md`差分（+17/-24）。**commitはimmutableでSHA固定のためversion-pin済み**（PR本文と異なり事後編集リスクなし）。 | PR #90、commit `cb4c73d` |
+| DP10-02 | **未確認——除外対象。** journal `2026-09-19.md`は「`ADP-054`のSubtaskを確認したが重複なし」とのみ記録しており、当時作成中だった`docs/instruction-skill-debt-inventory.md`（PR #61）の該当節の正確な原文、および比較対象として個別照合した特定のcandidate（`ADP-054`配下19件のSubtaskのうちどれか）のどちらも、GitHub検索のみでは特定・復元できない。**母集団としてはDP-10本来の対象（MISC/Backlogアイテム 対 既存Open Task）に最も近いが、Pre-decision inputが凍結できないため除外。** | 同上（特定不能。「`ADP-054`のSubtask」という集合への言及のみで、個別のcandidate 1件へは絞り込めない） | journal `2026-09-19.md`（PR #61へのCodex P2指摘対応の文脈） |
 | DP10-03 | notes `claude-code-skills.md`の2026-09-13時点週次レビュー節が記録する、2026-09-07〜12に3回繰り返し観察された判断基準「`review-fix-state-model.md`系の高難度Task（53件のfailure matrixを伴う契約）は日次自律実行の1パスで拙速に実装せず専用セッションへ切り出す」をSkill化する候補案（原文はnotes参照）。 | **具体的な原文は未確認——部分ギャップ。** 同notesは比較対象を「ADP Mission Control週次判断がこのTaskを名指しで同じ観察を挙げており」とのみ記すが、`ai-development-platform`側のどの文書・どの記述箇所と照合したのかは特定できない。 | `notes/claude-code-skills.md`（2026-09-13時点週次レビュー節） |
 | DP10-04 | **未確認——除外対象。** `HUMAN-AOD-007-2`・`SPOT-03-S03`系Subtaskいずれも本文がNotion Stories & Tasks側にのみ存在し、本セッションはGitHub検索のみに限定されていたため、両ページの判定前本文（同一LinkedIn投稿を指すことが分かる原文）を凍結できない。 | 同上（特定不能） | journal `2026-09-09.md`（結果情報のみ言及、判定前本文は未収録） |
-| DP10-05 | `experimental` PR [#73](https://github.com/cloud42-labo/experimental/pull/73)（2026-08-08作成、2026-08-09 close）のタイトル・本文全文。要旨: 「店舗生存シミュレーター: e-Statキーをブラウザに保存し次回自動入力する (v0.10.0)」——`appIdInput`の`localStorage`保存・削除ボタン追加・try/catchフォールバックを提案する変更。 | e-Statのライブ取得経路（`fetchMeshDataset`）を再利用してエリアデータを事前生成・同梱する設計変更案（PR #73がcloseされる前日までに固まった別解）。この設計変更が採用されればPR #73のAPIキー保存機能自体が不要になるという関係にある。 | PR #73、journal `2026-08-10.md` |
+| DP10-05 | **参考実例のみ——主要指標対象外（population mismatch）。** `experimental` PR [#73](https://github.com/cloud42-labo/experimental/pull/73)（2026-08-08作成、2026-08-09 close、タイトル・本文全文をPR本文から取得日時点でそのまま埋め込み）:<br>タイトル: `店舗生存シミュレーター: e-Statキーをブラウザに保存し次回自動入力する (v0.10.0)`<br>本文（`## 変更内容`節）:<br>`appIdInput`の`input`イベントで`localStorage`（キー名`storeSurvivalSim.eStatAppId`）へ都度保存し次回起動時に自動入力する／起動画面に「保存したキーを削除」ボタンを追加／`localStorage`が使えない環境でも例外で機能全体が止まらないようtry/catchで包みフォールバックする／配布ファイル自体にキーを埋め込む変更ではない。 | **candidate側は別PR本文ではなく、決定そのものの記録に限定する。** PR #76（e-Statのライブ取得経路`fetchMeshDataset`を再利用してエリアデータを事前生成・同梱する設計）はPR #73 close後（2026-08-09 22:58:19 close→PR #76作成 23:07:44）に作成されており、PR #76の本文自体は判定前には存在しない。判定前に存在したのは、journal `2026-08-10.md`が記す決定の記述のみ: 「そこで統計データを事前取得して同梱する方式へ変更した…これにより PR #73（キーをlocalStorageへ保存）は目的ごと不要になり、クローズした。」 | PR #73、PR #76、journal `2026-08-10.md` |
 
 **フィールド作成時の運用ルール（今後のフィクスチャ拡充向け）**: 今後
 DP-10のデータセットへ実例を追加する際は、判定前に分かっていた情報
@@ -996,11 +1035,11 @@ DP-10のデータセットへ実例を追加する際は、判定前に分かっ
 
 | # | Ground truth（Noul: duplicate確率） | 根拠・理由（採点専用。Jevへの入力には使わない） |
 |---|---|---|
-| DP10-01 | duplicate = Yes（高確率） | PR #90はclose、"重複を回避"と明記。 |
+| DP10-01 | duplicate = Yes（高確率）——**主要指標からは除外（population mismatch）**（§8.3.1参照） | PR #90はclose、"重複を回避"と明記。ただし比較対象がOpen Taskではなくcommitであり、DP-10本来の対象（MISC/Backlogアイテム 対 既存Open Task）ではないため参考実例に留める。 |
 | DP10-02 | duplicate = No（低確率）——**主要指標からは除外**（§8.3.1参照） | 「重複なし」と明示記録。ただしCodexからは別の指摘（live task stateの複製）が入っており、判定手続き自体は正しかった点に注意。 |
 | DP10-03 | duplicate = Yes（高確率、ただしTask単位ではなくSkill/運用機構単位の重複）——**主要指標からは除外**（§8.3.1参照） | 「重複して作る必要がないと判断した」と明記。DP-10本来の対象（MISC vs Task）とは粒度が異なる点を注記（§8.4）。 |
 | DP10-04 | duplicate = Yes（高確率）——**主要指標からは除外**（§8.3.1参照） | 「重複2件」「Notion上でDoneへ手動修復」と明記。 |
-| DP10-05 | duplicate = Yes（目的の重複、Task単位ではなくPR単位） | 設計変更により目的が不要化・クローズ。厳密には「重複」というより「supersede（別解により不要化）」——DP-10の`supersede`側の実例として妥当。 |
+| DP10-05 | duplicate = Yes（目的の重複、Task単位ではなくPR単位）——**主要指標からは除外（population mismatch）**（§8.3.1参照） | 設計変更により目的が不要化・クローズ。厳密には「重複」というより「supersede（別解により不要化）」だが、比較対象がOpen TaskではなくPR（しかも判定後に作成されたPR）であり、DP-10本来の対象ではないため参考実例に留める。 |
 
 #### 8.3.3 Jev呼び出しスクリプト仕様
 
@@ -1034,46 +1073,54 @@ Task内容を変更するためLLM向きのまま）。
    主要指標（Accuracy／Agreement／Calibration／False-escalation rate／
    Missed-escalation rate）は、Pre-decision input（`new_item_text`と
    `candidate_existing_task_text`の両方）とOutcome/ground truthの両方が
-   検証済みの実例に限って計算する。現時点で無条件に検証済みなのは
-   **DP10-01・DP10-05の2件のみ**（§8.3.1参照）。DP10-02（candidateを
-   特定できない）・DP10-03（candidateの原文が未確認）・DP10-04
-   （Notion側の判定前本文が未確認）の3件は、追加検証が完了するまで
-   主要指標のいずれにも含めない。5件全件のNoul出力とground truthの
-   比較自体は記録するが、見出しの数値には混ぜない。**なお、検証済み
-   2件（DP10-01, DP10-05）はいずれもground truth = Yesであり、
-   duplicate = Noの検証済み実例が現時点で1件も無い。** そのため
-   Accuracy・Calibration・False-escalation rateは、DP10-02の検証が
-   完了するまで実質的に計算不能（Yes側の的中率しか測れない、または
-   分母が0になる）である点を明記する。
+   検証済みで、かつ**DP-10本来の母集団（新規MISC/Backlogアイテム 対
+   既存Open Task）に属する**実例に限って計算する。**現時点で主要指標に
+   無条件で使える実例は0件である。** 当初DP10-01・DP10-05の2件を
+   無条件検証済みとしていたが、両者はいずれもGitHub成果物同士
+   （PR対commit、PR対後発PR）の比較であり、Task管理側の対象（MISC/
+   Backlogアイテムまたは既存Open Task）を一方も含まないため、population
+   mismatchとして主要指標から除外し、参考実例（§8.3.1参照）へ格下げした。
+   DP10-02（母集団としては最も近いがcandidateを特定できない）・DP10-03
+   （candidateの原文が未確認）・DP10-04（Notion側の判定前本文が未確認）
+   の3件は、母集団は妥当でもPre-decision inputが未凍結のため、従来通り
+   追加検証が完了するまで主要指標に含めない。**したがって5件全件が
+   参考実例に留まり、主要指標側の分母は0である。** 5件全件のNoul出力と
+   ground truthの比較自体は記録するが、見出しの数値には混ぜない。
+   母集団適合実例の追加探索は§8.3.1で実施済みだが新規発見に至らなかった
+   （詳細は§8.3.1・§8.4）。T04実行前にNotion `Approach Decision`履歴への
+   直接アクセスで、母集団に合致するduplicate=Yes・duplicate=Noそれぞれ
+   少なくとも1件ずつの確保を優先する。
 2. **候補ペア生成**: 実運用では新規MISC 1件に対し、Open Task/PR集合の
    全件との組み合わせが必要になるため、まず軽量な文字列/埋め込み類似度
    などで候補を絞り込み、上位N件のみJevへ送る前処理ステップを別途
    用意する（本節はJev呼び出し自体の仕様であり、その前段の候補生成
    ロジックはこのPoC仕様のスコープ外——T04で別途設計する）。
-3. **Accuracy/Agreement**: step 1の主要指標対象（DP10-01・DP10-05、
-   追加検証が済めば他も順次追加）についてNoul確率とground truthの
-   Yes/Noを閾値で二値化して比較。5件全件（DP10-01〜05）のNoul出力自体は
-   参考値として記録してよいが、見出しのAccuracyには混ぜない。
-4. **Calibration**: 主要指標対象の実例が2件（ともにYes）のみでは
-   reliability diagramもYes/No間の較正比較も成立しない。DP10-02の
-   検証が完了しduplicate=Noの検証済み実例が加わるまで、Calibrationは
-   「計測不能」として記録し、無理に方向性の結論を出さない。10件超の
-   データが揃ってから本格的なcalibration評価を行う。
+3. **Accuracy/Agreement**: step 1の通り主要指標対象は現時点で0件のため
+   「計測不能——主要指標対象の検証済み母集団適合実例が0件」と記録する。
+   5件全件（DP10-01〜05、すべて参考実例）のNoul出力自体は参考値として
+   記録してよいが、見出しのAccuracyには混ぜない。
+4. **Calibration**: 主要指標対象が0件のため「計測不能」として記録し、
+   無理に方向性の結論を出さない。母集団適合実例が確保でき、かつ
+   duplicate=Yes/No双方の検証済み実例が揃ってから本格的なcalibration
+   評価を行う。
 5. **Latency/Cost/Reproducibility**: §8.1.4・§8.2.4と同じ方法で記録。
-   これらはground truthの正誤に依存しないため、5件全件で計測してよい
-   （主要指標の対象範囲の制約を受けない）。
-6. **False-escalation rate**: 実際は重複でない実例（DP10-02のみ）が
-   主要指標対象に含まれるのは、DP10-02のPre-decision input（比較対象
-   candidateの特定）が検証された場合に限る。**現時点ではDP10-02が
-   除外されているため、False-escalation rateの分母は0であり計算不能。
-   この状態をそのまま「0%」と報告せず、「検証待ちのため計測不能」と
-   明記すること。** DP10-02の検証完了後、高confidenceでフラグが立った
-   場合の割合として計算する。
-7. **Missed-escalation rate**: 主要指標対象（step 1で検証済み）かつ
-   ground truthが重複/supersede対象（現時点ではDP10-01, 05の2件）の
-   うち、低confidenceで見逃された割合。DP10-03・04の検証が完了すれば
-   分母に加える。DP-10は「auto-flagging」のみで人の目を経由する設計
-   （§2本文）だが、見逃しが多い場合はフラグ閾値自体の再較正が必要。
+   これらはground truthの正誤にもpopulation適合にも依存しないため、
+   5件全件（参考実例含む）で計測してよい（主要指標の対象範囲の制約を
+   受けない）。
+6. **False-escalation rate**: 主要指標対象（duplicateでない、母集団に
+   合致する検証済み実例）が現時点で0件のため、分母は0であり計算不能。
+   この状態をそのまま「0%」と報告せず、「検証待ちのため計測不能——
+   主要指標対象のduplicate=No実例が0件」と明記すること。DP10-02の
+   Pre-decision inputが凍結でき、かつ母集団適合が確認された場合に、
+   高confidenceでフラグが立った割合として計算する。
+7. **Missed-escalation rate**: 同じく主要指標対象（母集団適合かつ
+   Pre-decision input・ground truthとも検証済み）の実例が現時点で
+   0件のため、分母は0であり計算不能。「検証待ちのため計測不能——
+   主要指標対象のduplicate=Yes実例が0件」と明記する。DP10-02〜04の
+   いずれかでPre-decision inputが凍結でき、母集団適合も確認された
+   時点で、低confidenceで見逃された割合として計算する。DP-10は
+   「auto-flagging」のみで人の目を経由する設計（§2本文）だが、
+   見逃しが多い場合はフラグ閾値自体の再較正が必要。
 
 ### 8.4 実例の充足状況とギャップ
 
@@ -1097,7 +1144,7 @@ Task内容を変更するためLLM向きのまま）。
     あり、本セッションでは未実施のまま残っている。真の確定にはNotion
     Task Time Events（Started At/Completed At）の照合が要る。
 - **DP-10**: **5件のみ確保、目標10件に対し不足。うち主要指標に無条件で
-  使えるのはDP10-01・DP10-05の2件のみ**（§8.3.4 step 1）。本セッションが
+  使える実例は現時点で0件**（§8.3.4 step 1）。本セッションが
   `cloud42-labo/ai-development-platform`と`cloud42-labo/brain`の
   GitHubコード検索で発見できた、Notion Stories & Tasksの実MISC/Task
   重複判定に該当する検証可能な実例はこの5件が上限だった。理由:
@@ -1113,14 +1160,36 @@ Task内容を変更するためLLM向きのまま）。
     DP10-04はNotion側の判定前本文が未確認）と判明したため、DP9-01/02
     と同じ「未確認——除外対象」として主要指標から外した。当初は5件
     すべてを対等にAccuracy等へ算入する構成だったが、これは誤りだった。**
+  - **さらに今回の修正で、当初「無条件で検証済み」としていたDP10-01・
+    DP10-05の2件も、実際にはDP-10本来の母集団（新規MISC/Backlogアイテム
+    対 既存Open Task）に属さない（DP10-01はPR対commit、DP10-05はPR対
+    後発PR、いずれもGitHub成果物同士の比較でTask管理側の対象を含まない）
+    ことが判明し、参考実例へ格下げした。これにより、5件のうち母集団に
+    最も近いのはDP10-02〜04（いずれもMISC/Subtask側を含む）だが、
+    この3件はPre-decision inputが凍結できず除外されているため、**5件
+    全件が主要指標から外れ、DP-10の主要指標側フィクスチャ数は実質0件
+    である。** 当初「DP10-01・DP10-05の2件は無条件で使える」としていた
+    のも誤りだった。
   - DP10-03・DP10-05はTask単位ではなくSkill/PR単位の重複であり、
     DP-10本来の粒度（MISC↔Task）とは厳密には異なる。参考実例として
     残したが、水増しにはしていない。
+  - **母集団適合実例（新規MISC/Backlogアイテムを既存Open Taskと比較し、
+    duplicate=Yes/Noいずれかの判定が下った記録）を追加で探索した
+    （§8.3.1）。`journal/2026-09-06.md`のADP-054/ADP-057重複範囲確認や
+    `journal/2026-09-11〜13.md`のExecution Event pause MISCの配置待ちなど、
+    母集団に近い言及は複数見つかったが、いずれもPre-decision input原文の
+    凍結、またはduplicate Yes/No判定結果のGitHub側記録のどちらかを欠き、
+    フィクスチャとして確定できなかった。duplicate=Yes・duplicate=Noの
+    いずれについても、GitHub検索のみでは新規の母集団適合実例を1件も
+    追加できなかった。** 無理に近似例を実例として仕立てるより、この
+    不足を正直に記録することを優先した。
   - 追加の実例収集には、Notion Stories & Tasksへの直接アクセス
     （`mcp__Notion__*`ツール）でBacklog RefinementのApproach Decision
     履歴・過去のMISC intakeログを検索する必要がある。これは
     `ADP-065-T04`着手前、またはT03の追加パスとして、Notionアクセスを
-    持つセッションで実施することを推奨する。
+    持つセッションで実施することを推奨する。その際は、母集団に合致する
+    duplicate=Yesの実例に加え、duplicate=No（false-escalation計算に
+    必要）の実例も少なくとも1件確保することを優先する。
 
 **Jevへの実アクセスは本タスクを通じて一度も行っていない。** 上記の
 Jev呼び出しスクリプト仕様（§8.1.3, §8.2.3, §8.3.3）は設計のみであり、
