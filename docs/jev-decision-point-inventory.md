@@ -754,7 +754,7 @@ DP-9のデータセットへ実例を追加する際は、着手前に分かっ�
 |---|---|---|
 | DP9-01 | `needs-split` | Owner裁定により`Superseded`としてクローズ、`ADP-051-A`〜`E`へ分割。34 substantive review roundsを経ても同一subsystem（Time Events状態・出自・タイムスタンプ）で新規指摘が終わらなかったこと自体が、単一実行単位として大きすぎたことの証明という明示判断。 |
 | DP9-02 | `needs-split` | `review-loop-control.md` §4の5-round hard capに到達し、3つの独立Taskへ分割。見つかった実バグ20件超が単一のバグパターンの複数箇所への波及であったと判明。 |
-| DP9-03 | `fits-as-is`（分割後の粒度としては適正） | AC自体が1 AI稼働日以内と見積もり。（着手自体は別リスク要因＝53件failure matrixの複雑さで日次自律実行では見送られたが、これはサイジング適合性とは別軸の判断であり、DP-9が問うサイズ適合の判定結果は「適正」）。 |
+| DP9-03 | `fits-as-is`（**未検証——主要指標から除外。理由は表下の注記参照**） | AC自体が1 AI稼働日以内と見積もり。（着手自体は別リスク要因＝53件failure matrixの複雑さで日次自律実行では見送られたが、これはサイジング適合性とは別軸の判断であり、DP-9が問うサイズ適合の判定結果は「適正」）。 |
 | DP9-04 | `needs-split`（部分的） | 実装中にCodexレビューでP1指摘2件が入り、open/close両方を1つのAC内でCode.gs無変更のまま実現するという当初設計が過大と判明。stop側を切り出し、open側のみで完了。 |
 | DP9-05 | `fits-as-is` | PR作成時刻ベースの所要期間（次項参照）が1 AI稼働日相当に収まっており、分割・Supersededの記録もない。 |
 | DP9-06 | `fits-as-is` | PR作成時刻ベースの所要期間が1 AI稼働日相当に収まっており、廃止手順（書き込み必須ゲート除去→参照除去→DEPRECATED化）を一括完了。 |
@@ -762,6 +762,19 @@ DP-9のデータセットへ実例を追加する際は、着手前に分かっ�
 | DP9-08 | `fits-as-is` | PR作成時刻ベースの所要期間が1 AI稼働日相当に収まっている。 |
 | DP9-09 | `fits-as-is`（かつ、事前分割の好例） | 34ラウンド/5ラウンドhard capのような事後的失敗を経ずに、最初からA〜Eの独立Subtaskとして設計された点がDP9-01/02との対比として重要。PR作成時刻ベースの所要期間も1 AI稼働日相当。 |
 | DP9-10 | `fits-as-is` | `-B`と分離した最初の切片として独立完結。PR作成時刻ベースの所要期間も1 AI稼働日相当。 |
+
+**DP9-03の注記（circular groundtruthの除外）**: DP9-03の`fits-as-is`
+ground truthは、現時点ではAC自体の事前見積もり（「1 AI稼働日以内」）
+のみを根拠としている。これは§8.2.1のPre-execution inputにも含まれる
+Task本文・ACの一部であり、モデル入力と同じ情報をground truthとして
+使う循環参照になっている。加えて本文は「着手自体は…日次自律実行では
+見送られた」と明記しており、実際にこのTaskが実行され1日以内に完了した
+という独立した観測（実測所要時間、Task Time EventsのStarted At/
+Completed At等）は存在しない。したがって、モデルが入力に含まれる
+見積もりをそのまま繰り返すだけで「正解」と判定されてしまう構造を
+避けるため、**独立した実行完了エビデンスが別途確認されるまで、DP9-03を
+DP9-01/02/05〜10と同じ「主要指標から除外」の扱いとする**（詳細は
+§8.2.4 step 1・新設step 3）。
 
 **DP9-05〜10の所要時間エビデンス（トポロジーではなくタイムスタンプ根拠）**:
 「単一branch/PRで完結した」というリポジトリ構造上の事実だけでは、
@@ -825,6 +838,45 @@ Choiceが`fits-as-is`かつScoreが最低帯（1日未満相当）の場合の�
 またはScoreが2日相当以上の場合は、現行の`task-approach-review`
 Finalizeモードへ必ずフォールバックする（Jevは分割案そのものを生成しない）。
 
+**最終決定（final decision）の定義**: §8.1.3のDP-4と同様、
+false-escalation/missed-escalationの各指標は、Jevの生のChoice
+（raw Choice）ではなく、confidence閾値とScoreの両方を適用した後の
+**最終決定**から計算する。以下の3条件をすべて満たす場合に限り、
+最終決定を「no-escalate（fits-as-isとして自動承認、
+task-approach-reviewへ回さない）」とする。
+
+- `choice`が`fits-as-is`である、かつ
+- `confidence`が閾値以上である、かつ
+- `Score`が最低帯（1日未満相当、スケール値2）である
+
+上記いずれか1つでも満たさない場合（`choice`が`needs-split`/
+`needs-more-design`である、`confidence`が閾値未満である、または
+`Score`が2日相当以上である）、最終決定は現行の
+`task-approach-review`Finalizeモードへのフォールバックであり、
+これを**escalate**として扱う。confidenceのみを見て「フォールバック
+したかどうか」を判定しない——高confidenceで`fits-as-is`を正しく
+返していても、Scoreが2日相当以上であれば最終決定はescalateになる。
+
+**false-escalation / missed-escalation指標の定義**: 上記の最終決定の
+escalation属性を、各実例のground truth（§8.2.2、fits-as-is/
+needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済みの
+実例のみを母数とする）と比較する。
+
+- **missed escalation（false negative、見逃し）**: 最終決定が
+  no-escalate（fits-as-is自動承認）なのに、ground truthが
+  needs-split（本来分割が必要）だった場合。自動承認したことで本来
+  必要な分割・レビューが素通りした、安全上見逃してはならない誤り。
+- **false escalation（false positive、過剰escalation）**: 最終決定が
+  escalate（task-approach-reviewへフォールバック）なのに、ground
+  truthがfits-as-is（本来単一実行単位として適正）だった場合。
+  confidence不足によるフォールバックだけでなく、Scoreが2日相当以上と
+  判定されたことによるフォールバックも含む——検証済みのfits-as-is
+  実例に対して高confidenceで`fits-as-is`を正しく返していても、Scoreが
+  2日相当以上であれば最終決定はescalateとなり、これはfalse
+  escalationとしてカウントする（§8.1.3でDP4-07について整理した
+  「exact-match成功とescalation属性の一致/不一致は独立した2つの軸」と
+  同じ考え方をDP-9側にも適用する）。
+
 #### 8.2.4 実行手順（アクセス取得後）
 
 1. **主要指標の対象範囲の確定（最初に行う）**: 見出しとなる主要指標
@@ -832,13 +884,17 @@ Finalizeモードへ必ずフォールバックする（Jevは分割案そのも
    Missed-escalation rate、以下すべて）は、**Pre-execution inputと
    ground truthの両方が検証済みの実例に限って計算する**。false-escalation
    rateだけを限定するのではなく、10件中どの実例が主要指標に入るかを
-   ここで先に確定させる。現時点で無条件に検証済みなのはDP9-03・DP9-04
-   の2件のみ（AC本文自体に規模記述があり、GitHubのみで着手前情報・
-   結果情報とも確認済み）。DP9-01/02はstep 2、DP9-05〜10はstep 3の
-   検証が完了するまで主要指標のいずれにも含めない。**したがって、
-   これら追加検証なしにT04を最初に（Notionアクセス取得前の分岐で）
-   実行した場合、主要指標の母数はDP9-03・DP9-04の2件にとどまり、
-   残り8件（DP9-01/02とDP9-05〜10）は検証が完了するまで参考値扱いの
+   ここで先に確定させる。現時点で無条件に検証済みなのは**DP9-04の1件
+   のみ**（着手前情報・結果情報ともGitHubのみで確認済みで、ground truth
+   が実行中に実際に判明した分割の必要性という独立した観測に基づく）。
+   当初DP9-03も含め2件としていたが、DP9-03のground truthはAC自体の
+   事前見積もりのみに基づく循環参照であり、独立した実行完了エビデンスが
+   ないため除外した（詳細は§8.2.2のDP9-03注記、および下記step 3）。
+   DP9-01/02はstep 2、DP9-03はstep 3、DP9-05〜10はstep 4の検証が
+   完了するまで主要指標のいずれにも含めない。**したがって、これら
+   追加検証なしにT04を最初に（Notionアクセス取得前の分岐で）実行した
+   場合、主要指標の母数はDP9-04の1件のみにとどまり、残り9件
+   （DP9-01/02、DP9-03、DP9-05〜10）は検証が完了するまで参考値扱いの
    まま主要指標から除外される。** 10件全件のChoice出力とground truthの
    比較自体は記録するが、見出しの数値に混ぜない。`needs-split`
    （DP9-01, 02, 04）を`fits-as-is`と誤判定するケースは、検証が完了し
@@ -852,7 +908,15 @@ Finalizeモードへ必ずフォールバックする（Jevは分割案そのも
    Accuracy/Calibration/False-escalation rate/Missed-escalation rate等の
    主要指標のいずれにも含めない（未確認の入力から出た予測を確定指標に
    混ぜない）。
-3. **DP9-05〜10の所要時間の前提確認**: §8.2.2の「DP9-05〜10の所要時間
+3. **DP9-03の独立実行完了エビデンスの前提確認**: §8.2.2のDP9-03注記の
+   通り、現時点のground truth（`fits-as-is`）はAC自体の事前見積もり
+   （モデル入力にも含まれる情報）のみに基づいており、独立した実行完了
+   エビデンス（実際に1 AI稼働日以内で完了した記録、Notion Task Time
+   Events等の客観的な所要時間）を欠く。T04を実際に走らせる前に、この
+   独立エビデンスをNotionアクセスを持つセッションで確認すること。確認
+   できない場合、DP9-03は主要指標のいずれにも含めず、参考値（事前
+   見積もりの自己一致チェック程度の位置づけ）として分離集計する。
+4. **DP9-05〜10の所要時間の前提確認**: §8.2.2の「DP9-05〜10の所要時間
    エビデンス」表は現時点で「要実測」のプレースホルダのままであり、
    実際のGitHub commit/PRタイムスタンプもNotion Task Time Events
    （Started At/Completed At）による確定も行われていない。T04を実際に
@@ -860,9 +924,9 @@ Finalizeモードへ必ずフォールバックする（Jevは分割案そのも
    いないか確認すること。確認できない、または暦日をまたぐと判明した
    実例は、**false-escalation rateだけでなく、Accuracy・Agreement・
    Calibration・Missed-escalation rateを含むすべての主要指標から除外
-   する**（DP9-01/02と同じ扱い）。確認が取れた実例のみ、該当する
+   する**（DP9-01/02/03と同じ扱い）。確認が取れた実例のみ、該当する
    指標の母数へ順次追加する。
-4. **Calibration**: confidenceと実際の正誤（step 1で主要指標の対象に
+5. **Calibration**: confidenceと実際の正誤（step 1で主要指標の対象に
    含まれた実例のみ）をbin化し、reliability diagram（confidence 0.1
    刻み）を作成する。**この際、confidenceはpredicted Choiceがground
    truthと一致したか（正解/不正解）を基準にbin化し、predicted Choice
@@ -870,22 +934,31 @@ Finalizeモードへ必ずフォールバックする（Jevは分割案そのも
    しない。** 正しく`needs-split`を高confidenceで当てた予測（望ましい
    safety的判断）を、単に`needs-split`であることを理由に低く評価しては
    ならない。
-5. **Latency/Cost**: DP-4と同じ方法（§8.1.4 手順4・5）で記録。
+6. **Latency/Cost**: DP-4と同じ方法（§8.1.4 手順4・5）で記録。
    検証未了の実例を含む10件全件で計測してよい（Latency/Costは
    ground truthの正誤に依存しないため主要指標の対象範囲の制約を
    受けない）。
-6. **Reproducibility**: 同一Task本文を3回送り、Choice/Scoreの一致率を
+7. **Reproducibility**: 同一Task本文を3回送り、Choice/Scoreの一致率を
    記録。こちらもground truthに依存しないため10件全件で行ってよい。
-7. **False-escalation rate**: DP9-05〜10のうちstep 3で検証済みかつ
-   `fits-as-is`と判定された実例に限り、confidence不足でLLM側
-   （task-approach-review）へ回された件数の割合。
-8. **Missed-escalation rate**: DP9-01, 02, 04（実際は`needs-split`
-   だった3件）のうち、step 2/step 1の検証条件を満たす実例（現時点では
-   DP9-04のみ。DP9-01/02はstep 2の入力凍結が確認できた場合に限り
-   加える）について、Jevが高confidenceで`fits-as-is`と誤判定した件数
-   の割合。この指標が0でない場合、DP-9をJev向きから外す再検討が必要
-   （本文書§2のDP-9エントリ自体が「actual decomposition design stays
-   LLM向き」と明記している境界を、判定の入口でも越えてはならない）。
+8. **False-escalation rate**: §8.2.3で定義した最終決定（Choice・Score・
+   confidence閾値を組み合わせた最終決定）を用いる。主要指標対象
+   （step 1〜4で検証済み）かつground truthが`fits-as-is`の実例のうち、
+   最終決定がescalate（confidence不足によるフォールバック、または
+   Scoreが2日相当以上と判定されたことによるフォールバックのいずれか）
+   となった件数の割合。raw Choiceのconfidenceだけでは判定しない——
+   高confidenceで正しく`fits-as-is`を返していても、Scoreが2日相当以上
+   であれば最終決定はescalateであり、これもfalse escalationに数える。
+9. **Missed-escalation rate**: 同じく§8.2.3の最終決定を用いる。主要指標
+   対象（step 1〜4で検証済み）かつground truthが`needs-split`
+   （DP9-01, 02, 04のうち検証済みの実例に限る。現時点ではDP9-04のみ。
+   DP9-01/02はstep 2の入力凍結が確認できた場合に限り加える）のうち、
+   最終決定がno-escalate（fits-as-is自動承認）となった件数の割合。
+   Scoreが2日相当以上と判定されてフォールバックした場合は最終決定が
+   escalateになるため、これはmissed-escalationにはカウントしない
+   （フォールバックが安全側に機能した、狙い通りの挙動）。この指標が
+   0でない場合、DP-9をJev向きから外す再検討が必要（本文書§2のDP-9
+   エントリ自体が「actual decomposition design stays LLM向き」と明記
+   している境界を、判定の入口でも越えてはならない）。
 
 ### 8.3 DP-10 — MISC重複／supersede検知（Noul型）
 
@@ -895,22 +968,38 @@ DP-10は「新規MISC/Backlogアイテムが既存Open Taskと重複するか」
 本セッションが`cloud42-labo/ai-development-platform`・
 `cloud42-labo/brain`から発見できた、検証可能な実例は以下5件。
 
-| # | Input state（新規アイテム vs 既存Task/PR） | 出典 |
-|---|---|---|
-| DP10-01 | `cloud42-labo/experimental`のCLAUDE.md self-merge化を提案するPR #90（Claude作成）と、ほぼ同内容のChris側push（commit `cb4c73d`）が既にmainへ入っていた。 | journal `2026-08-26.md` |
-| DP10-02 | `ai-development-platform` PR #61（`docs/instruction-skill-debt-inventory.md`）作成にあたり「`ADP-054`のSubtaskを確認したが重複なし」と明示チェックした記録。 | journal `2026-09-19.md`（Codex P2指摘の文脈で言及） |
-| DP10-03 | `cloud42-labo/skills`側に新設しようとした運用観察（Instruction/Skill debt signal相当）が、`ai-development-platform`側の運用に既に組み込まれつつあると判断され、重複作成を見送った。 | `notes/claude-code-skills.md` |
-| DP10-04 | `HUMAN-AOD-007-2`と`SPOT-03-S03`系Subtaskの一部（同一LinkedIn投稿を指す2ページ）が重複しており、Notion上で手動統合・Done化した。 | journal `2026-09-09.md` |
-| DP10-05 | e-Stat取得経路の設計変更（ライブ取得経路を再利用）により、当初計画していたPR #73（キーをlocalStorageへ保存する変更）の目的が不要化し、重複的な作業としてクローズした。 | journal `2026-08-10.md` |
+**§8.3.3が要求する`new_item_text`・`candidate_existing_task_text`は、
+判定が行われた時点（着手前・決定前）に存在していたテキストに限定し、
+判定後に判明した結果（「既にmainへ入っていた」「重複なしと確認した」
+「見送った」「手動統合した」「クローズした」等）は含めない。** 判定後に
+判明した結果はすべて§8.3.2「Outcome / ground truth」側にのみ記録し、
+本節のPre-decision inputへ混入させない。この分離が確認できない実例は
+「未確認——除外対象」と明記し、それらしいテキストを再構成しない
+（DP9-01/02/05〜10で確立した扱いと同じ）。
+
+| # | Pre-decision input: `new_item_text`（新規アイテム、判定前のテキスト） | Pre-decision input: `candidate_existing_task_text`（比較対象、判定前の既存状態） | 出典 |
+|---|---|---|---|
+| DP10-01 | `experimental` PR [#90](https://github.com/cloud42-labo/experimental/pull/90)（2026-08-26作成）のタイトル・本文全文。要旨: 「オーナー（駒場さん）の明示的な判断により、このリポジトリのマージ運用を変更／『Claudeはmergeせずchatgpt側の毎時タスクに委ねる』という従来ルールを、このリポジトリに限り上書きし、Claude自身がその場でsquashマージする運用に戻す／Codex Automatic reviewsは引き続き有効のまま維持」。 | `experimental`の`main`へPR #90作成時点で既に反映済みだったcommit [`cb4c73d`](https://github.com/cloud42-labo/experimental/commit/cb4c73d7079fd6a20cc439ea3ae26e1f12bf7340)（2026-08-26 13:42:47 UTC、Chris側push、コミットメッセージ"Fix experimental self-merge policy"、`CLAUDE.md`への+17/-24差分）。 | PR #90、commit `cb4c73d` |
+| DP10-02 | **未確認——除外対象。** journal `2026-09-19.md`は「`ADP-054`のSubtaskを確認したが重複なし」とのみ記録しており、当時作成中だった`docs/instruction-skill-debt-inventory.md`（PR #61）の該当節の正確な原文、および比較対象として個別照合した特定のcandidate（`ADP-054`配下19件のSubtaskのうちどれか）のどちらも、GitHub検索のみでは特定・復元できない。 | 同上（特定不能。「`ADP-054`のSubtask」という集合への言及のみで、個別のcandidate 1件へは絞り込めない） | journal `2026-09-19.md`（PR #61へのCodex P2指摘対応の文脈） |
+| DP10-03 | notes `claude-code-skills.md`の2026-09-13時点週次レビュー節が記録する、2026-09-07〜12に3回繰り返し観察された判断基準「`review-fix-state-model.md`系の高難度Task（53件のfailure matrixを伴う契約）は日次自律実行の1パスで拙速に実装せず専用セッションへ切り出す」をSkill化する候補案（原文はnotes参照）。 | **具体的な原文は未確認——部分ギャップ。** 同notesは比較対象を「ADP Mission Control週次判断がこのTaskを名指しで同じ観察を挙げており」とのみ記すが、`ai-development-platform`側のどの文書・どの記述箇所と照合したのかは特定できない。 | `notes/claude-code-skills.md`（2026-09-13時点週次レビュー節） |
+| DP10-04 | **未確認——除外対象。** `HUMAN-AOD-007-2`・`SPOT-03-S03`系Subtaskいずれも本文がNotion Stories & Tasks側にのみ存在し、本セッションはGitHub検索のみに限定されていたため、両ページの判定前本文（同一LinkedIn投稿を指すことが分かる原文）を凍結できない。 | 同上（特定不能） | journal `2026-09-09.md`（結果情報のみ言及、判定前本文は未収録） |
+| DP10-05 | `experimental` PR [#73](https://github.com/cloud42-labo/experimental/pull/73)（2026-08-08作成、2026-08-09 close）のタイトル・本文全文。要旨: 「店舗生存シミュレーター: e-Statキーをブラウザに保存し次回自動入力する (v0.10.0)」——`appIdInput`の`localStorage`保存・削除ボタン追加・try/catchフォールバックを提案する変更。 | e-Statのライブ取得経路（`fetchMeshDataset`）を再利用してエリアデータを事前生成・同梱する設計変更案（PR #73がcloseされる前日までに固まった別解）。この設計変更が採用されればPR #73のAPIキー保存機能自体が不要になるという関係にある。 | PR #73、journal `2026-08-10.md` |
+
+**フィールド作成時の運用ルール（今後のフィクスチャ拡充向け）**: 今後
+DP-10のデータセットへ実例を追加する際は、判定前に分かっていた情報
+（`new_item_text`・`candidate_existing_task_text`）と、判定後にのみ
+判明する結果情報（Outcome/ground truth label）を、収集の時点から
+別フィールドとして記録し、両者を混在させたテキストを1つのフィールドに
+書かない（§8.2.1でDP-9向けに定めた運用ルールと同じ）。
 
 #### 8.3.2 期待出力（ground truth）と根拠
 
-| # | Ground truth（Noul: duplicate確率） | 根拠 |
+| # | Ground truth（Noul: duplicate確率） | 根拠・理由（採点専用。Jevへの入力には使わない） |
 |---|---|---|
 | DP10-01 | duplicate = Yes（高確率） | PR #90はclose、"重複を回避"と明記。 |
-| DP10-02 | duplicate = No（低確率） | 「重複なし」と明示記録。ただしCodexからは別の指摘（live task stateの複製）が入っており、判定手続き自体は正しかった点に注意。 |
-| DP10-03 | duplicate = Yes（高確率、ただしTask単位ではなくSkill/運用機構単位の重複） | 「重複して作る必要がないと判断した」と明記。DP-10本来の対象（MISC vs Task）とは粒度が異なる点を注記（§8.4）。 |
-| DP10-04 | duplicate = Yes（高確率） | 「重複2件」「Notion上でDoneへ手動修復」と明記。 |
+| DP10-02 | duplicate = No（低確率）——**主要指標からは除外**（§8.3.1参照） | 「重複なし」と明示記録。ただしCodexからは別の指摘（live task stateの複製）が入っており、判定手続き自体は正しかった点に注意。 |
+| DP10-03 | duplicate = Yes（高確率、ただしTask単位ではなくSkill/運用機構単位の重複）——**主要指標からは除外**（§8.3.1参照） | 「重複して作る必要がないと判断した」と明記。DP-10本来の対象（MISC vs Task）とは粒度が異なる点を注記（§8.4）。 |
+| DP10-04 | duplicate = Yes（高確率）——**主要指標からは除外**（§8.3.1参照） | 「重複2件」「Notion上でDoneへ手動修復」と明記。 |
 | DP10-05 | duplicate = Yes（目的の重複、Task単位ではなくPR単位） | 設計変更により目的が不要化・クローズ。厳密には「重複」というより「supersede（別解により不要化）」——DP-10の`supersede`側の実例として妥当。 |
 
 #### 8.3.3 Jev呼び出しスクリプト仕様
@@ -941,24 +1030,50 @@ Task内容を変更するためLLM向きのまま）。
 
 #### 8.3.4 実行手順（アクセス取得後）
 
-1. **候補ペア生成**: 実運用では新規MISC 1件に対し、Open Task/PR集合の
+1. **主要指標の対象範囲の確定（最初に行う）**: §8.2.4のDP-9と同様、
+   主要指標（Accuracy／Agreement／Calibration／False-escalation rate／
+   Missed-escalation rate）は、Pre-decision input（`new_item_text`と
+   `candidate_existing_task_text`の両方）とOutcome/ground truthの両方が
+   検証済みの実例に限って計算する。現時点で無条件に検証済みなのは
+   **DP10-01・DP10-05の2件のみ**（§8.3.1参照）。DP10-02（candidateを
+   特定できない）・DP10-03（candidateの原文が未確認）・DP10-04
+   （Notion側の判定前本文が未確認）の3件は、追加検証が完了するまで
+   主要指標のいずれにも含めない。5件全件のNoul出力とground truthの
+   比較自体は記録するが、見出しの数値には混ぜない。**なお、検証済み
+   2件（DP10-01, DP10-05）はいずれもground truth = Yesであり、
+   duplicate = Noの検証済み実例が現時点で1件も無い。** そのため
+   Accuracy・Calibration・False-escalation rateは、DP10-02の検証が
+   完了するまで実質的に計算不能（Yes側の的中率しか測れない、または
+   分母が0になる）である点を明記する。
+2. **候補ペア生成**: 実運用では新規MISC 1件に対し、Open Task/PR集合の
    全件との組み合わせが必要になるため、まず軽量な文字列/埋め込み類似度
    などで候補を絞り込み、上位N件のみJevへ送る前処理ステップを別途
    用意する（本節はJev呼び出し自体の仕様であり、その前段の候補生成
    ロジックはこのPoC仕様のスコープ外——T04で別途設計する）。
-2. **Accuracy/Agreement**: 5件（DP10-01〜05）についてNoul確率とground
-   truthのYes/Noを閾値で二値化して比較。
-3. **Calibration**: DP10-02（duplicate=No）のNoul確率が他4件（Yes）より
-   明確に低いか確認。5件では信頼できるreliability diagramは作れない
-   ため、この段階では「方向性の確認」にとどめ、10件超のデータが揃って
-   から本格的なcalibration評価を行う。
-4. **Latency/Cost/Reproducibility**: §8.1.4・§8.2.4と同じ方法で記録。
-5. **False-escalation rate**: 実際は重複でない（DP10-02のみ）のに高
-   confidenceでフラグが立った場合の割合。
-6. **Missed-escalation rate**: 実際は重複/supersede対象（DP10-01, 03,
-   04, 05）だったのに低confidenceで見逃された割合。DP-10は「auto-
-   flagging」のみで人の目を経由する設計（§2本文）だが、見逃しが多い場合
-   はフラグ閾値自体の再較正が必要。
+3. **Accuracy/Agreement**: step 1の主要指標対象（DP10-01・DP10-05、
+   追加検証が済めば他も順次追加）についてNoul確率とground truthの
+   Yes/Noを閾値で二値化して比較。5件全件（DP10-01〜05）のNoul出力自体は
+   参考値として記録してよいが、見出しのAccuracyには混ぜない。
+4. **Calibration**: 主要指標対象の実例が2件（ともにYes）のみでは
+   reliability diagramもYes/No間の較正比較も成立しない。DP10-02の
+   検証が完了しduplicate=Noの検証済み実例が加わるまで、Calibrationは
+   「計測不能」として記録し、無理に方向性の結論を出さない。10件超の
+   データが揃ってから本格的なcalibration評価を行う。
+5. **Latency/Cost/Reproducibility**: §8.1.4・§8.2.4と同じ方法で記録。
+   これらはground truthの正誤に依存しないため、5件全件で計測してよい
+   （主要指標の対象範囲の制約を受けない）。
+6. **False-escalation rate**: 実際は重複でない実例（DP10-02のみ）が
+   主要指標対象に含まれるのは、DP10-02のPre-decision input（比較対象
+   candidateの特定）が検証された場合に限る。**現時点ではDP10-02が
+   除外されているため、False-escalation rateの分母は0であり計算不能。
+   この状態をそのまま「0%」と報告せず、「検証待ちのため計測不能」と
+   明記すること。** DP10-02の検証完了後、高confidenceでフラグが立った
+   場合の割合として計算する。
+7. **Missed-escalation rate**: 主要指標対象（step 1で検証済み）かつ
+   ground truthが重複/supersede対象（現時点ではDP10-01, 05の2件）の
+   うち、低confidenceで見逃された割合。DP10-03・04の検証が完了すれば
+   分母に加える。DP-10は「auto-flagging」のみで人の目を経由する設計
+   （§2本文）だが、見逃しが多い場合はフラグ閾値自体の再較正が必要。
 
 ### 8.4 実例の充足状況とギャップ
 
@@ -966,15 +1081,23 @@ Task内容を変更するためLLM向きのまま）。
   実例であり、`self-authority-escalation`カテゴリに該当する実インシデ
   ントは本セッションの検索範囲では発見できなかった（10件には含めていない）。
 - **DP-9**: 10件確保。`needs-split`側3件、`fits-as-is`側7件。**ただし
-  DP9-01/02の2件はPre-execution inputがGitHub検索のみでは未確認
-  （§8.2.1参照、T04実行前にNotionでの確認が必要）。DP9-05〜10の
-  `fits-as-is`ラベルは、リポジトリのトポロジー（単一branch/PRで完結した
-  こと）ではなく、commit/PRタイムスタンプを所要期間の代理指標として
-  明示する方針へ改めたが、実際のタイムスタンプ値の取得（§8.2.2の表の
-  「要実測」セル）はT04実行前に別途行う必要があり、本セッションでは
-  未実施のまま残っている。真の確定にはNotion Task Time Events
-  （Started At/Completed At）の照合が要る。**
-- **DP-10**: **5件のみ確保、目標10件に対し不足。** 本セッションが
+  現時点で主要指標に無条件で使えるのはDP9-04の1件のみ**（§8.2.4
+  step 1）。内訳:
+  - DP9-01/02の2件はPre-execution inputがGitHub検索のみでは未確認
+    （§8.2.1参照、T04実行前にNotionでの確認が必要）。
+  - **DP9-03は、ground truthがAC自体の事前見積もり（モデル入力にも
+    含まれる情報）のみに基づく循環参照であり、独立した実行完了
+    エビデンスを欠くと判明したため、今回の修正で主要指標から除外した
+    （§8.2.2のDP9-03注記参照。当初「DP9-03・DP9-04の2件が無条件で
+    検証済み」としていたのは誤りで、正しくはDP9-04の1件のみ）。**
+  - DP9-05〜10の`fits-as-is`ラベルは、リポジトリのトポロジー（単一
+    branch/PRで完結したこと）ではなく、commit/PRタイムスタンプを
+    所要期間の代理指標として明示する方針へ改めたが、実際のタイムスタンプ
+    値の取得（§8.2.2の表の「要実測」セル）はT04実行前に別途行う必要が
+    あり、本セッションでは未実施のまま残っている。真の確定にはNotion
+    Task Time Events（Started At/Completed At）の照合が要る。
+- **DP-10**: **5件のみ確保、目標10件に対し不足。うち主要指標に無条件で
+  使えるのはDP10-01・DP10-05の2件のみ**（§8.3.4 step 1）。本セッションが
   `cloud42-labo/ai-development-platform`と`cloud42-labo/brain`の
   GitHubコード検索で発見できた、Notion Stories & Tasksの実MISC/Task
   重複判定に該当する検証可能な実例はこの5件が上限だった。理由:
@@ -983,6 +1106,13 @@ Task内容を変更するためLLM向きのまま）。
     （`Approach Decision`欄等）に残る設計になっており、本セッションは
     GitHub MCPツールのみでの調査に限定されていたため、Notion側の実例に
     は到達できなかった。
+  - **今回の修正で、5件のうちDP10-02・DP10-03・DP10-04の3件は、
+    §8.3.3が要求する`new_item_text`／`candidate_existing_task_text`の
+    ペアをPre-decision inputとして凍結できない（DP10-02は比較対象
+    candidateを1件に特定できない、DP10-03は比較対象の原文が未確認、
+    DP10-04はNotion側の判定前本文が未確認）と判明したため、DP9-01/02
+    と同じ「未確認——除外対象」として主要指標から外した。当初は5件
+    すべてを対等にAccuracy等へ算入する構成だったが、これは誤りだった。**
   - DP10-03・DP10-05はTask単位ではなくSkill/PR単位の重複であり、
     DP-10本来の粒度（MISC↔Task）とは厳密には異なる。参考実例として
     残したが、水増しにはしていない。
