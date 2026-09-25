@@ -1039,27 +1039,58 @@ no-escalateであれば最終決定との不一致によりfalse escalationと�
      step 8/9参照——、DP-10は現時点で0件——本書収録2件はrequest schemaを
      満たさず送信対象外、§8.3.4 step 5参照——または§8.4のギャップ解消後の
      件数）のみのinput tokens合計・1件平均で記録する。
-   - **Full-experiment cost（§8.0.1のBudget修正と対応させる）**:
-     §8.0.1が定義する通り、初回送信に加え下記step 6のReproducibility
-     手順（同一inputを**3回追加**送信）が必須のため、このDP単体の総
-     リクエスト数は「初回件数×4」（初回1回＋再現性3回）になる。
-     Full-experiment costは、この実際の総リクエスト数（初回送信分＋
-     再現性送信分）それぞれのinput tokensを実測・合計して算出する
-     （初回とReproducibilityで送信内容は同一のため、初回1件あたりの
-     input tokensに送信回数4を掛けて概算してもよいが、実測値が得られる
-     場合は実測を優先する）。DP-4/DP-9/DP-10のfull-experiment costを
+   - **Full-experiment cost（§8.0.1のBudget修正と対応させる。今回の
+     Codex指摘への対応として、実際に送信されたリクエストの合算へ
+     再定義する）**:
+     **Full-experiment costは「初回件数×4」という固定式ではなく、
+     実際に送信された全リクエスト（初回送信＋下記step 6のReproducibility
+     手順による3回の追加送信＋§8.0.1が想定するネットワーク/レート
+     制限起因の再試行のうち、承認を得て実際に発生したもの全て）の
+     input tokensを実測・合算して算出する。「初回件数×4」
+     （初回1回＋再現性3回）は、実行前の見積もり・下限としてのみ使う**
+     ——§8.0.1が明記する通りBudgetにはこの4回に加えて再試行分の
+     余地が既に見込まれており、承認済みの再試行が実際に発生した場合、
+     そのリクエストも課金対象のトークンを消費する以上、固定式のままでは
+     実際に発生したコストが過小に報告される。したがってT04は、初回・
+     Reproducibility・（発生した場合の）再試行を含む**実際に送信した
+     すべてのライブ呼び出し**を1件ずつログし、そのinput tokensの合計を
+     Full-experiment costとして報告する（初回とReproducibilityで送信
+     内容が同一の場合、初回1件あたりのinput tokensへ送信回数を掛けて
+     概算してもよいが、実測値が得られる場合は実測を優先する。再試行分は
+     概算せず必ず実測する）。DP-4/DP-9/DP-10のfull-experiment costを
      合算した値を、§8.0.1が定めるDP-4/DP-9/DP-10合計の総リクエスト数
-     （現在の件数なら最低28回）と対応づけてNotion Task
-     （`ADP-065-T04`）の`Result`へ記録する。
+     （現在の件数なら最低28回、これも実行前の下限見積もりであり実際の
+     報告値ではない）と対応づけてNotion Task
+     （`ADP-065-T04`）の`Result`へ記録する。**報告するFull-experiment
+     costは常に「実際に送信されたリクエスト数」の実測合計であり、
+     「初回件数×4」という式の値をそのまま報告値として転記しない。**
    **Per-pass costとfull-experiment costは常に両方報告し、
    どちらか一方だけを「このPoCのコスト」として扱わない**——per-passのみ
    の報告は、§8.0.1が撤回した「22件が予算の上限」という誤解を再生産する。
 6. **Reproducibility**: **§8.0.3で固定したモデルバージョン
    （`jev-latest`ではなく固定版識別子）とサンプリングパラメータの組を
    毎回のリクエストへ明示指定した上で**、同一inputを3回連続で送り、
-   `choice`が3回とも一致するか（決定的か）を確認する。不一致がある
-   場合はseed等Jev側の非決定性要因を記録する（temperatureは§8.0.3で
-   固定済みの値を使うため、ここでの変動要因ではない）。
+   `choice`が3回とも一致するか（決定的か）を確認する。**ただし`choice`の
+   一致だけでは不十分——このDPで実際にデプロイされる挙動は、上記
+   「最終決定（final decision）の定義」の通り`choice`だけでなく
+   `confidence`が閾値`0.7`を上回るか否かにも依存する。同じルールIDが
+   3回とも返っても、`confidence`が0.71/0.69/0.72のように閾値の両側へ
+   またがれば、直接分類（閾値以上、そのルールIDのescalation属性を採用）
+   とfail-closedフォールバック（閾値未満）の間で実際の挙動が切り替わり、
+   raw `choice`だけを見ると「再現性あり」に見えてしまう。したがって
+   各回について`confidence`の値を個別に記録した上で、3回それぞれの
+   **thresholded final decision**（`choice`のマッチ結果と
+   `confidence >= 0.7`の閾値判定の両方を適用した後の最終決定・
+   escalation属性）を算出し、`choice`の一致に加えてこの最終決定が3回とも
+   安定していることを再現性の合格条件とする。**不一致（`choice`が3回とも
+   一致しない、または`choice`は一致してもthresholded final decisionが
+   閾値の跨ぎにより変動した）がある場合はseed等Jev側の非決定性要因を
+   記録する（temperatureは§8.0.3で固定済みの値を使うため、ここでの
+   変動要因ではない）。**この「thresholded final decisionの安定性まで
+   確認する」方法は、§8.2.4（DP-9）・§8.3.4（DP-10）のReproducibility
+   手順にも同じ方針を適用する——DP-9は`choice_confidence`・
+   `score_confidence`・Scoreの帯境界、DP-10は`yes確率`の`0.7`閾値が
+   それぞれの閾値跨ぎ対象になる（詳細は各節参照）。**
 7. **Missed-escalation rate**: §8.1.3の「false-escalation /
    missed-escalation指標の定義」に従い、最終決定（confidence閾値・
    フォールバック適用後）のescalation属性がno-escalateなのに、期待
@@ -1302,29 +1333,47 @@ control（R06または`task-approach-review`のSkill定義）を正式に改定�
 `confidence >= 0.7`・DP-10の`yes確率 >= 0.7`と同じ規約。T04実行者が
 自己判断で値を変えることや、フィクスチャの結果を見てから選び直すことは
 禁止——変更が必要な場合は独立したholdoutセットでの事前較正が要る）。
+**DP-9はChoiceとScoreをそれぞれ独立したtyped questionとしてJevへ送る
+（§5のAdapter shape `decide(decision_point_id, state, typed_question,
+confidence_threshold) → { output_kind, value, confidence, below_threshold
+}`が示す通り、typed questionごとに個別の`confidence`が返る）。したがって
+DP-9には単一の「confidence」ではなくChoice呼び出しのconfidence
+（以下`choice_confidence`）とScore呼び出しのconfidence（以下
+`score_confidence`）の2つが独立に存在し、下記の最終決定はこの両方を
+それぞれ閾値`0.7`と比較する（DP-9専用の別閾値は設けず、両方へ同じ`0.7`を
+適用する）。**
 
 **最終決定（final decision）の定義**: §8.1.3のDP-4と同様、
 false-escalation/missed-escalationの各指標は、Jevの生のChoice
-（raw Choice）ではなく、confidence閾値とScoreの両方を適用した後の
-**最終決定**から計算する。**いずれの分岐でも`task-approach-review`
-Finalizeモード自体は省略されない——no-escalate/escalateという2値は、
-Finalizeを経由するか否かではなく、Finalizeへ渡す入力にJevの一次分類を
-添付するか、通常のフォールバックとして渡すかを区別するラベルである。**
-以下の3条件をすべて満たす場合に限り、最終決定を「no-escalate
+（raw Choice）ではなく、`choice_confidence`・`score_confidence`・Scoreの
+3つすべてを適用した後の**最終決定**から計算する。**いずれの分岐でも
+`task-approach-review`Finalizeモード自体は省略されない——no-escalate/
+escalateという2値は、Finalizeを経由するか否かではなく、Finalizeへ渡す
+入力にJevの一次分類を添付するか、通常のフォールバックとして渡すかを
+区別するラベルである。**
+以下の4条件をすべて満たす場合に限り、最終決定を「no-escalate
 （fits-as-isとして高confidence・低摩擦の一次分類を`task-approach-review`
 Finalizeへの入力に添付し、Finalize自体は通常どおり実行する）」とする。
 
 - `choice`が`fits-as-is`である、かつ
-- `confidence`が閾値（`>= 0.7`、上記参照）以上である、かつ
+- `choice_confidence`が閾値（`>= 0.7`、上記参照）以上である、かつ
+- `score_confidence`が閾値（`>= 0.7`、上記参照）以上である、かつ
 - `Score`が最低帯（1日以内相当、ちょうど1日を含む、スケール値2）である
 
 上記いずれか1つでも満たさない場合（`choice`が`needs-split`/
-`needs-more-design`である、`confidence`が閾値（`0.7`）未満である、または
-`Score`がスケール値2以外（`Score != 2`、1日超のすべての帯）である）、最終決定は`task-approach-review`
-Finalizeモードへの**通常の（一次分類を添付しない）フォールバック**
-であり、これを**escalate**として扱う。confidenceのみを見て「フォール
-バックしたかどうか」を判定しない——高confidenceで`fits-as-is`を正しく
-返していても、Scoreがスケール値2以外（`Score != 2`）であれば最終決定はescalateになる。
+`needs-more-design`である、`choice_confidence`が閾値（`0.7`）未満である、
+`score_confidence`が閾値（`0.7`）未満である、または`Score`がスケール値2
+以外（`Score != 2`、1日超のすべての帯）である）、最終決定は
+`task-approach-review`Finalizeモードへの**通常の（一次分類を添付しない）
+フォールバック**であり、これを**escalate**として扱う。**Choiceが
+`fits-as-is`で`choice_confidence`が高くても、`score_confidence`が閾値
+未満であれば最終決定はescalateとする**——Finalizeへ添付する一次分類には
+Score（AI稼働日数の見積もり）自体が含まれる以上、その見積もりの根拠と
+なる`score_confidence`が低いまま一次分類を信頼して添付することは
+できない。いずれか一方のconfidenceだけを見て「フォールバックしたか
+どうか」を判定しない——高い`choice_confidence`で`fits-as-is`を正しく
+返していても、Scoreがスケール値2以外（`Score != 2`）であれば最終決定は
+escalateになる。
 
 **false-escalation / missed-escalation指標の定義**: 上記の最終決定の
 escalation属性を、各実例のground truth（§8.2.2、fits-as-is/
@@ -1343,9 +1392,11 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
 - **false escalation（false positive、過剰escalation）**: 最終決定が
   escalate（task-approach-reviewへ通常のフォールバック）なのに、ground
   truthがfits-as-is（本来単一実行単位として適正）だった場合。
-  confidence不足によるフォールバックだけでなく、Scoreがスケール値2以外
+  `choice_confidence`・`score_confidence`いずれかの不足によるフォールバック
+  だけでなく、Scoreがスケール値2以外
   （`Score != 2`）と判定されたことによるフォールバックも含む——検証済みのfits-as-is
-  実例に対して高confidenceで`fits-as-is`を正しく返していても、Scoreが
+  実例に対して高い`choice_confidence`・`score_confidence`の両方で
+  `fits-as-is`を正しく返していても、Scoreが
   スケール値2以外（`Score != 2`）であれば最終決定はescalateとなり、これはfalse
   escalationとしてカウントする（§8.1.3でDP4-07について整理した
   「exact-match成功とescalation属性の一致/不一致は独立した2つの軸」と
@@ -1601,22 +1652,38 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
    と記録する。** 欠落フィールドを歴史的な値として推測・捏造して
    埋めることはT04に許可しない。request schemaを完全に満たす実例が
    1件以上確保でき次第、その実例に限って本項を適用する。
-9. **Reproducibility（同上、request schema完全性の制約を適用）**:
+9. **Reproducibility（同上、request schema完全性の制約を適用。
+   §8.1.4手順6でDP-4向けに定義したthresholded final decisionの安定性
+   確認をDP-9へ適用する）**:
    **§8.0.3で固定したモデルバージョン・サンプリングパラメータの組を
-   明示指定した上で**、同一Task本文を3回送り、Choice/Scoreの一致率を
-   記録する。こちらもground truthに依存しないため主要指標の対象範囲の
+   明示指定した上で**、同一Task本文を3回送り、`choice`/Scoreの生の
+   一致率を記録する。**ただしraw `choice`/Scoreの一致だけでは不十分——
+   §8.2.3の最終決定は`choice`・`choice_confidence`・`score_confidence`・
+   Scoreの4条件すべてに依存するため、3回とも同じ`choice`とScore値が
+   返っても、`choice_confidence`か`score_confidence`のどちらかが閾値
+   `0.7`の両側へまたがれば（例: 0.71/0.69/0.72）、no-escalate（一次分類を
+   Finalizeへ添付）とescalate（通常のフォールバック）の間で実際の挙動が
+   切り替わる。したがって各回について`choice_confidence`・
+   `score_confidence`・Score値をすべて個別に記録した上で、3回それぞれの
+   thresholded final decision（§8.2.3の4条件を適用した後のno-escalate/
+   escalate）を算出し、raw `choice`/Scoreの一致に加えてこの最終決定が
+   3回とも安定していることを再現性の合格条件とする。**こちらも
+   ground truthに依存しないため主要指標の対象範囲の
    制約（step 1〜5）は受けないが、上記step 8と同じ理由により、
    §8.2.3のrequest schemaを完全に満たす実例に限る。**現時点で該当する
    実例は0件であり、「計測不能——request schemaを完全に満たす実例が
    確保できていない」と記録する。** request schemaを完全に満たす実例が
    確保でき次第、その実例に限って本項を適用する。
-10. **False-escalation rate**: §8.2.3で定義した最終決定（Choice・Score・
-   confidence閾値を組み合わせた最終決定）を用いる。主要指標対象
+10. **False-escalation rate**: §8.2.3で定義した最終決定（Choice・
+   `choice_confidence`・`score_confidence`・Scoreの4つを組み合わせた
+   最終決定）を用いる。主要指標対象
    （step 1〜5で検証済み）かつground truthが`fits-as-is`の実例のうち、
-   最終決定がescalate（confidence不足によるフォールバック、または
+   最終決定がescalate（`choice_confidence`不足によるフォールバック、
+   `score_confidence`不足によるフォールバック、または
    Scoreがスケール値2以外（`Score != 2`）と判定されたことによるフォールバックのいずれか）
-   となった件数の割合。raw Choiceのconfidenceだけでは判定しない——
-   高confidenceで正しく`fits-as-is`を返していても、Scoreがスケール値2以外（`Score != 2`）
+   となった件数の割合。raw Choiceの`choice_confidence`だけでは判定しない
+   ——高い`choice_confidence`で正しく`fits-as-is`を返していても、
+   `score_confidence`が閾値未満であるか、Scoreがスケール値2以外（`Score != 2`）
    であれば最終決定はescalateであり、これもfalse escalationに数える。
    **現時点でstep 1〜5のいずれの前提確認も完了しておらず、無条件で
    検証済みの実例は0件である。ground truthが`fits-as-is`の検証済み
@@ -1871,7 +1938,14 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
    duplicate=Yes/No双方の検証済み実例が揃ってから本格的なcalibration
    評価を行う。
 5. **Latency/Cost/Reproducibility**: §8.1.4・§8.2.4と同じ方法で記録
-   するが、**DP10-01・DP10-05は、いかなる形であってもこの計測（および
+   する。**Reproducibilityについては、§8.1.4手順6が定義した
+   thresholded final decisionの安定性確認をDP-10にも適用する——DP-10の
+   最終決定は`yes確率 >= 0.7`（§8.3.3）の直接thresholdingであり、
+   3回の送信で`yes確率`が0.71/0.69/0.72のように閾値の両側へまたがれば
+   duplicate=Yes/Noの最終決定が切り替わる。各回の`yes確率`を個別に
+   記録した上で、`yes確率`の生の値だけでなくduplicate=Yes/Noの最終決定が
+   3回とも安定していることを再現性の合格条件とする。**
+   ただし、**DP10-01・DP10-05は、いかなる形であってもこの計測（および
    他のいかなるJevライブ呼び出し）の対象にしない。** 独立性（ground
    truthの正誤やpopulation適合と無関係であること）は、§8.3.3の
    request schemaが要求する必須フィールドを省略してよい理由には
