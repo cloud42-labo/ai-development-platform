@@ -555,9 +555,20 @@ Notion/GitHubコンテンツ）が含まれるため、この6問はT04がJevへ
    認証情報等は含まれていないことを送信直前に再確認する。
 3. **Source**（§3/§6-3）: Jev自体は`ADP-065-T01`で確認済みの
    TypeSafe AI公式ホスト型APIであり、送信先自体の正当性は既に確認済み。
-4. **Budget**（§3/§6-4）: 本節が列挙するfixture件数（DP-4は10件、DP-9は
-   10件、DP-10は5件、または§8.4のギャップ解消後に拡充された件数）を
-   超える追加送信は、そのつど別途スコープを定義しない限り行わない。
+4. **Budget**（§3/§6-4）: 予算は**fixture件数そのものではなく、実際に
+   送信されるAPIリクエスト総数**で定義する。§8.1.4/§8.2.4/§8.3.4の
+   Reproducibility手順は各fixtureを**3回追加**で送るため（同一inputに
+   つき初回1回＋再現性確認3回＝計4回）、総リクエスト数はfixture件数の
+   単純合計ではない。現在の件数（DP-4は10件、DP-9は10件、DP-10は5件、
+   合計25件）で計算すると、初回分25回＋Reproducibility分`25×3=75`回で
+   **最低100回**（さらにネットワーク/レート制限起因の再試行を見込むと
+   これを上回る）。**「25件」を予算の上限だと誤解してはならない——
+   T04は実行直前に、その時点のfixture件数・再送回数・想定リトライ数
+   から総リクエスト数を計算し直し、その数値をNotion Task
+   （`ADP-065-T04`）へ明記した上で送信を開始する。** §8.4のギャップ
+   解消でfixture件数が変わった場合も同様に再計算する。この総数を
+   超える追加送信（新規fixtureの追加や再々試行を含む）は、そのつど
+   別途スコープを定義しない限り行わない。
 5. **Billing**（§5/§6-5、`AGENTS.md`「Change rules」の
    メーター課金/pay-as-you-go経路への無断切替禁止）: Jevは
    `$0.042/MTok`のメーター課金API（本書冒頭recap）であり、事前の
@@ -565,9 +576,19 @@ Notion/GitHubコンテンツ）が含まれるため、この6問はT04がJevへ
    Approach Decision承認は設計・調査の承認であり、課金を伴うライブ
    呼び出しそのものの承認ではない。T04実行前に、このPoCでの課金経路
    使用についてOwnerの承認を個別に得て記録すること。
-6. **Write authority**（§4/§6-6）: Jev呼び出しは読み取り専用の分類
-   リクエストであり、外部への書き込み・送信・投稿ではないため
-   該当しない（記録のみ要）。
+6. **Write authority**（§4/§6-6）: **該当する——Jev呼び出しは
+   `api.typesafe.ai`という外部サービスへNotion Task本文・journal引用・
+   governance文書引用を含むデータを送信する行為であり、Jevの状態を
+   変更しない・分類結果しか返さないとしても、それ自体が外部への
+   `send`（書き込み/送信/投稿と同じ扱い）である。** 「読み取り専用の
+   分類だから書き込み権限は不要」という判定は誤りであり、この6問に
+   「該当しない」と答えて送信前確認をスキップする根拠にしない。
+   T04は最初のライブ送信の直前に、(a) 送信対象のTask
+   （`ADP-065-T04`）自身がこの外部送信を明示的に許可していること、
+   (b) 実行するactor（Claude等）がこの送信を行う権限を持つこと、を
+   個別に確認し、根拠となるTask/Approach Decisionの参照とともに
+   Notion Task（`ADP-065-T04`）の`Approach Decision`または`Result`へ
+   記録すること。
 
 #### 8.0.2 confidence/probability threshold の運用規約（DP-4/DP-9/DP-10共通）
 
@@ -594,6 +615,32 @@ confidence/probability threshold を使う。この閾値の決め方を1箇所�
 - 出典: DP-10の`yes確率 >= 0.7`（§8.3.3、前回修正で先行して確立済み）
   が最初にこの規約を確立し、本節はDP-4（§8.1.3/§8.1.4手順1）・DP-9
   （§8.2.3）へ同じ規約を適用する。
+
+#### 8.0.3 モデルバージョン・サンプリングパラメータの固定（DP-4/DP-9/DP-10共通）
+
+本文書冒頭の recap（§1）が明記する通り、Jevには**固定バージョン
+`jev-1.13.0`**と、**最新版へ自動追従するエイリアス`jev-latest`**が
+別々に存在する。§8.1.4/§8.2.4/§8.3.4のReproducibility手順（同一inputを
+複数回送り、出力が決定的かを確認する）は、呼び出しごとにモデル実体が
+変わらないことが前提であり、`jev-latest`を使うと将来Jev側がモデルを
+更新した時点で、過去の実行結果と将来の再実行結果が別モデルの出力に
+なり比較不能になる。したがって：
+
+- T04は**`jev-latest`ではなく固定バージョン識別子（現時点では
+  `jev-1.13.0`）を明示的に指定して**すべてのリクエストを送る。
+  リクエスト・レスポンスのログにこの固定バージョン識別子を毎回記録する。
+- Jevが公開しているすべてのサンプリングパラメータ（`ADP-065-T01`の
+  Notion記録が定義する現行の正式な一覧に従う。例: temperature・top_p・
+  seed等、公式SDKが露出するもの全て）についても、「デフォルト値/未指定」
+  のまま呼ばないこと。DP-4/DP-9/DP-10すべてのリクエストで**同一の
+  事前宣言済みパラメータ値の組**を固定して使用し、その値の組を
+  §8.1.3/§8.2.3/§8.3.3のリクエストログおよびNotion Task
+  （`ADP-065-T04`）の`Result`へ記録する。
+- モデル識別子またはサンプリングパラメータのいずれかを変更した場合、
+  それ以前の実行結果（Accuracy/Calibration/Reproducibility等すべての
+  指標）とは単純比較できないものとして扱い、新しいモデル/パラメータの
+  組ごとに指標を再計測する。変更履歴（旧値→新値、変更理由、変更日）を
+  Notion Task（`ADP-065-T04`）の`Result`へ残す。
 
 ### 8.1 DP-4 — ポリシーカテゴリ分類（Choice型）
 
@@ -859,20 +906,39 @@ no-escalateであれば最終決定との不一致によりfalse escalationと�
    丸めない。AccuracyとAgreementは常に並記し、後者を前者の分母・分子へ
    合算しない（`Agreement rate ≠ Accuracy`であり、両者は別の質問に
    答える指標である）。
-3. **Calibration**: confidenceと実際の正誤（step 2）をbin化し、
-   reliability diagram（confidence 0.1刻み）を作成。過信（高confidence
-   なのに誤り）が境界4件に集中していないか確認する。
+3. **Calibration**: **客観6件（DP4-01, 02, 03, 05, 06, 10）のみを対象に
+   算出する。** confidenceと実際の正誤（step 2のAccuracy判定、この6件
+   についてのみ「正解/不正解」という客観的な正誤が存在する）をbin化し、
+   reliability diagram（confidence 0.1刻み）を作成する。**曖昧境界4件
+   （DP4-04, 07, 08, 09）はground truthが「現行運用解釈」であり客観的な
+   正誤ラベルではないため、この6件のreliability diagramには一切混ぜない
+   （step 2のAccuracy除外と同じ扱い）。** 曖昧境界4件のconfidenceは、
+   reliability diagramとは別に、Agreement（現行運用解釈との一致/相違、
+   step 2で定性記述）と併記する形で個別に報告する——過信（高confidence
+   なのに現行運用解釈と相違）が境界4件に集中していないかは、この別掲の
+   confidence記録を見て確認する。
 4. **Latency**: 10件個別呼び出しのwall-clock時間をp50/p95で記録。
 5. **Cost**: 実際のinput tokens（state+question長）×$0.042/MTokを
    10件合計・1件平均で記録（outputは無料）。
-6. **Reproducibility**: 同一inputを3回連続で送り、`choice`が3回とも
-   一致するか（決定的か）を確認。不一致がある場合はseed/temperature等
-   Jev側の非決定性要因を記録する。
+6. **Reproducibility**: **§8.0.3で固定したモデルバージョン
+   （`jev-latest`ではなく固定版識別子）とサンプリングパラメータの組を
+   毎回のリクエストへ明示指定した上で**、同一inputを3回連続で送り、
+   `choice`が3回とも一致するか（決定的か）を確認する。不一致がある
+   場合はseed等Jev側の非決定性要因を記録する（temperatureは§8.0.3で
+   固定済みの値を使うため、ここでの変動要因ではない）。
 7. **Missed-escalation rate**: §8.1.3の「false-escalation /
    missed-escalation指標の定義」に従い、最終決定（confidence閾値・
    フォールバック適用後）のescalation属性がno-escalateなのに、期待
    escalation属性がescalateだった件数の割合（本来ゲートすべきだったのに
-   素通りさせた、安全上見逃してはならない誤り）。この指標はDP-9側の
+   素通りさせた、安全上見逃してはならない誤り）。**分母は「検証済みの
+   expected-escalate実例数」（曖昧境界4件を除く客観6件のうち、期待
+   escalation属性がescalateの実例、§8.1.2のground truthから決定論的に
+   導かれる）とし、分子はそのうち最終決定がno-escalateだった件数とする
+   （`missed-escalation rate = 見逃し件数 / 検証済みexpected-escalate件数`）。**
+   曖昧境界4件（DP4-04, 07, 08, 09）はこの分母・分子のいずれにも含めない
+   ——step 3のCalibration除外と同じ理由（ground truthが客観的な正解では
+   なく現行運用解釈であるため）。曖昧境界4件についてのescalation属性の
+   一致/相違は、Agreement（定性記述）側で別途言及する。この指標はDP-9側の
    同名指標（実際にsplit/escalateが必要な案件を見逃す方）と同じ向きで
    定義しており、安全ゲートとしてはこのレートが0であることを確認する
    ことが最重要。
@@ -880,8 +946,14 @@ no-escalateであれば最終決定との不一致によりfalse escalationと�
    escalateなのに、期待escalation属性がno-escalateだった件数の割合
    （本来不要なゲートを発生させた誤り、false positiveに相当。低
    confidenceでのフォールバックによる過剰escalateもここに含まれる）。
-   DP-5の「approve ≠ Human」誤読（DP4-04のような境界例でescalation属性
-   の解釈を誤るケース）が実際に発生するかは特に注視する。この指標が
+   **分母は「検証済みのexpected-no-escalate実例数」（曖昧境界4件を除く
+   客観6件のうち、期待escalation属性がno-escalateの実例）とし、分子は
+   そのうち最終決定がescalateだった件数とする
+   （`false-escalation rate = 過剰escalate件数 / 検証済みexpected-no-escalate件数`）。**
+   曖昧境界4件はここでも分母・分子から除外し、Agreement側で別途扱う
+   （step 7と同じ方針）。DP-5の「approve ≠ Human」誤読（DP4-04のような
+   境界例でescalation属性の解釈を誤るケース）が実際に発生するかは、この
+   数値指標とは別に、Agreementの定性記述側で特に注視する。この指標が
    悪化する場合、Jevの出力をAdapterインタフェース（§5）でさらに制約する
    必要がある。
 
@@ -899,6 +971,23 @@ no-escalateであれば最終決定との不一致によりfalse escalationと�
 と、(b) **Outcome / ground truth label**（採点にのみ使う、着手後に判明した
 結果）を明確に分離して記録する。§8.2.2でground truthとしてのみ使う情報を、
 本節のPre-execution inputへ混入させない。
+
+**Pre-execution inputはTask本文・ACだけでなく、§8.2.3のrequest schemaが
+要求する状態フィールド全て（`task_title`, `task_description`,
+`dependency_count`, `prior_review_rounds_if_reattempt`,
+`similar_task_split_history`）を含む。** このうち`dependency_count`と
+`similar_task_split_history`も着手前の時点の値として個別に凍結する
+必要があり、後から（別のレビューラウンドを経た後や、他の類似Taskが
+追加分割された後）に観測した値を使ってはならない。特に
+`prior_review_rounds_if_reattempt`は、DP9-01/02のように結果そのもの
+（34/9ラウンド、5-round hard cap到達）がこの数値と直結しうるため、
+モデル入力へground truthを直接埋め込む経路になりやすい——初回試行の
+fixtureでは`0`固定、再試行fixtureでは「この試行を開始する直前の時点」
+までのラウンド数のみを使い、最終的な到達ラウンド数（結果情報）を
+決して使わない。**5つの状態フィールドのいずれか1つでも着手前の値として
+凍結・検証できない場合、そのfixtureはTask本文・ACが未確認の場合と同じ
+「未確認——除外対象」として扱い、主要指標へ admit しない**（Task本文・
+ACだけを確認して残り3フィールドを未検証のまま admit してはならない）。
 
 | # | Pre-execution input（着手前に分かっていた情報のみ） | 出典 |
 |---|---|---|
@@ -950,7 +1039,8 @@ Task本文・ACの一部であり、モデル入力と同じ情報をground trut
 使う循環参照になっている。加えて本文は「着手自体は…日次自律実行では
 見送られた」と明記しており、実際にこのTaskが実行され1日以内に完了した
 という独立した観測（実測所要時間、Task Time EventsのStarted At/
-Completed At等）は存在しない。したがって、モデルが入力に含まれる
+Ended At等。Task自体の完了時刻である`Completed At`とは別概念であり
+混同しない）は存在しない。したがって、モデルが入力に含まれる
 見積もりをそのまま繰り返すだけで「正解」と判定されてしまう構造を
 避けるため、**独立した実行完了エビデンスが別途確認されるまで、DP9-03を
 DP9-01/02/04/05〜10と同じ「主要指標から除外」の扱いとする**（詳細は
@@ -972,9 +1062,10 @@ mergeが同一暦日でも、着手（実質的な設計・調査の開始）か
 までに複数日を要していた可能性をこの区間だけでは排除できない。
 **この代理指標単独では`fits-as-is`ラベルを主要指標へ admitする根拠として
 十分ではない。** 真に必要なのはTask全体のライフサイクル（着手〜完了）を
-カバーするエビデンス、すなわちNotion Task Time Events（`Started At`→
-`Completed At`）である。本セッションはGitHub MCPツールのみに限定されて
-おり、これを取得できない。
+カバーするエビデンス、すなわちNotion Task Time Eventsの`Started At`→
+`Ended At`である（イベントは`Ended At`で閉じる。Task自体の完了時刻
+`Completed At`は別のフィールドであり、TTEの終了時刻の代わりに使わない）。
+本セッションはGitHub MCPツールのみに限定されており、これを取得できない。
 
 | # | 部分的代理指標（コミット/PRタイムスタンプ、GitHub由来・参考値） | 判定 |
 |---|---|---|
@@ -987,7 +1078,7 @@ mergeが同一暦日でも、着手（実質的な設計・調査の開始）か
 
 **確定した方針**: DP9-05〜10は、commit→merge区間が暦日をまたがない
 ことが確認できた場合でも、それだけを理由に主要指標へ admitしない。
-Notion Task Time Events（`Started At`/`Completed At`）による
+Notion Task Time Eventsの`Started At`/`Ended At`による
 ライフサイクル全体（着手〜完了）のエビデンスが、Notionアクセスを持つ
 セッションによって確認されるまで、DP9-05〜10はDP9-01/02/03/04と同じく
 主要指標のいずれからも除外されたままとする（詳細な手順は下記
@@ -1029,10 +1120,22 @@ Notion Task Time Events（`Started At`/`Completed At`）による
 1〜2日帯（スコア4）へ繰り上げない——境界は両端を排他的にしない）
 ```
 
-Choiceが`fits-as-is`かつScoreが最低帯（1日以内相当、ちょうど1日を含む）の場合のみ、
-高confidence自動判定の対象とする。`needs-split`/`needs-more-design`、
-またはScoreが2日相当以上の場合は、現行の`task-approach-review`
-Finalizeモードへ必ずフォールバックする（Jevは分割案そのものを生成しない）。
+**`docs/regulations/R06-project-management-regulation.md`が定める通り、
+正式配置されたTaskがReadyになるには階層的refinementと
+`task-approach-review`の両方を必ず経る（本文書DP-9エントリ自身も
+`task-approach-review` Finalizeモードをauthorityとし、Jevをtriageのみと
+位置付けている）。したがって、Jevの判定結果がどうであっても、
+`task-approach-review`のFinalizeモード自体を省略・置換することは
+できない。** Choiceが`fits-as-is`かつScoreが最低帯（1日以内相当、
+ちょうど1日を含む）の場合、Jevの判定は「高confidence・低摩擦」の一次
+分類として`task-approach-review`Finalizeモードへの入力に添付し、
+Finalize自体は通常どおり実行する。`needs-split`/`needs-more-design`、
+またはScoreが2日相当以上の場合は、`task-approach-review`Finalizeモード
+へ一次分類を添付せずに通常どおりフォールバックする（Jevは分割案そのもの
+を生成しない）。**この運用（Jevの判定をFinalizeの入力へ添付するか
+どうか）を、Finalizeそのものを省略する方向へ変更する場合は、governing
+control（R06または`task-approach-review`のSkill定義）を正式に改定した
+上で行う——本書§8だけでこのゲートを弱めることはできない。**
 **この「高confidence」の閾値は§8.0.2の全DP共通規約に従い、評価対象の
 出力を見る前に確定した既定値`confidence >= 0.7`を用いる**（DP-4の
 `confidence >= 0.7`・DP-10の`yes確率 >= 0.7`と同じ規約。T04実行者が
@@ -1042,9 +1145,13 @@ Finalizeモードへ必ずフォールバックする（Jevは分割案そのも
 **最終決定（final decision）の定義**: §8.1.3のDP-4と同様、
 false-escalation/missed-escalationの各指標は、Jevの生のChoice
 （raw Choice）ではなく、confidence閾値とScoreの両方を適用した後の
-**最終決定**から計算する。以下の3条件をすべて満たす場合に限り、
-最終決定を「no-escalate（fits-as-isとして自動承認、
-task-approach-reviewへ回さない）」とする。
+**最終決定**から計算する。**いずれの分岐でも`task-approach-review`
+Finalizeモード自体は省略されない——no-escalate/escalateという2値は、
+Finalizeを経由するか否かではなく、Finalizeへ渡す入力にJevの一次分類を
+添付するか、通常のフォールバックとして渡すかを区別するラベルである。**
+以下の3条件をすべて満たす場合に限り、最終決定を「no-escalate
+（fits-as-isとして高confidence・低摩擦の一次分類を`task-approach-review`
+Finalizeへの入力に添付し、Finalize自体は通常どおり実行する）」とする。
 
 - `choice`が`fits-as-is`である、かつ
 - `confidence`が閾値（`>= 0.7`、上記参照）以上である、かつ
@@ -1052,23 +1159,28 @@ task-approach-reviewへ回さない）」とする。
 
 上記いずれか1つでも満たさない場合（`choice`が`needs-split`/
 `needs-more-design`である、`confidence`が閾値（`0.7`）未満である、または
-`Score`が2日相当以上である）、最終決定は現行の
-`task-approach-review`Finalizeモードへのフォールバックであり、
-これを**escalate**として扱う。confidenceのみを見て「フォールバック
-したかどうか」を判定しない——高confidenceで`fits-as-is`を正しく
+`Score`が2日相当以上である）、最終決定は`task-approach-review`
+Finalizeモードへの**通常の（一次分類を添付しない）フォールバック**
+であり、これを**escalate**として扱う。confidenceのみを見て「フォール
+バックしたかどうか」を判定しない——高confidenceで`fits-as-is`を正しく
 返していても、Scoreが2日相当以上であれば最終決定はescalateになる。
 
 **false-escalation / missed-escalation指標の定義**: 上記の最終決定の
 escalation属性を、各実例のground truth（§8.2.2、fits-as-is/
 needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済みの
-実例のみを母数とする）と比較する。
+実例のみを母数とする）と比較する。**ここでの「escalation属性」は
+`task-approach-review`を経由するか否かの指標ではなく（Finalizeは
+常に経由する）、Finalizeへの入力にJevの高confidence一次分類を添付する
+（no-escalate）か、通常のフォールバックとして渡す（escalate）かの区別
+である。**
 
 - **missed escalation（false negative、見逃し）**: 最終決定が
-  no-escalate（fits-as-is自動承認）なのに、ground truthが
-  needs-split（本来分割が必要）だった場合。自動承認したことで本来
-  必要な分割・レビューが素通りした、安全上見逃してはならない誤り。
+  no-escalate（fits-as-isとしてJevの一次分類を添付）なのに、ground
+  truthがneeds-split（本来分割が必要）だった場合。`task-approach-review`
+  自体は実行されるが、Jevの一次分類がレビュー担当（Human/AI）を誤った
+  方向へ誘導しうる、注視すべき誤り。
 - **false escalation（false positive、過剰escalation）**: 最終決定が
-  escalate（task-approach-reviewへフォールバック）なのに、ground
+  escalate（task-approach-reviewへ通常のフォールバック）なのに、ground
   truthがfits-as-is（本来単一実行単位として適正）だった場合。
   confidence不足によるフォールバックだけでなく、Scoreが2日相当以上と
   判定されたことによるフォールバックも含む——検証済みのfits-as-is
@@ -1082,8 +1194,13 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
 
 1. **主要指標の対象範囲の確定（最初に行う）**: 見出しとなる主要指標
    （Accuracy／Agreement／Calibration／False-escalation rate／
-   Missed-escalation rate、以下すべて）は、**Pre-execution inputと
-   ground truthの両方が検証済みの実例に限って計算する**。false-escalation
+   Missed-escalation rate、以下すべて）は、**Pre-execution input
+   （§8.2.1追記の通り、`task_title`/`task_description`だけでなく
+   `dependency_count`/`prior_review_rounds_if_reattempt`/
+   `similar_task_split_history`を含む5フィールド全て）とground truthの
+   両方が検証済みの実例に限って計算する**。Task本文・ACのみを確認し、
+   残り3フィールドの凍結確認を省略して admit することは禁止する。
+   false-escalation
    rateだけを限定するのではなく、10件中どの実例が主要指標に入るかを
    ここで先に確定させる。**現時点で無条件に検証済みの実例は0件である。**
    当初DP9-03・DP9-04の2件を無条件検証済みとしていたが、DP9-03のground
@@ -1142,7 +1259,7 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
    行われた設計・調査・方針検討の時間を一切捕捉できない。したがって
    **この区間が暦日をまたがないことを確認できても、それだけを根拠に
    DP9-05〜10を主要指標へadmitしてはならない。** 主要指標へ入れるには、
-   Notion Task Time Events（`Started At`/`Completed At`）によるTask
+   Notion Task Time Eventsの`Started At`/`Ended At`によるTask
    ライフサイクル全体（着手〜完了）のエビデンスを、Notionアクセスを
    持つセッションが確認する必要がある。**T04を実際に走らせる前に、
    この独立エビデンスを取得すること。取得できない限り、DP9-05〜10は
@@ -1168,8 +1285,10 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
    検証未了の実例を含む10件全件で計測してよい（Latency/Costは
    ground truthの正誤に依存しないため主要指標の対象範囲の制約を
    受けない）。
-8. **Reproducibility**: 同一Task本文を3回送り、Choice/Scoreの一致率を
-   記録。こちらもground truthに依存しないため10件全件で行ってよい。
+8. **Reproducibility**: **§8.0.3で固定したモデルバージョン・
+   サンプリングパラメータの組を明示指定した上で**、同一Task本文を3回
+   送り、Choice/Scoreの一致率を記録。こちらもground truthに依存しない
+   ため10件全件で行ってよい。
 9. **False-escalation rate**: §8.2.3で定義した最終決定（Choice・Score・
    confidence閾値を組み合わせた最終決定）を用いる。主要指標対象
    （step 1〜5で検証済み）かつground truthが`fits-as-is`の実例のうち、
@@ -1188,7 +1307,8 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
 10. **Missed-escalation rate**: 同じく§8.2.3の最終決定を用いる。主要
    指標対象（step 1〜5で検証済み）かつground truthが`needs-split`
    （DP9-01, 02, 04のうち検証済みの実例に限る）のうち、最終決定が
-   no-escalate（fits-as-is自動承認）となった件数の割合。**現時点で
+   no-escalate（fits-as-isとしてJevの一次分類を添付、Finalize自体は
+   実行される）となった件数の割合。**現時点で
    DP9-01/02/04のいずれもpre-execution inputが未確認のため、検証済み
    実例は0件であり、この指標の分母も0であり計算不能。**「検証待ちの
    ため計測不能——検証済みの`needs-split`実例が0件」と明記すること。
@@ -1244,6 +1364,17 @@ GitHub側の記録として確定していない（Notion `Approach Decision`側
 要旨・リンクではなく、判定時点で存在した原文をそのまま埋め込む
 （本文・PR本文とも編集可能な外部状態であり、リンク＋要旨では取得時点の
 本文が後から変わっても本節が追随できないため）。**
+
+**§8.3.3が要求する`candidate_existing_task_status`も、`new_item_text`・
+`candidate_existing_task_text`と同じPre-decision inputの一部として
+凍結する。** 比較対象の既存Taskの状態を、取得時点（現在のライブな
+`Ready`/`In Progress`/`Done`等）ではなく、**判定が行われた時点で
+実際にその値だった状態**として記録する——duplicate判定後に対象Taskが
+`Done`や`Superseded`に遷移していた場合、現在の状態を使うとその遷移
+自体がground truth（duplicate=Yesであったこと等）を暗示してしまい、
+モデル入力へ結果情報が漏れる。この状態が判定時点の値として凍結・確認
+できない実例は、テキスト2種と同様に「未確認——除外対象」とし、
+主要指標へ admit しない（§8.3.4 step 1の検証項目に含める）。
 
 | # | Pre-decision input: `new_item_text`（新規アイテム、判定前のテキスト） | Pre-decision input: `candidate_existing_task_text`（比較対象、判定前の既存状態） | 出典 |
 |---|---|---|---|
@@ -1311,9 +1442,10 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
 
 1. **主要指標の対象範囲の確定（最初に行う）**: §8.2.4のDP-9と同様、
    主要指標（Accuracy／Agreement／Calibration／False-escalation rate／
-   Missed-escalation rate）は、Pre-decision input（`new_item_text`と
-   `candidate_existing_task_text`の両方）とOutcome/ground truthの両方が
-   検証済みで、かつ**DP-10本来の母集団（新規MISC/Backlogアイテム 対
+   Missed-escalation rate）は、Pre-decision input（`new_item_text`・
+   `candidate_existing_task_text`・**判定時点の値として凍結された
+   `candidate_existing_task_status`の3つ全て**）とOutcome/ground truthの
+   両方が検証済みで、かつ**DP-10本来の母集団（新規MISC/Backlogアイテム 対
    既存Open Task）に属する**実例に限って計算する。**現時点で主要指標に
    無条件で使える実例は0件である。** 当初DP10-01・DP10-05の2件を
    無条件検証済みとしていたが、両者はいずれもGitHub成果物同士
@@ -1344,9 +1476,10 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
    duplicate=Yes/No双方の検証済み実例が揃ってから本格的なcalibration
    評価を行う。
 5. **Latency/Cost/Reproducibility**: §8.1.4・§8.2.4と同じ方法で記録。
-   これらはground truthの正誤にもpopulation適合にも依存しないため、
-   5件全件（参考実例含む）で計測してよい（主要指標の対象範囲の制約を
-   受けない）。
+   Reproducibilityは**§8.0.3で固定したモデルバージョン・サンプリング
+   パラメータの組を明示指定した上で**行う。これらはground truthの正誤
+   にもpopulation適合にも依存しないため、5件全件（参考実例含む）で
+   計測してよい（主要指標の対象範囲の制約を受けない）。
 6. **False-escalation rate**: 主要指標対象（duplicateでない、母集団に
    合致する検証済み実例）が現時点で0件のため、分母は0であり計算不能。
    この状態をそのまま「0%」と報告せず、「検証待ちのため計測不能——
@@ -1395,8 +1528,9 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
     前の設計・調査時間をこの区間は捕捉できないため、「commit→merge区間
     が暦日をまたがない」ことが確認できても、それだけでは1 AI稼働日に
     収まったことの証明にならない。真に必要なのはTaskライフサイクル
-    全体（着手〜完了）をカバーするNotion Task Time Events（Started At/
-    Completed At）であり、これはGitHub専用の本セッションでは取得できて
+    全体（着手〜完了）をカバーするNotion Task Time Eventsの
+    Started At/Ended At（Taskの`Completed At`とは別概念）であり、
+    これはGitHub専用の本セッションでは取得できて
     いない。したがってDP9-05〜10は、commit/PRタイムスタンプの実測
     有無に関わらず、Notion Task Time Eventsによる確認が取れるまで主要
     指標から除外されたままとする。
