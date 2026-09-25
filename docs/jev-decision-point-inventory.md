@@ -1,4 +1,3 @@
-
 Date: 2026-09-24 (JST)
 Status: Decision-support report (`ADP-065-T02`)
 Scope: Inventory ADP's recurring Decision Points across Human Gate logic, Task
@@ -558,18 +557,20 @@ Notion/GitHubコンテンツ）が含まれるため、この6問はT04がJevへ
    送信されるAPIリクエスト総数**で定義する。§8.1.4/§8.2.4/§8.3.4の
    Reproducibility手順は各fixtureを**3回追加**で送るため（同一inputに
    つき初回1回＋再現性確認3回＝計4回）、総リクエスト数はfixture件数の
-   単純合計ではない。現在の件数（DP-4は7件（旧DP4-04・旧DP4-05・旧DP4-06を
-   非公開情報のため削除済み、§8.1.1参照）、DP-9は10件、DP-10は本書
-   収録2件（非公開のため3件削除、§8.3.1参照）、合計19件）で計算すると、
-   初回分19回＋Reproducibility分`19×3=57`回で
-   **最低76回**（さらにネットワーク/レート制限起因の再試行を見込むと
-   これを上回る）。**「19件」を予算の上限だと誤解してはならない——
+   単純合計ではない。現在、実際にJevへ送信可能な件数はDP-4が7件
+   （3件を非公開情報のため削除済み、§8.1.1参照）、DP-9が10件、
+   **DP-10は0件**（本書収録の2件はいずれも§8.3.3のrequest schemaへ
+   直列化できず送信対象外——§8.3.4 step 5参照）、合計**17件**である。
+   これで計算すると、初回分17回＋Reproducibility分`17×3=51`回で
+   **最低68回**（さらにネットワーク/レート制限起因の再試行を見込むと
+   これを上回る）。**この件数を予算の上限だと誤解してはならない——
    T04は実行直前に、その時点のfixture件数・再送回数・想定リトライ数
    から総リクエスト数を計算し直し、その数値をNotion Task
    （`ADP-065-T04`）へ明記した上で送信を開始する。** §8.4のギャップ
-   解消でfixture件数が変わった場合も同様に再計算する。この総数を
-   超える追加送信（新規fixtureの追加や再々試行を含む）は、そのつど
-   別途スコープを定義しない限り行わない。
+   解消でfixture件数が変わった場合、またはDP-10側でrequest schemaを
+   完全に満たす新規fixtureが確保できた場合も同様に再計算する。この
+   総数を超える追加送信（新規fixtureの追加や再々試行を含む）は、
+   そのつど別途スコープを定義しない限り行わない。
 5. **Billing**（§5/§6-5、`AGENTS.md`「Change rules」の
    メーター課金/pay-as-you-go経路への無断切替禁止）: Jevは
    `$0.042/MTok`のメーター課金API（本書冒頭recap）であり、事前の
@@ -591,94 +592,36 @@ Notion/GitHubコンテンツ）が含まれるため、この6問はT04がJevへ
    Notion Task（`ADP-065-T04`）の`Approach Decision`または`Result`へ
    記録すること。
 
-**この文書自体への非公開コンテンツ混入監査（今回のCodex指摘への対応として
-実施）**: 上記6問はJevへの将来のライブ送信を対象とするが、それとは別に、
-**この文書自体を`cloud42-labo/ai-development-platform`へコミットする行為**
-にも`AGENTS.md`「Change rules」（`AGENTS.md:L31-L34`、特にL33「Never commit
-secrets, credentials, tokens, private personal data, company-confidential
-information, or material that is not intended to be public」）が適用される。
-このルールはリポジトリのvisibilityで免除されない——そして
-`cloud42-labo/ai-development-platform`は実際に**Public**リポジトリである
-（`private`ではなく組織内限定でもない）ことを本節の作成時に確認した。
-一方`cloud42-labo/brain`は**Private**リポジトリであり、本書がfixtureの
-出典として引用する journal/notes の実体はそちらにある。
-したがって「非公開」とは「このリポジトリの外へ出す前に注意が要る」ではなく、
-**この文書へ逐語転記した時点で既に非公開情報が公開されている**ことを意味する。
-この監査で、§8.3（DP-10）のfixtureに、非公開の`brain`journal/notesから
-「」で囲った逐語引用が複数箇所（DP10-02・DP10-03・DP10-05の判定根拠、
-および§8.3.1冒頭の追加探索段落）に残っていたことを確認し、該当箇所を
-出典参照は保持したまま趣旨の言い換えへ置き換え、逐語引用を削除した
-（詳細は各該当行の編集）。`experimental`リポジトリのPR本文（PR #90・
-PR #73、DP10-01・DP10-05のinput側）は同リポジトリが現在Publicであるため
-対象外とした（決定は`decisions/0023-experimental-repo-made-public.md`）。
-`governance/`配下の文書（`AGENTS.md`・`agent-policy.yaml`・
-`review-loop-control.md`等）からの引用も、それ自体がこの同じPublic
-リポジトリの既存ファイルであるため対象外。
+**この文書自体への非公開コンテンツ混入監査**（複数回のCodexレビューを
+通じて累積的に実施）: 上記6問はJevへの将来のライブ送信を対象とするが、
+それとは別に、**この文書自体を`cloud42-labo/ai-development-platform`へ
+コミットする行為**にも`AGENTS.md`「Change rules」（`AGENTS.md:L31-L34`、
+特にL33「Never commit secrets, credentials, tokens, private personal
+data, company-confidential information, or material that is not
+intended to be public」）が適用される。このルールはリポジトリの
+visibilityで免除されない——`cloud42-labo/ai-development-platform`は
+実際に**Public**リポジトリであり、一方`cloud42-labo/brain`は
+**Private**リポジトリである。本書がfixtureの出典として参照する
+journal/notesの実体はそちらにある。したがって「非公開」とは「この
+リポジトリの外へ出す前に注意が要る」ではなく、**この文書へ転記した
+時点で既に非公開情報が公開されている**ことを意味する。
 
-**追記（本コミットでの再修正、Codexフォローアップ指摘への対応）**:
-上記の初回対応（コミット`9bd0981`）は、逐語引用を趣旨の言い換えへ
-置き換えることで完了したと判断していたが、これは不十分だった——
-private-workspaceの決定内容・Task詳細を**言い換えて要約すること自体が、
-逐語引用と同じく非公開情報の公開**であり、表現形式（逐語か言い換えか）
-の違いは公開可否の判断に影響しない。この指摘を受け、§8.3（DP-10）の
-該当箇所（DP10-02〜05のPre-decision input／Ground truthの根拠列、
-および§8.3.1冒頭・§8.4末尾の追加探索段落）から、言い換え要約も
-含めて非公開`brain`content由来の記述を**削除**し（言い換えではなく
-削除）、出典（リポジトリ名・ファイルパス・日付）の参照と、brainアクセス
-を持つセッションでの確認が必要である旨の明記のみを残した。§8.1
-（DP-4）・§8.2（DP-9）についても同じ観点で再点検したが、各fixtureの
-Ground truth・根拠は`agent-policy.yaml`・GitHub PR/レビュー履歴・branch
-一覧等、`cloud42-labo/ai-development-platform`のPublicな情報から導出
-されており、journal/notesの引用は出典の裏付けとして併記されているのみで、
-非公開content自体の言い換え要約には該当しないことを確認した（DP-4・DP-9
-側の追加削除は不要と判断）。
+複数回のレビューを経て、§8.1（DP-4）・§8.3（DP-10）の一部fixtureに
+ついて、(a) 逐語引用、(b) 内容の言い換え要約、(c) 判定結果・ラベル
+そのもの、のいずれの形であっても、出典が非公開`brain`content
+（またはPrivateリポジトリ）のみであり独立した公開裏付けを持たない
+場合は非公開情報の公開に当たることを確認した。この基準に該当した
+行は、言い換えや部分修正ではなく、**出典・識別情報を含めて表から
+行ごと完全に削除**した。削除した具体的な件数・番号と、削除しなかった
+残りの行の公開裏付けの確認方法は§8.1.1末尾（DP-4）・§8.3.1末尾
+（DP-10）の注記を参照——この節では削除した内容そのものを繰り返さない。
+§8.2（DP-9）についても同じ基準で再点検したが、非公開ソースのみに
+依拠する行は見つからなかった。
 
-**追記2（本コミットでの第3回修正、Codexフォローアップ指摘への対応）**:
-上記2回目の対応（言い換え要約の削除）は、説明文・根拠の記述は本書から
-除いたが、**判定結果そのもの（duplicate = Yes/Noという値）はPre-decision
-input／Ground truthの両方の表に、DP10-02〜04の3行として引き続き残して
-いた**。これも見落としであった——ある候補ペアが実際に重複と判定された
-か否か（duplicate=Yes/Noというラベル自体）は、非公開`cloud42-labo/brain`
-が記録した個別判断の帰結であり、その値の開示は説明文・根拠を伴わなくても
-非公開情報の公開に当たる。ラベルだけを残す修正では不十分と判断し、
-該当3行（DP10-02〜04）を出典・識別情報も含めて表から**完全に削除**した
-（詳細・削除後の運用は§8.3.1末尾の注記）。DP-4（§8.1）・DP-9（§8.2）に
-ついても同じ観点（ラベルそのものが非公開判断の帰結ではないか）で再点検
-したが、両節のground truthはGitHub側の公開記録（PR/commit/branch状態、
-`agent-policy.yaml`等）から独立に導出されており、非公開`brain`content
-由来のラベルは存在しないことを確認した（DP-4・DP-9側の追加削除は
-不要と判断——2回目の再点検結論を維持）。
-
-**追記3（本コミットでの第4回修正、Codexフォローアップ指摘への対応）**:
-上記の3回にわたる再点検は、いずれも「DP-4/DP-9のground truthの導出元」
-というカテゴリ単位の点検にとどまっており、**DP-4の10行それぞれの
-Pre-decision input（＝どの実例を扱っているか自体）**を1行ずつ検証して
-いなかった。今回、DP4-06（`HUMAN-BUG`のNotion `create_task`）について
-「非公開`brain`journalのみを出典とし、本組織のPublicリポジトリに
-独立した裏付けが無い」との指摘を受け、同じ見落としを繰り返さないため
-DP-4の当時の全10行を1行ずつ、実際に`cloud42-labo`組織のPublicリポジトリ
-（`ai-development-platform`・`experimental`・`serendipity-spot`・
-`kids-oekaki`等）とPrivateリポジトリ（`brain`・`skills`）の両方を
-GitHub APIで検索・突合する形で再監査した。その結果、指摘対象のDP4-06に
-加え、DP4-04（`cloud42-labo/skills`のPR self-merge。`skills`自体が
-Privateリポジトリであり、出典としていた`skills/CLAUDE.md`もPrivate。
-さらに実際のPR本文を確認すると出典としていたTask（`ADP-054-T15`）とは
-別のTaskに対応していたことも判明）・DP4-05（Notion内部操作で、
-GitHub側に一切痕跡を残さずPrivate brainノートのみが出典）の2件も同じ
-基準（非公開ソースにのみ依拠し独立したPublic裏付けが無い）に該当する
-ことを新たに発見した。3回目までの再点検が「カテゴリとしてPublicな
-情報源から導出されている」ことの確認にとどまり、**各行が実際にその
-Publicな情報源だけで再構成できるか**まで1行ずつ検証していなかったことが
-今回の見落としの原因である。DP4-04・DP4-05・DP4-06の3行を出典・識別
-情報も含めて表から完全に削除し（詳細は§8.1.1末尾の注記）、残る7件
-（DP4-01, 02, 03, 07, 08, 09, 10）についても同じ1行ずつの基準で公開
-裏付けを直接確認した上で維持している（§8.1.1末尾の注記に確認方法を
-記録）。DP-9・DP-10についても同様に、Notion Task Time Events確認待ち等
-の別理由で既に主要指標除外済みのDP9-01〜04を除く全フィクスチャと、
-DP-10の残り2件（DP10-01・DP10-05）を1件ずつ同じ基準で再確認したが、
-これらについては新たな非公開ソース単独依存は見つからなかった
-（DP9-05〜10は`ai-development-platform`のPublicなbranch/PRが裏付け、
-DP10-01・DP10-05はGitHub成果物同士の比較でPublicなPR/commitが裏付け）。
+この監査は、部分的な言い換えやラベルの残存が見落とされる形で複数回
+繰り返された。以後、新規・既存フィクスチャを問わず「出典が非公開
+ソースのみか」「判定結果・ラベル自体が非公開の判断の帰結ではないか」を
+1行ずつ検証する運用を維持する。
 
 #### 8.0.2 confidence/probability threshold の運用規約（DP-4/DP-9/DP-10共通）
 
@@ -697,12 +640,12 @@ confidence/probability threshold を使う。この閾値の決め方を1箇所�
   健全性チェック（sanity check）に限る。この観測結果を根拠に閾値の
   数値そのものを選び直してはならない。
 - **変更する場合**: 0.7を変更する必要が生じた場合は、評価対象
-  フィクスチャ（DP-4は7件、DP-9は10件、DP-10は本書収録2件（非公開の
-  ため3件削除、§8.3.1参照）または§8.4のギャップ解消後の拡充セット）
-  とは独立したholdoutキャリブレーションセットを
-  別途用意し、**評価出力を見る前に**そのholdoutでの較正を完了させ、
-  根拠とともに変更後の値を明記すること。T04実行者が自己判断で値を
-  変えてはならない。
+  フィクスチャ（DP-4は7件、DP-9は10件、DP-10は現時点で0件——本書収録
+  2件はいずれもrequest schemaを満たさず送信対象外、§8.3.4 step 5参照
+  ——または§8.4のギャップ解消後の拡充セット）とは独立したholdout
+  キャリブレーションセットを別途用意し、**評価出力を見る前に**その
+  holdoutでの較正を完了させ、根拠とともに変更後の値を明記すること。
+  T04実行者が自己判断で値を変えてはならない。
 - 出典: DP-10の`yes確率 >= 0.7`（§8.3.3、前回修正で先行して確立済み）
   が最初にこの規約を確立し、本節はDP-4（§8.1.3/§8.1.4手順1）・DP-9
   （§8.2.3）へ同じ規約を適用する。
@@ -761,7 +704,7 @@ confidence/probability threshold を使う。この閾値の決め方を1箇所�
 
 ### 8.1 DP-4 — ポリシーカテゴリ分類（Choice型）
 
-#### 8.1.1 評価データセット（実例7件、旧DP4-04・旧DP4-05・旧DP4-06を削除——詳細は本項末尾の注記）
+#### 8.1.1 評価データセット（実例7件、3件を非公開情報のため削除——詳細は本項末尾の注記）
 
 `governance/agent-policy.yaml`の8ルール（`read-connected-resources` /
 `notion-managed-task-update` / `github-working-branch` /
@@ -783,74 +726,29 @@ DP-4は「既存ルールで決定論的に一致しない曖昧な行為」を�
 | DP4-09 | actor=AI提案／Owner決定／service=github（repository settings）／action=visibility変更（Private→Public）／resource=`cloud42-labo/experimental`リポジトリ設定／task_context=`OEK-03-S01-T03`（GitHub Pages公開のため） | `decisions/0023-experimental-repo-made-public.md` |
 | DP4-10 | actor=Claude／service=github pages／action=publish／resource=`cloud42-labo/kids-oekaki` Demo（GitHub Pages公開）等、公開系デプロイ／task_context=`OEK-03-S01-T03` | `decisions/0023-experimental-repo-made-public.md`（Pages公開の経緯として言及） |
 
-**旧DP4-04・旧DP4-05・旧DP4-06の削除（今回のCodex指摘への対応として新設、
-DP4-06の指摘を機にDP-4全10件を1件ずつ再監査した結果）**: 本節は当初、
-以下の3件を含む10件を収録していたが、いずれも「非公開ソースにのみ
-依拠し、独立したPublic裏付けを本組織のPublicリポジトリから見つけられ
-ない」という同一の理由で、行そのものを削除した。
-
-- **旧DP4-06**（`HUMAN-BUG`をBUG Taskから分離作成、`notion-managed-task-update`
-  の`create_task`）: 出典は`cloud42-labo/brain`の journal `2026-09-03.md`
-  のみ。`cloud42-labo/ai-development-platform`・`cloud42-labo/experimental`
-  を含むPublicリポジトリを再検索したが、「`HUMAN-BUG`をBUGから分離作成した」
-  という行為そのものを裏付ける記録は見つからなかった。2026-09の
-  `Task Time Events`不具合一般については`cloud42-labo/ai-organization-design`
-  の記事`articles/009`（note.com公開済み、`published_url`参照）がPublicに
-  言及しているが、これは「9/4にIn Progressのまま複数日残ったBug Taskを
-  4つの独立実行単位へ再分割した」という別の事案であり、`HUMAN-BUG`分離
-  作成の裏付けにはならない。
-- **旧DP4-04**（`cloud42-labo/skills` PR #16, #20のself-merge、
-  task_context=`ADP-054-T15`）: `cloud42-labo/skills`は本セッションが
-  `search_repositories`で確認した通り**Privateリポジトリ**であり、PR #16・
-  #20自体は実在し組織メンバーには参照できる（`merged: true`を確認済み）
-  ものの、一般には非公開でPublicな第三者が独立に検証できない。加えて
-  出典として引用していた`skills/CLAUDE.md`（self-merge例外の記載）も
-  同じPrivateリポジトリの内容であり、Public側の裏付けにならない。さらに
-  今回PR #16・#20の実際の本文を直接確認したところ、それぞれ
-  `ADP-054-T03`（human-gate-preflight Skill追加）・PM-9 Preventive Action
-  （daily-close Skill追加）に対応しており、本節が出典としていた
-  `ADP-054-T15`（`cloud42-labo/brain`の journal・notesが記録する、実際には
-  skills PR #8のマージ例）とは異なるTaskだった。非公開ソースのみに依拠する
-  という問題に加え、引用していたTask紐付け自体も誤りだったため、行として
-  復元せず削除した。
-- **旧DP4-05**（Notion `update_task_status`/`update_task_result`、
-  resource=stories_and_tasks `ADP-054-T15`）: これはGitHub上に痕跡を残さない
-  純粋なNotion内部操作であり、出典は`notes/notion-vibe-product-development.md`
-  （`cloud42-labo/brain`、非公開）のみ。DP4-06と全く同じ構造（非公開の
-  Notion操作を、非公開brainノートだけを頼りに実例化していた）のため、
-  同じ基準で削除する。
-
-3件とも、Pre-decision input／environment・authority note／Ground truthの
-3表から行そのものを完全に削除した（前回までのDP-10（旧DP10-02〜04）と
-同じ基準：ラベルや言い換え要約だけでなく行自体を削除する。
-`AGENTS.md:L31-L34`「Never commit...material that is not intended to be
-public」に抵触するため）。番号`DP4-04`・`DP4-05`・`DP4-06`は
-retired/skippedとして扱い、残る7件（DP4-01, 02, 03, 07, 08, 09, 10）は
-元の番号のまま維持する。DP-4のfixture数は10件から**7件**へ、
-「客観6件」は「客観4件（DP4-01, 02, 03, 10）」へ、「曖昧境界4件」は
-「曖昧境界3件（DP4-07, 08, 09）」へ変更する。§8.0.1のBudget再計算・
+**削除した3件について（複数回のCodexレビューを経て、DP-4全10件を
+1行ずつ再監査した結果）**: 本節は当初10件を収録していたが、うち3件
+（旧DP4-04・旧DP4-05・旧DP4-06）は、出典が非公開`cloud42-labo/brain`
+content（またはPrivateリポジトリ）のみであり、独立した公開裏付けを
+本組織のPublicリポジトリから見つけられないと判明したため、
+Pre-decision input／environment・authority note／Ground truthの3表から
+出典・識別情報を含めて行ごと完全に削除した（`AGENTS.md:L31-L34`
+「Never commit...material that is not intended to be public」に
+抵触するため）。番号`DP4-04`・`DP4-05`・`DP4-06`は振り直さず欠番として
+扱い、残る7件（DP4-01, 02, 03, 07, 08, 09, 10）は元の番号のまま維持する。
+DP-4のfixture数は10件から**7件**（客観4件：DP4-01, 02, 03, 10／
+曖昧境界3件：DP4-07, 08, 09）へ変更し、§8.0.1のBudget再計算・
 §8.1.4のAccuracy/Calibration/escalation-rate分母・§8.4のギャップ要約へ
 反映済み（各該当箇所参照）。
 
-なお、削除しなかった残り7件についても同じ観点で公開裏付けを確認した。
-DP4-01・DP4-02は本PR自身の読み取り・branch/pushであり本セッションの
-GitHub操作そのものが裏付け。DP4-03（PR #61のmerge）はPR自体が
-`ai-development-platform`（Public）に現存しChrisによるmergeが`merged_by`
-から直接確認できる。DP4-07（`governance/ai-execution-constraints.md`の
-pre-flight/post-flight節削除・`adp-package.yaml`のrules_version bump）は
-commit `02671bd`（PR #27、"ADP-053: remove AI Work Sessions gates, unify
-on Task Time Events"）として`ai-development-platform`に現存し内容が
-一致することを確認した。DP4-08（`.github/workflows/ai-pr-review-loop.yml`
-の削除）は`experimental`のcommit `10053e7`・`serendipity-spot`のcommit
-`9cdc167`（いずれも2026-07-31付、"自前のGitHub Actions版AIレビュー・
-修正ループを撤去し、ChatGPT Codex連携に切り替える"）として現存を確認した
-（両リポジトリとも現在Public）。DP4-09（`experimental`のvisibility変更
-Private→Public）・DP4-10（`kids-oekaki`のGitHub Pages公開）は、変更の
-経緯自体はbrainの`decisions/0023`に依拠するものの、変更後の状態そのもの
-（`experimental`が現在Publicであること、`kids-oekaki`に
-`.github/workflows/deploy-pages.yml`が現存すること）は本セッションが
-GitHub APIで直接・独立に確認済みであり、DP4-04/05/06のように「非公開
-ソースでしか確認できない」わけではないため残した。
+なお、削除しなかった残り7件については、それぞれ独立した公開裏付け
+（本セッション自身のGitHub操作、対応するPR/commitの現存、対応する
+リポジトリの現在の公開設定等、上表の出典列が示す情報）を本セッションが
+直接確認した上で維持している。
+
+今後、Notion/`brain`アクセスを持つセッションが、公開裏付けのある
+代替フィクスチャを再導出し、削除した3枠（またはそれに代わる新規番号
+`DP4-11`以降）へ追加することを推奨する。
 
 **`environment`・`repo_specific_authority_note`（§8.1.3のrequest schemaが
 要求する必須フィールド）**: 上表は`actor, service, action, resource,
@@ -1099,9 +997,9 @@ no-escalateであれば最終決定との不一致によりfalse escalationと�
    分離・併記する）**: outputは無料のため、input tokens
    （state+question長）×$0.042/MTokのみで計算する。
    - **Per-pass cost**: このDPの初回送信分（DP-4は7件、DP-9は10件、
-     DP-10は本書収録2件（非公開のため3件削除、§8.3.1参照）または
-     §8.4のギャップ解消後の件数）のみのinput tokens
-     合計・1件平均で記録する。
+     DP-10は現時点で0件——本書収録2件はrequest schemaを満たさず送信
+     対象外、§8.3.4 step 5参照——または§8.4のギャップ解消後の件数）
+     のみのinput tokens合計・1件平均で記録する。
    - **Full-experiment cost（§8.0.1のBudget修正と対応させる）**:
      §8.0.1が定義する通り、初回送信に加え下記step 6のReproducibility
      手順（同一inputを**3回追加**送信）が必須のため、このDP単体の総
@@ -1112,7 +1010,7 @@ no-escalateであれば最終決定との不一致によりfalse escalationと�
      input tokensに送信回数4を掛けて概算してもよいが、実測値が得られる
      場合は実測を優先する）。DP-4/DP-9/DP-10のfull-experiment costを
      合算した値を、§8.0.1が定めるDP-4/DP-9/DP-10合計の総リクエスト数
-     （現在の件数なら最低76回）と対応づけてNotion Task
+     （現在の件数なら最低68回）と対応づけてNotion Task
      （`ADP-065-T04`）の`Result`へ記録する。
    **Per-pass costとfull-experiment costは常に両方報告し、
    どちらか一方だけを「このPoCのコスト」として扱わない**——per-passのみ
@@ -1693,30 +1591,21 @@ MISC/Backlogアイテム 対 既存Open Task）に該当するものは1件も�
 「後から固まった別解の設計変更」であり、いずれもGitHub上の成果物同士の
 比較でTask管理系の対象（MISC/Backlogアイテムまたは Open Task）を含まない。
 
-**母集団適合実例の追加探索（今回のCodex指摘への対応として実施、かつ
-本コミットでの再修正でcontent-authorization gapへ対応）**: 上記の
-population mismatchを踏まえ、`cloud42-labo/ai-development-platform`・
-`cloud42-labo/brain`に対しGitHub検索（`重複`・`MISC`・`Backlog Refinement`・
-`類似Task`・`supersede`・`既存Task`等のキーワード）で、「新規MISC/Backlog
-アイテムを既存Open Taskと比較した」記録を追加で探索した。`cloud42-labo/
-brain`の`journal/2026-09-06.md`、`journal/2026-09-11.md`〜
-`2026-09-13.md`に母集団に近い言及がある可能性を確認したが、**`brain`は
-非公開リポジトリであり、その内容（決定の要旨・Task詳細を含む）を
+**母集団適合実例の追加探索（複数回のCodexレビューへの対応として実施）**:
+上記のpopulation mismatchを踏まえ、`cloud42-labo/ai-development-platform`・
+`cloud42-labo/brain`に対しGitHub検索で、「新規MISC/Backlogアイテムを
+既存Open Taskと比較した」記録を追加で探索したが、**`brain`は非公開
+リポジトリであり、その内容（決定の要旨・Task詳細を含む）を
 `cloud42-labo/ai-development-platform`（Public）へ公開してよいという
-明示的な許可を得ていない。** そのため、該当箇所の内容は逐語・言い換えの
-いずれの形でも本書へ転記せず、出典（リポジトリ名・ファイルパス・日付）の
-参照のみをここに残す。実際のPre-decision input・判定結果の確認は、
-Notion/`brain`アクセスを持つセッションが行うこと。その上でなお、
-（a）判定前のTask本文原文が個別に凍結されているか、（b）判定結果
-（duplicate Yes/No）そのものがGitHub側の記録として確定しているか
-（Notion `Approach Decision`側にのみ存在するのではないか）の両方を、
-brainアクセスを持つセッションが個別に確認するまでは、母集団適合の
-可否そのものも未確定である。**したがってduplicate = Yes・
-duplicate = Noのいずれについても、GitHub検索のみでPre-decision input・
-Outcome・公開可否の3つ全てを満たす新規の母集団適合実例は確保できな
-かった。** 正直にこの結果を記録し、それらしいテキストを無理に実例へ
-仕立てない。追加探索には§8.4が既に指摘するとおりNotion
-`Stories & Tasks`の`Approach Decision`履歴への直接アクセスが要る。
+明示的な許可を得ていない。** そのため、関連しうる記述が見つかった
+場合でも、内容は逐語・言い換えのいずれの形でも本書へ転記せず、
+公開可否・Pre-decision inputの凍結・判定結果のGitHub側裏付けの
+すべてが確認できるまでは実例化しない。**結果として、GitHub検索の
+みでは、Pre-decision input・Outcome・公開可否の3つ全てを満たす新規の
+母集団適合実例は確保できなかった。** 正直にこの結果を記録し、それ
+らしいテキストを無理に実例へ仕立てない。追加探索には§8.4が既に
+指摘するとおりNotion `Stories & Tasks`の`Approach Decision`履歴への
+直接アクセスが要る。
 
 **§8.3.3が要求する`new_item_text`・`candidate_existing_task_text`は、
 判定が行われた時点（着手前・決定前）に存在していたテキストに限定し、
@@ -1746,18 +1635,12 @@ Outcome・公開可否の3つ全てを満たす新規の母集団適合実例は
 | DP10-01 | **参考実例のみ——主要指標対象外（population mismatch）。** `experimental` PR [#90](https://github.com/cloud42-labo/experimental/pull/90)（2026-08-26作成、タイトル・本文全文を版管理外のPR本文から取得日時点でそのまま埋め込み）:<br>タイトル: `docs: PRマージ運用を自己マージへ切り替え（オーナー承認、デモ環境のため）`<br>本文:<br>`## Summary`<br>`- オーナー（駒場さん）の明示的な判断により、このリポジトリのマージ運用を変更`<br>`- 「Claudeはmergeせずchatgpt側の毎時タスクに委ねる」という従来ルールを、このリポジトリに限り上書きし、Claude自身がその場でsquashマージする運用に戻す`<br>`- Codex Automatic reviewsは引き続き有効のまま維持`<br>`- 経緯: brain/decisions/0021・brain/decisions/0022`<br>`## Note`<br>`このPR自体は、本ルール変更をオーナーがチャットで直接指示した直後のものであり、新ルールに従いClaude自身がマージします。` | commit [`cb4c73d`](https://github.com/cloud42-labo/experimental/commit/cb4c73d7079fd6a20cc439ea3ae26e1f12bf7340)（2026-08-26 13:42:47 UTC、`experimental`の`main`へPR #90作成時点で既に反映済み、Chris側push、コミットメッセージ`Fix experimental self-merge policy`）の`CLAUDE.md`差分（+17/-24）。**commitはimmutableでSHA固定のためversion-pin済み**（PR本文と異なり事後編集リスクなし）。 | PR #90、commit `cb4c73d` |
 | DP10-05 | **参考実例のみ——主要指標対象外（population mismatch）。** `experimental` PR [#73](https://github.com/cloud42-labo/experimental/pull/73)（2026-08-08作成、2026-08-09 close、タイトル・本文全文をPR本文から取得日時点でそのまま埋め込み）:<br>タイトル: `店舗生存シミュレーター: e-Statキーをブラウザに保存し次回自動入力する (v0.10.0)`<br>本文（`## 変更内容`節）:<br>`appIdInput`の`input`イベントで`localStorage`（キー名`storeSurvivalSim.eStatAppId`）へ都度保存し次回起動時に自動入力する／起動画面に「保存したキーを削除」ボタンを追加／`localStorage`が使えない環境でも例外で機能全体が止まらないようtry/catchで包みフォールバックする／配布ファイル自体にキーを埋め込む変更ではない。 | **candidate側は別PR本文ではなく、決定そのものの記録に限定する。** PR #76（e-Statのライブ取得経路`fetchMeshDataset`を再利用してエリアデータを事前生成・同梱する設計）はPR #73 close後（2026-08-09 22:58:19 close→PR #76作成 23:07:44）に作成されており、PR #76の本文自体は判定前には存在しない。判定前に存在したのは`cloud42-labo/brain` journal `2026-08-10.md`が記す決定の記述のみだが、**`brain`は非公開リポジトリであり、その決定内容をPublicリポジトリである本書へ逐語・言い換えいずれの形でも転記する許可を得ていない。** 出典（日付・ファイル名）の参照のみを残し、実際の決定内容の確認はbrainアクセスを持つセッションに委ねる。 | PR #73、PR #76、`cloud42-labo/brain` journal `2026-08-10.md`（内容は本書未転記） |
 
-**削除した3件（調査時点のDP10-02〜04）についての注記（今回のCodexフォロー
-アップ指摘への対応として、行ごと削除）**: 調査時点で、Notion
-`Stories & Tasks`の実MISC/Task重複判定に該当する候補として3件を追加で
-発見していた。しかし前回の修正（本文書の逐語引用・言い換え要約の削除）は、
-判定の**具体的な記述**は本書から取り除いた一方、**判定結果そのもの
-（duplicate = Yes/Noという値）はPre-decision input・Ground truth両方の
-表に残していた**。これは、非公開`cloud42-labo/brain`が記録した個別
-判断の帰結（あるアイテムが重複と判定されたか否か）自体が非公開情報で
-あり、その値をPublicリポジトリである本書へ掲載する許可を得ていない
-という点を見落としていた。ラベルだけを残す修正では不十分と判断し、
-該当3件を出典・識別情報（Notion Task ID、journal/notesのファイル名
-以外の具体的な引用箇所を含む）を含めて**表から行ごと削除**した。
+**削除した3件（旧DP10-02〜04）について（複数回のCodexレビューを経て、
+行ごと削除に確定）**: 調査時点で3件を追加で発見していたが、判定結果
+（duplicate = Yes/No）自体が非公開`cloud42-labo/brain`content由来で
+あり、独立した公開裏付けを持たないと判明したため、Pre-decision
+input／Ground truthの両方の表から出典・識別情報を含めて行ごと
+完全に削除した。
 
 これら3件は、Pre-decision inputが凍結できない・母集団適合が未確認と
 いう理由で、削除前から既に主要指標（Accuracy／Agreement／Calibration／
@@ -1766,10 +1649,10 @@ False-escalation rate／Missed-escalation rate、§8.3.4参照）からは除外
 **振り直さず**、`DP10-01`・`DP10-05`のまま維持する——削除された3件の
 番号（旧`DP10-02`〜`DP10-04`）は欠番として扱い、以後このドキュメント内
 で新規フィクスチャを追加する場合は`DP10-06`以降を使う。`brain`アクセス
-を持つセッションが、Notion `Stories & Tasks`の`Approach Decision`履歴
-から改めてこれらのフィクスチャ（またはその代替）を再導出し、DP10-01・
-DP10-05で確立した「Pre-decision input／Outcomeの分離」パターンに従って
-本書へ追加することを、`ADP-065-T04`着手前に推奨する（§8.4も参照）。
+を持つセッションが、公開裏付けのある代替フィクスチャを再導出し、
+DP10-01・DP10-05で確立した「Pre-decision input／Outcomeの分離」
+パターンに従って本書へ追加することを、`ADP-065-T04`着手前に推奨する
+（§8.4も参照）。
 
 **フィールド作成時の運用ルール（今後のフィクスチャ拡充向け）**: 今後
 DP-10のデータセットへ実例を追加する際は、判定前に分かっていた情報
@@ -1818,12 +1701,14 @@ confidence」として扱う。**この閾値は§8.0.2の全DP共通規約（DP
 出力を見てから「高確率」の基準を後付けで選ぶことを禁止する——
 Accuracy・false-escalation rate・missed-escalation rateはすべてこの
 二値化に依存するため、閾値自体が評価結果に応じて事後的に調整可能では
-再現性が失われる。この既定値`0.7`を変更する場合は、評価対象の本書収録
-2件（非公開のため3件削除、§8.3.1参照。またはT04時点で拡充された実例）
-とは独立したholdoutキャリブレーションセット
-を用意し、そのキャリブレーションを**評価出力を見る前に**完了させた上で
-根拠とともに変更後の値を明記すること（後から出力に合わせて選び直すこと
-は不可）。T04を実行する担当者がこの閾値を自己判断で変えてはならない。
+再現性が失われる。この既定値`0.7`を変更する場合は、評価対象の実例
+（本書収録2件はいずれもrequest schemaを満たさず送信対象外のため現時点
+で0件——§8.3.4 step 5参照。T04時点で母集団適合かつrequest schemaを
+満たす実例が拡充された場合はそれを対象とする）とは独立したholdout
+キャリブレーションセットを用意し、そのキャリブレーションを**評価出力を
+見る前に**完了させた上で根拠とともに変更後の値を明記すること（後から
+出力に合わせて選び直すことは不可）。T04を実行する担当者がこの閾値を
+自己判断で変えてはならない。
 `yes確率 >= 0.7`の場合のみBacklog Refinementのレビュー対象として自動
 フラグを立てる。閾値未満はフラグを立てず通常の配置フローへ進む。
 **重複の統合・consolidation自体はJevの出力だけでは絶対に実行しない**
@@ -1907,11 +1792,28 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
    無理に方向性の結論を出さない。母集団適合実例が確保でき、かつ
    duplicate=Yes/No双方の検証済み実例が揃ってから本格的なcalibration
    評価を行う。
-5. **Latency/Cost/Reproducibility**: §8.1.4・§8.2.4と同じ方法で記録。
-   Reproducibilityは**§8.0.3で固定したモデルバージョン・サンプリング
-   パラメータの組を明示指定した上で**行う。これらはground truthの正誤
-   にもpopulation適合にも依存しないため、本書収録2件全件（参考実例含む）で
-   計測してよい（主要指標の対象範囲の制約を受けない）。
+5. **Latency/Cost/Reproducibility**: §8.1.4・§8.2.4と同じ方法で記録
+   するが、**DP10-01・DP10-05は、いかなる形であってもこの計測（および
+   他のいかなるJevライブ呼び出し）の対象にしない。** 独立性（ground
+   truthの正誤やpopulation適合と無関係であること）は、§8.3.3の
+   request schemaが要求する必須フィールドを省略してよい理由には
+   ならない。DP10-01は比較対象がcommitでありTask状態を持たないため
+   有効な`candidate_existing_task_status`を構成できず、DP10-05も
+   同じくcandidate側がTaskではなくPRであり有効な
+   `candidate_existing_task_status`を持たない上、内容非開示のため
+   `candidate_existing_task_text`自体を意図的に欠いている（§8.3.1
+   参照）——いずれも§8.3.3のrequest schemaへ有効な形で直列化できない。
+   欠落フィールドを推測で埋める、または不完全なリクエストのまま送る
+   ことはT04に許可しない。**したがって現時点でDP-10について
+   Latency/Cost/Reproducibilityを計測できる実例は0件であり、
+   「計測不能——request schemaを完全に満たす実例が確保できていない」
+   と記録する。** DP10-01・DP10-05は母集団定義を理解するための参考例
+   としてのみ本書に残し、実行可能な計測ステップの入力には使わない。
+   母集団適合かつ§8.3.3のrequest schemaを完全に満たす実例が確保
+   でき次第、この手順を（**§8.0.3で固定したモデルバージョン・
+   サンプリングパラメータの組を明示指定した上で**）適用する。
+   §8.0.1の呼び出し予算（call budget）も、この2件を含めずに計算する
+   （§8.0.1参照）。
 6. **False-escalation rate**: 主要指標対象（duplicateでない、母集団に
    合致する検証済み実例）が現時点で0件のため、分母は0であり計算不能。
    この状態をそのまま「0%」と報告せず、「検証待ちのため計測不能——
@@ -1930,24 +1832,16 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
 
 ### 8.4 実例の充足状況とギャップ
 
-- **DP-4**: 当初10件確保していたが、うち3件は非公開ソースのみに依拠し
-  独立したPublic裏付けが見つからなかったため、§8.1.1末尾の注記の通り
-  行ごと削除した——旧DP4-06（`HUMAN-BUG`をBUG Taskから分離作成した実例、
-  出典が非公開`cloud42-labo/brain`のjournalのみ）、旧DP4-04
-  （`cloud42-labo/skills` PR #16/#20のself-merge、`skills`自体が
-  Privateリポジトリで出典もbrain/skills双方が非公開。加えて実際の
-  PR本文を確認すると出典としていた`ADP-054-T15`とは異なるTaskだった）、
-  旧DP4-05（Notion `update_task_status`/`update_task_result`という
-  GitHubに痕跡を残さない内部操作で、出典が非公開brainノートのみ）。
-  **現在は7件（客観4件＋曖昧境界3件）**。うち3件（DP4-07, 08, 09）は
-  境界が実際に曖昧な実例であり、`self-authority-escalation`カテゴリに
-  該当する実インシデントは本セッションの検索範囲では発見できなかった
-  （7件には含めていない）。残る7件については、DP4-01/02が本PR自身の
-  GitHub操作、DP4-03がPR #61の`merged_by`、DP4-07が commit `02671bd`、
-  DP4-08が commit `10053e7`・`9cdc167`、DP4-09/10が
-  `experimental`の現在のvisibility・`kids-oekaki`の
-  `deploy-pages.yml`の現存という形で、それぞれ独立にPublic側の裏付けを
-  本セッションが直接確認している（詳細は§8.1.1末尾の注記）。
+- **DP-4**: 当初10件確保していたが、うち3件（旧DP4-04・旧DP4-05・
+  旧DP4-06）は出典が非公開`cloud42-labo/brain`content（またはPrivate
+  リポジトリ）のみに依拠し独立したPublic裏付けが見つからなかったため、
+  §8.1.1末尾の注記の通り行ごと削除した（削除の理由・経緯はそちらへ
+  一本化、本項では繰り返さない）。**現在は7件（客観4件＋曖昧境界
+  3件）**。うち3件（DP4-07, 08, 09）は境界が実際に曖昧な実例であり、
+  `self-authority-escalation`カテゴリに該当する実インシデントは本
+  セッションの検索範囲では発見できなかった（7件には含めていない）。
+  残る7件は、それぞれ独立にPublic側の裏付けを本セッションが直接
+  確認している（詳細は§8.1.1末尾の注記）。
 - **DP-9**: 10件確保。`needs-split`側3件、`fits-as-is`側7件。**ただし
   現時点で主要指標に無条件で使える実例は0件である**（§8.2.4 step 1）。
   当初はDP9-03・DP9-04の2件、次いでDP9-04の1件のみを無条件検証済みと
@@ -2002,12 +1896,10 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
     「検証待ちのため計測不能」として報告すること。
 - **DP-10**: **本書に収録するのは2件（DP10-01・DP10-05）のみ、目標10件に
   対し不足。うち主要指標に無条件で使える実例は現時点で0件**（§8.3.4
-  step 1）。本セッションが`cloud42-labo/ai-development-platform`と
-  `cloud42-labo/brain`のGitHubコード検索で発見できた、Notion
-  Stories & Tasksの実MISC/Task重複判定に該当する検証可能な実例は5件が
-  上限だったが、そのうち3件は非公開`cloud42-labo/brain`content由来の
-  判定結果を含んでいたため本書からは行ごと削除した（削除の経緯・理由は
-  §8.3.1末尾の注記に一本化。本項では繰り返さない）。理由:
+  step 1）。本セッションがGitHubコード検索で発見できた検証可能な実例は
+  5件が上限だったが、そのうち3件は判定結果自体が非公開`cloud42-labo/
+  brain`content由来であったため本書からは行ごと削除した（削除の経緯・
+  理由は§8.3.1末尾の注記に一本化。本項では繰り返さない）。理由:
   - DP-10が本来対象とする「Backlog Refinement時のMISC vs 既存Open Task
     の重複判定」自体の判断記録は、主にNotion Stories & Tasks側
     （`Approach Decision`欄等）に残る設計になっており、本セッションは
