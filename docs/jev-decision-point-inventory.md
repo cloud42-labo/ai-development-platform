@@ -718,21 +718,28 @@ confidence/probability threshold を使う。この閾値の決め方を1箇所�
 
   1. **暫定推奨値（未確定・T04実行前にJev公式ドキュメントで要確認）**:
      決定的な3択/Score/Noul分類タスクという性質上、`temperature = 0`
-     （最も確定的な出力を優先）、`top_p`は既定値を変更せず未指定のまま
-     とする（temperature=0の場合top_pの影響は実質無効化されるため）、
-     `seed`はJevの公式SDKが対応していれば固定値（例: `0`）を指定し対応
-     していなければ省略、とする。**これはT01のNotion記録が確認した値では
-     なく、決定的分類タスク一般のベストプラクティスに基づくこのPoC仕様の
-     暫定推奨に過ぎない。**
+     （最も確定的な出力を優先）、`top_p`は「既定値のまま」ではなく
+     **明示的な数値**（例: `1.0`。temperature=0の下では出力への影響は
+     実質無効化されるが、値そのものは省略せず必ず記録する）を指定する。
+     `seed`はJevの公式SDKが対応していれば固定値（例: `0`）を指定し、
+     対応していない場合も**省略はせず**、「本APIは`seed`非対応
+     （確認日・確認方法を付記）」と明示的に記録する。**これはT01の
+     Notion記録が確認した値ではなく、決定的分類タスク一般のベスト
+     プラクティスに基づくこのPoC仕様の暫定推奨に過ぎない。**
   2. **T04の必須手順**: T04は最初のライブ呼び出しの前に、Jev公式SDK
      （Python/JavaScript）のドキュメントを直接確認し、(a) 実際に公開
      されているパラメータ名の完全な一覧、(b) 各パラメータの有効範囲・
      既定値、(c) 上記1の暫定推奨値がその範囲内で有効かを検証すること。
+     この検証は「無効・非対応の値だけを置き換える」処理ではなく、
+     **Jevが公開するすべてのパラメータについて、最初のライブ呼び出し前に
+     明示的な値（対応していれば具体的な数値、対応していなければ
+     「非対応」という明示的な記録）を1つ残らず確定させる**ことを指す。
      暫定推奨値がそのまま使えない場合（範囲外・非対応等）は、公式
      ドキュメントに基づき確定値を選び直し、選定理由とともにNotion Task
      （`ADP-065-T04`）の`Approach Decision`または`Result`、および本書の
      この節へ追記すること。T04がこの確認を行わずに暫定推奨値をそのまま
-     「確定値」として送信することは禁止する。
+     「確定値」として送信すること、または未確認のパラメータを
+     「既定値/未指定」のまま最初のライブ呼び出しに残すことは禁止する。
 
 - モデル識別子またはサンプリングパラメータのいずれかを変更した場合、
   それ以前の実行結果（Accuracy/Calibration/Reproducibility等すべての
@@ -761,8 +768,25 @@ DP-4は「既存ルールで決定論的に一致しない曖昧な行為」を�
 | DP4-03 | actor=Chris（ChatGPT）／service=github／action=merge／resource=`cloud42-labo/ai-development-platform` PR #61（`docs/instruction-skill-debt-inventory.md`, protected branch `main`）／task_context=`ADP-057` | journal `2026-09-19.md`（PR #61言及）、`governance/agent-policy.yaml` |
 | DP4-07 | actor=Claude（本セッション群）／service=github／action=commit, push／resource=`cloud42-labo/ai-development-platform`の`governance/ai-execution-constraints.md`のpre-flight/post-flight節削除＋`adp-package.yaml`の`rules_version`を1.0.0→2.0.0（MAJOR）へbump／task_context=AI Work Sessions廃止 | journal `2026-09-05.md` |
 | DP4-08 | actor=Claude／service=github／action=delete（自前GitHub Actionsワークフローファイルの削除）／resource=`cloud42-labo/experimental`, `cloud42-labo/serendipity-spot`の`.github/workflows/*`／task_context=Codex Automatic reviews＋ChatGPT毎時タスクへの切替 | journal `2026-07-31.md`、`notes/ai-pr-review-loop.md` |
-| DP4-09 | actor=AI提案／Owner決定／service=github（repository settings）／action=visibility変更（Private→Public）／resource=`cloud42-labo/experimental`リポジトリ設定／task_context=`OEK-03-S01-T03`（GitHub Pages公開のため） | `decisions/0023-experimental-repo-made-public.md` |
+| DP4-09 | actor=Human（Owner本人。実際に可視性変更を実行した主体で凍結——凍結理由は表下の注記参照）／service=github（repository settings）／action=visibility変更（Private→Public）／resource=`cloud42-labo/experimental`リポジトリ設定／task_context=`OEK-03-S01-T03`（GitHub Pages公開のため） | `decisions/0023-experimental-repo-made-public.md` |
 | DP4-10 | actor=Claude／service=github pages／action=publish／resource=`cloud42-labo/kids-oekaki` Demo（GitHub Pages公開）等、公開系デプロイ／task_context=`OEK-03-S01-T03` | `decisions/0023-experimental-repo-made-public.md`（Pages公開の経緯として言及） |
+
+**DP4-09の`actor`凍結について（Codex指摘への対応）**: 出典
+`decisions/0023-experimental-repo-made-public.md`を直接確認した結果、
+「Claude自身にはリポジトリ可視性を変更するAPI権限が無いため、実際の
+切り替え操作は駒場さん本人がGitHub UI（Settings → Danger Zone →
+Change repository visibility）で実施した」と明記されている。つまり
+可視性変更の提案はAI（Claude）が行ったが、`resource`列が指す
+「visibility変更」という行為そのものを実行したのはOwner本人であり、
+AI提案とOwner実行の2つの異なる主体・2つの異なる行為が1行に
+混在していた。§8.1.3のスキーマは`actor`を`Claude|Chris|Codex|Human`の
+単一値に限定するため、本行は**実際に設定変更を実行した主体
+（`Human`）**で凍結し、提案者がAIだった経緯は上記注記に残す形へ
+統一した（提案と実行を別行・別イベントへ分離する代替案もあるが、
+DP-4はポリシーカテゴリ分類の対象が「実際に発生した行為」であり、
+本件で分類対象となる行為は可視性変更の実行そのものであるため、
+実行主体を単一のInput stateとして残す方が評価データセットの意図に
+沿う）。
 
 **削除した3件について（複数回のCodexレビューを経て、DP-4全10件を
 1行ずつ再監査した結果）**: 本節は当初10件を収録していたが、うち3件
@@ -1625,15 +1649,33 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
    （step 1）、AccuracyもAgreementも「検証待ちのため計測不能」と記録
    する。** 検証が完了した客観実例が1件以上確保できた時点で初めて
    Accuracyの算出に移る。
-7. **Calibration**: confidenceと実際の正誤（step 1で主要指標の対象に
-   含まれた実例のみ）をbin化し、reliability diagram（confidence 0.1
-   刻み）を作成する。**この際、confidenceはpredicted Choiceがground
-   truthと一致したか（正解/不正解）を基準にbin化し、predicted Choice
-   が`needs-split`か`fits-as-is`かというクラスラベル自体では区別
-   しない。** 正しく`needs-split`を高confidenceで当てた予測（望ましい
-   safety的判断）を、単に`needs-split`であることを理由に低く評価しては
-   ならない。現時点では主要指標対象が0件のため、母集団が確保でき次第
-   本格的なcalibration評価を行う。
+7. **Calibration（今回のCodex指摘への対応として、`choice_confidence`と
+   `score_confidence`を明示的に分離——§8.2.3が定める通り最終決定は
+   この2つの独立したconfidenceの両方に依存するため、単一の無名
+   `confidence`をbin化するだけでは片方のゲート用confidenceが未評価
+   のまま残る）**: 以下の2種類のcalibrationを**別々に**算出し、
+   reliability diagramも別々に2枚作成する（confidence 0.1刻みのbinは
+   共通）。DP-4がAccuracyとAgreementを合算せず並記するのと同じ規約で、
+   この2つも1つの指標へ統合しない。
+
+   - **Choice calibration**: `choice_confidence`をbin化し、各binの
+     正解率は「predicted Choiceがground truthと一致したか（step 1で
+     主要指標の対象に含まれた実例のみ、正解/不正解）」を基準に算出
+     する。predicted Choiceが`needs-split`か`fits-as-is`かという
+     クラスラベル自体では区別しない——正しく`needs-split`を高
+     `choice_confidence`で当てた予測（望ましいsafety的判断）を、単に
+     `needs-split`であることを理由に低く評価してはならない。
+   - **Score calibration**: `score_confidence`をbin化し、各binの
+     正解率は「predicted Score（帯判定。§8.2.3の閾値定義に従い
+     `Score == 2`かそれ以外かの2値）が、検証済みduration由来の
+     ground truthのScore帯と一致したか（正解/不正解）」を基準に
+     算出する。Choice calibrationと同じ実例集合（step 1の対象実例）を
+     使うが、正誤判定の基準はChoiceではなくScore帯である点が異なる。
+
+   両者を組み合わせた単一の「合成confidence」は、明示的な合成式を
+   別途定義しない限り作らない（現時点では未定義のため作らない）。
+   現時点では主要指標対象が0件のため、母集団が確保でき次第、上記2種類
+   それぞれの本格的なcalibration評価を行う。
 8. **Latency/Cost（今回のCodex指摘への対応として、request schema完全性の
    制約を明記——DP-10 §8.3.4 step 5と同じ扱い）**: DP-4と同じ方法
    （§8.1.4 手順4・5）で記録する。Ground truthの正誤に依存しないため
@@ -1933,10 +1975,34 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
    input・ground truth・母集団適合の検証を完了し、主要指標対象の実例を
    1件以上確保した時点で、直ちに上記のAccuracy/Agreement算出へ移れる
    よう本項をあらかじめ確定しておく。
-4. **Calibration**: 主要指標対象が0件のため「計測不能」として記録し、
-   無理に方向性の結論を出さない。母集団適合実例が確保でき、かつ
-   duplicate=Yes/No双方の検証済み実例が揃ってから本格的なcalibration
-   評価を行う。
+4. **Calibration（今回のCodex指摘への対応として、DP-9 §8.2.4 step 7と
+   同様、実例が揃う前に算出式そのものを今のうちに確定しておく——
+   fixtureが後から追加された時点でこの節を再定義せずそのまま使える
+   ようにする）**:
+
+   - **predicted labelへの変換**: §8.3.3が定める閾値の通り、
+     `yes確率 >= 0.7`ならpredicted label = `Yes`（重複）、それ未満なら
+     `No`（非重複）とする。
+   - **predicted labelごとのconfidence**: predicted labelが`Yes`の場合、
+     confidence = `yes確率`そのもの。predicted labelが`No`の場合、
+     confidence = `1 - yes確率`（「`No`である」という予測自体への
+     モデルの確信度であり、`yes確率`の生値をそのまま使わない）。
+   - **bin**: DP-9 §8.2.4 step 7と同じ0.1刻み（confidence
+     0.5〜0.6, 0.6〜0.7, …, 0.9〜1.0の5bin。confidence定義上
+     0.5未満は生じない——`yes確率`が0.5未満ならpredicted label`No`の
+     confidenceは`1 - yes確率`で0.5超になり、0.5以上ならpredicted
+     label`Yes`のconfidenceは`yes確率`そのもので0.5以上になるため）
+     でreliability diagramを作成する。
+   - **correctness event（正解の定義）**: 主要指標対象（step 1で
+     検証済み母集団適合と判定された実例のみ）について、predicted
+     label（上記変換後の`Yes`/`No`）が検証済みground truthの
+     duplicate判定（duplicate=Yes/No）と一致した場合を「正解」と
+     する。一致しなければ「不正解」。
+
+   現時点では主要指標対象が0件のため「計測不能」として記録し、上記の
+   算出式を適用した結果を無理に出さない。母集団適合実例が確保でき、
+   かつduplicate=Yes/No双方の検証済み実例が揃った時点で、この算出式を
+   そのまま適用して本格的なcalibration評価を行う。
 5. **Latency/Cost/Reproducibility**: §8.1.4・§8.2.4と同じ方法で記録
    する。**Reproducibilityについては、§8.1.4手順6が定義した
    thresholded final decisionの安定性確認をDP-10にも適用する——DP-10の
