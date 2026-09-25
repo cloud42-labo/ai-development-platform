@@ -1,4 +1,6 @@
-[Resource from github at repo://cloud42-labo/ai-development-platform/sha/123a4a7cae743a6889749f433967afa6954fd16f/contents/docs/jev-decision-point-inventory.md] Date: 2026-09-24 (JST)
+# Jev × ADP — Decision Point Inventory and Application Candidates
+
+Date: 2026-09-24 (JST)
 Status: Decision-support report (`ADP-065-T02`)
 Scope: Inventory ADP's recurring Decision Points across Human Gate logic, Task
 routing, Risk judgment/scoring, Review/Escalation logic, anomaly detection,
@@ -701,6 +703,27 @@ confidence/probability threshold を使う。この閾値の決め方を1箇所�
 - 出典: DP-10の`yes確率 >= 0.7`（§8.3.3、前回修正で先行して確立済み）
   が最初にこの規約を確立し、本節はDP-4（§8.1.3/§8.1.4手順1）・DP-9
   （§8.2.3）へ同じ規約を適用する。
+- **Calibration binの境界規約（今回のCodex指摘への対応として新設。
+  DP-4/DP-9/DP-10共通）**: confidence（またはDP-10の`yes確率`）を
+  0.1刻みでbin化しreliability diagramを作成する箇所（§8.1.4手順3の
+  DP-4 Choice calibration、§8.2.4 step 7のDP-9 Choice/Score
+  calibration、§8.3.4手順4のDP-10 calibration）はすべて次の1つの
+  規約に従い、各節でこの規約を再定義しない。
+  - 各binは**下限を含み上限を含まない半開区間`[下限, 上限)`**とする。
+    例えば`0.6〜0.7`binは`confidence >= 0.6 かつ < 0.7`を指し、
+    `0.7〜0.8`binは`confidence >= 0.7 かつ < 0.8`を指す。したがって
+    `confidence = 0.7`（DP-4/DP-9/DP-10共通の既定閾値そのものでもある
+    値）は常に`0.7〜0.8`binに属し、`0.6〜0.7`binには属さない——
+    どのT04実行者が判定しても一意に定まる。
+  - **例外**: 最上位bin（`confidenceが取りうる範囲の上限〜1.0`。DP-4/
+    DP-9は`0.9〜1.0`、DP-10は§8.3.4手順4が定める`0.9〜1.0`）のみ
+    **両端を含む閉区間`[下限, 1.0]`**とし、`confidence = 1.0`は
+    この最上位binに属する（半開区間のままだと`1.0`がどのbinにも
+    属さなくなるため）。
+  - この規約は`yes確率`にも同様に適用する。DP-10 §8.3.4手順4のbin
+    一覧（`0.3〜0.4`から`0.9〜1.0`の7bin）を含め、以後このドキュメント内
+    に現れるすべての`下限〜上限`形式のbin表記は、この規約に従った
+    半開区間（最上位binのみ閉区間）として読む。
 
 #### 8.0.3 モデルバージョン・サンプリングパラメータの固定（DP-4/DP-9/DP-10共通）
 
@@ -763,7 +786,7 @@ confidence/probability threshold を使う。この閾値の決め方を1箇所�
 
 ### 8.1 DP-4 — ポリシーカテゴリ分類（Choice型）
 
-#### 8.1.1 評価データセット（実例7件、3件を非公開情報のため削除——詳細は本項末尾の注記）
+#### 8.1.1 評価データセット（実例6件、4件を削除——うち3件は非公開情報のため、1件（旧DP4-09）は実行主体が公開裏付けで検証できないため。詳細は本項末尾の注記）
 
 `governance/agent-policy.yaml`の8ルール（`read-connected-resources` /
 `notion-managed-task-update` / `github-working-branch` /
@@ -842,7 +865,7 @@ DP-4のfixture数は10件から**6件**（客観4件：DP4-01, 02, 03, 10／
 要求する必須フィールド）**: 上表は`actor, service, action, resource,
 task_context`のみを記載しており、§8.1.3の`state`構成が要求する
 `environment`と`repo_specific_authority_note`を欠いていた。この2つを
-推論に任せると実行者ごとに異なる値を送りうるため、全7件について
+推論に任せると実行者ごとに異なる値を送りうるため、全6件について
 実際の出典から導ける値を個別に固定する。
 
 | # | `environment` | `repo_specific_authority_note` |
@@ -985,7 +1008,7 @@ confidenceや実際の分類結果に一切依存しない——ルールIDが�
 
 **Choiceへのマッピング**: Jevの返す`{choice, confidence}`のうち、
 `choice`を上記8ルールIDのいずれかとして受け取り、`confidence`を閾値と
-比較する。**この閾値は§8.0.2の全DP共通規約に従い、評価対象7件の出力を
+比較する。**この閾値は§8.0.2の全DP共通規約に従い、評価対象6件の出力を
 見る前に確定した既定値`confidence >= 0.7`を用いる**（DP-10の
 `yes確率 >= 0.7`と同じ規約）。§8.1.4手順1のDP4-01等4件は、この既定値の
 健全性を事後に確認するsanity checkとしてのみ使い、そこで観測した分布を
@@ -1070,7 +1093,8 @@ no-escalateであれば最終決定との不一致によりfalse escalationと�
 3. **Calibration**: **客観4件（DP4-01, 02, 03, 10）のみを対象に
    算出する。** confidenceと実際の正誤（step 2のAccuracy判定、この4件
    についてのみ「正解/不正解」という客観的な正誤が存在する）をbin化し、
-   reliability diagram（confidence 0.1刻み）を作成する。**曖昧境界2件
+   reliability diagram（confidence 0.1刻み。bin境界の半開区間規約は
+   §8.0.2「Calibration binの境界規約」に従う）を作成する。**曖昧境界2件
    （DP4-07, 08）はground truthが「現行運用解釈」であり客観的な
    正誤ラベルではないため、この4件のreliability diagramには一切混ぜない
    （step 2のAccuracy除外と同じ扱い）。** 曖昧境界2件のconfidenceは、
@@ -1715,7 +1739,8 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
    `confidence`をbin化するだけでは片方のゲート用confidenceが未評価
    のまま残る）**: 以下の2種類のcalibrationを**別々に**算出し、
    reliability diagramも別々に2枚作成する（confidence 0.1刻みのbinは
-   共通）。DP-4がAccuracyとAgreementを合算せず並記するのと同じ規約で、
+   共通。bin境界の半開区間規約は§8.0.2「Calibration binの境界規約」に
+   従う）。DP-4がAccuracyとAgreementを合算せず並記するのと同じ規約で、
    この2つも1つの指標へ統合しない。
 
    - **Choice calibration**: `choice_confidence`をbin化し、各binの
@@ -1746,23 +1771,34 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
      であり、混同しない。** **Score calibrationの対象実例には、Choice
      calibration（step 1の対象実例）よりさらに狭い独立のadmission
      ゲートを課す（今回のCodex指摘への対応として新設）**：対象実例は
-     Choice calibrationの対象範囲であることに加えて、step 5が
-     DP9-05〜10のadmissionに要求する独立duration
-     エビデンス（`Σ Active Duration (h) ≤ 8時間`、かつ`Started At`→
-     `Completed At`のelapsed時間が8時間以下であることの両方。
-     Waiting区間を検証済み控除した場合を含む）を**個別に**満たす
-     ことを要求する。DP9-01/02のground truth（`needs-split`）は
-     review round数の枯渇・実際の分割実施という審査結果から確立
-     されており（§8.2.2参照）、実測durationから独立に確立された
-     ものではない——`needs-split`というChoiceラベルから`Score != 2`
-     というScore帯truthを推論するのは循環参照になるため、これを
-     Score calibrationの根拠にはできない。**したがって、DP9-01/02は
-     （Choice calibration・Accuracyの対象実例に含まれていても）
-     独立duration評価が別途確認されない限りScore calibrationの対象
-     実例には含めない。** 現時点でScore calibrationの対象実例と
-     なり得るのは、step 5の2エビデンスが個別に確認できたDP9-05〜10の
-     部分集合のみであり（DP9-01/02/03/04はいずれもScore calibration
-     から除外）、正誤判定の基準がChoiceではなくScore帯である点は
+     Choice calibrationの対象範囲であることに加えて、**次の条件
+     （ハードコードされた固定fixtureリストではなく条件そのもの——
+     今回のCodex指摘への対応として明記）を満たすDP-9実例**を対象と
+     する：`Σ Active Duration (h) ≤ 8時間`、かつ`Started At`→
+     `Completed At`のelapsed時間が8時間以下であることの両方
+     （Waiting区間を検証済み控除した場合を含む）を、その実例について
+     **個別に**満たすこと（＝step 5がDP9-05〜10のadmissionに要求する
+     のと同じ独立duration評価ゲート）。DP9-01/02のground truth
+     （`needs-split`）は review round数の枯渇・実際の分割実施という
+     審査結果から確立されており（§8.2.2参照）、実測durationから独立に
+     確立されたものではない——`needs-split`というChoiceラベルから
+     `Score != 2`というScore帯truthを推論するのは循環参照になるため、
+     これをScore calibrationの根拠にはできない。**したがって、
+     DP9-01/02は（Choice calibration・Accuracyの対象実例に含まれて
+     いても）独立duration評価が別途確認されない限りScore calibration
+     の対象実例には含めない。** DP9-04も§8.2.4 step 6の通り
+     qualified/ambiguous ground truth（限定付き`needs-split`）のため
+     Accuracy/Agreementと同様にScore calibrationの対象外とする。
+     **DP9-03は上記のいずれとも異なる**——step 4で独立実行完了
+     エビデンスが確認され循環性が解消された場合、DP9-03は上記の
+     独立duration評価ゲートを満たす限り、DP9-05〜10と同じ通常の
+     検証済み実例としてScore calibrationの対象に**含める**（step 4・
+     step 6のObjective Accuracy set算入と整合させる）。未確認の間は
+     対象外とする。したがって現時点でScore calibrationの対象実例と
+     なり得るのは、上記ゲートを個別に満たすことが確認できたDP-9実例
+     （現状ではDP9-05〜10の部分集合。DP9-03も確認され次第これに
+     加わる）であり、DP9-01/02/04は恒常的にScore calibrationから
+     除外する。正誤判定の基準がChoiceではなくScore帯である点は
      従来通り。
 
    両者を組み合わせた単一の「合成confidence」は、明示的な合成式を
@@ -2080,10 +2116,14 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
      confidence = `yes確率`そのもの。predicted labelが`No`の場合、
      confidence = `1 - yes確率`（「`No`である」という予測自体への
      モデルの確信度であり、`yes確率`の生値をそのまま使わない）。
-   - **bin（今回のCodex指摘への対応として、下限を0.5から0.3へ訂正）**:
-     0.1刻みで**confidence 0.3〜1.0の範囲**（0.3〜0.4, 0.4〜0.5,
-     0.5〜0.6, 0.6〜0.7, 0.7〜0.8, 0.8〜0.9, 0.9〜1.0の7bin）で
-     reliability diagramを作成する。confidenceの取りうる下限は0.3で
+   - **bin（今回のCodex指摘への対応として、下限を0.5から0.3へ訂正。
+     bin境界の半開区間規約は§8.0.2「Calibration binの境界規約」に従う
+     ——各binは`[下限, 上限)`の半開区間、最上位bin`0.9〜1.0`のみ両端を
+     含む`[0.9, 1.0]`）**:
+     0.1刻みで**confidence 0.3〜1.0の範囲**（`[0.3,0.4)`, `[0.4,0.5)`,
+     `[0.5,0.6)`, `[0.6,0.7)`, `[0.7,0.8)`, `[0.8,0.9)`, `[0.9,1.0]`の
+     7bin。`confidence = 0.7`は`[0.7,0.8)`に属し`[0.6,0.7)`には属さない）
+     で reliability diagramを作成する。confidenceの取りうる下限は0.3で
      ある——predicted label`No`はDP-10の閾値（`yes確率 < 0.7`、上記
      §8.3.3）で決まり、そのconfidenceは`1 - yes確率`である。`yes確率`は
      0以上0.7未満の範囲を取り得るため、`No`側のconfidence（`1 -
