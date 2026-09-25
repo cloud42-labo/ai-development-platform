@@ -1376,8 +1376,18 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
    T04を最初に（Notionアクセス取得前の分岐で）実行した場合、10件
    すべてが検証完了までは参考値扱いのまま主要指標から除外され、
    Accuracy等の見出し指標はいずれも「検証待ちのため計測不能」となる。**
-   10件全件のChoice出力とground truthの比較自体は記録するが、見出しの
-   数値に混ぜない。`needs-split`（DP9-01, 02, 04）を`fits-as-is`と
+   **Choice出力の収集自体も、この主要指標の対象範囲確定とは別に、
+   下記step 8が定めるrequest schema admission gate（`task_title`/
+   `task_description`/`dependency_count`/`prior_review_rounds_if_reattempt`/
+   `similar_task_split_history`の5フィールド全てが着手前の値として
+   凍結・直列化できていること）を満たす実例に限る。現時点でこの条件を
+   満たす実例は0件であるため（§8.2.1参照）、Choice出力の収集自体も
+   実行できず、10件全件について「収集不能——request schemaを完全に
+   満たす実例が確保できていない」と記録する（step 8と同じ理由。欠落
+   フィールドを推測・捏造してJevへ送信し出力を得ることは禁止される）。
+   request schemaを完全に満たす実例が1件以上確保でき次第、その実例に
+   限ってChoice出力を収集し、ground truthとの比較を記録する（見出しの
+   数値には含めない）。** `needs-split`（DP9-01, 02, 04）を`fits-as-is`と
    誤判定するケースは、検証が完了し主要指標に含められる場合に最重要視
    する（false-negativeがレビューラウンド浪費に直結するため）。
 2. **DP9-04のpre-execution input凍結の前提確認（今回の修正で新設）**:
@@ -1788,8 +1798,16 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
    Task）を一方も含まないため、population mismatchとして主要指標から
    除外し、参考実例（§8.3.1参照）へ格下げしてある。**したがって本書に
    収録する2件全件が参考実例に留まり、主要指標側の分母は0である。**
-   2件のNoul出力とground truthの比較自体は記録するが、見出しの数値には
-   混ぜない。なお、母集団としてはより近かった3件（§8.3.1が記す通り、
+   **DP10-01・DP10-05は、下記step 5が定める通りいかなる形であっても
+   ライブJev呼び出しの対象にしない（比較対象がTaskではなくcommit/PRで
+   あり、有効な`candidate_existing_task_status`を構成できず§8.3.3の
+   request schemaへ直列化できないため）。したがってこの2件はNoul出力を
+   一切持たず、Jev出力とground truthの比較自体が存在しない。** この2件が
+   本書に残すのは静的なground truth（既知のduplicate=Yesという結論と、
+   population mismatchという判定理由）のみであり、参考実例として
+   §8.3.1・§8.3.2に記録済みのそれ以上のもの（Jevへ送った出力）は
+   存在せず、今後も生成しない。なお、母集団としてはより近かった3件
+   （§8.3.1が記す通り、
    非公開content由来のため行ごと削除済み）も、Pre-decision inputが
    未凍結のため主要指標には含められない状態のまま削除されており、
    削除は主要指標の値に影響しない。母集団適合実例の追加探索は§8.3.1で
@@ -1840,12 +1858,14 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
    **現時点では主要指標対象・qualified対象ともに検証済み実例が0件
    （step 1）のため、上記の算出方法を適用できる実例がなく、「計測
    不能——主要指標対象の検証済み母集団適合実例が0件」と記録する。**
-   本書収録2件（DP10-01・DP10-05、すべて参考実例）のNoul出力・二値変換後の
-   予測ラベル自体は参考値として記録してよいが、見出しのAccuracyにも
-   Agreementにも混ぜない。T04がPre-decision input・ground truth・
-   母集団適合の検証を完了し、主要指標対象の実例を1件以上確保した
-   時点で、直ちに上記のAccuracy/Agreement算出へ移れるよう本項を
-   あらかじめ確定しておく。
+   **本書収録2件（DP10-01・DP10-05）は、上記step 1・下記step 5の通り
+   いかなる形であってもライブJev呼び出しの対象にしないため、Noul出力
+   も二値変換後の予測ラベルも存在しない。この2件について参考値として
+   記録できるのは§8.3.1・§8.3.2の静的なground truth（結論と判定理由）
+   のみであり、それ以上の出力は生成しない。** T04がPre-decision
+   input・ground truth・母集団適合の検証を完了し、主要指標対象の実例を
+   1件以上確保した時点で、直ちに上記のAccuracy/Agreement算出へ移れる
+   よう本項をあらかじめ確定しておく。
 4. **Calibration**: 主要指標対象が0件のため「計測不能」として記録し、
    無理に方向性の結論を出さない。母集団適合実例が確保でき、かつ
    duplicate=Yes/No双方の検証済み実例が揃ってから本格的なcalibration
@@ -1946,8 +1966,12 @@ Accuracy・false-escalation rate・missed-escalation rateはすべてこの
   - **結論: DP-9は10件のフィクスチャを確保しているが、そのうち主要
     指標（Accuracy／Agreement／Calibration／False-escalation rate／
     Missed-escalation rate）に無条件で使えるものは現時点で1件もない。**
-    10件全件のChoice/Score出力とground truthの比較自体は参考値として
-    記録できるが、見出しの数値には一切混ぜない。Notionアクセスを持つ
+    **§8.2.4 step 1・step 8が定める通り、request schemaの5フィールド
+    全てが凍結・直列化できている実例も現時点で0件であるため、
+    Choice/Score出力の収集自体が実行できない。10件全件について
+    「収集不能——request schemaを完全に満たす実例が確保できていない」
+    と記録し、見出しの数値はもとより参考値としてもJev出力とground
+    truthの比較は存在しない。** Notionアクセスを持つ
     セッションが、少なくとも1件（できれば`fits-as-is`側・
     `needs-split`側それぞれ1件以上）についてpre-execution input・
     ground truthの両方を凍結するまで、DP-9の主要指標はすべて
