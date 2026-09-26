@@ -1,9 +1,9 @@
 # Context7 Evaluation — Compose / Android Location SDK (ADP-031-D)
 
 Date: 2026-09-26 (JST)
-Status: **Complete — decision: not adopted as a version-pinned verification source; allowed as an optional lookup aid under conditions (§6)**
+Decision: **not adopted as a version-pinned verification source; allowed as an optional lookup aid under conditions (§6)**. Task status, timestamps and Human wait records live in the Notion task, not here.
 Scope: Notion `ADP-031-D｜Context7を導入しCompose・Android SDKを検証する`
-(Story ADP-027 / ADP-028, Approach Review = Approved). Executed as Thread D of the
+(Story ADP-027 / ADP-028). Executed as Thread D of the
 `ADP-064-T03` Claude Projects parallel-thread PoC.
 
 Acceptance criteria (verbatim from Notion, not relaxed):
@@ -45,12 +45,11 @@ permission sequence (`MainActivity.kt:87-131`).
 | `npx @upstash/context7-mcp` (npm 4.1.1 reachable) | Not viable: the local server calls the same `context7.com` API, so it hits the same 403 |
 | WebFetch of the Context7 REST API | Refused (`robots.txt` disallows `/api`) |
 | WebFetch of the Context7 library page `context7.com/websites/developer_android_develop` | Reachable, but it is only the index page, not the docs query path |
-| claude.ai connector directory | Official **Context7** connector exists (`resolve-library-id`, `query-docs`), not connected at first |
-| **Context7 connector after Owner connected it** (19:04 JST) | **Works.** All queries in §4 ran through it; the container network policy is irrelevant on this path |
+| claude.ai Context7 connector (`resolve-library-id`, `query-docs`) | **Works once the Owner connects it.** All queries in §4 ran through it; the container network policy does not apply on this path |
 
 human-gate-preflight Step 0: no AI-only route reaches Context7's query path. Both
 remaining routes are a permission grant (connector OAuth, or network allow-list),
-so they are Human-only → `HUMAN-ADP-031-D-1` (Notion). Human wait: request posted 18:59:00 JST, Owner connected the connector 19:04:15 JST (5 min).
+so they are Human-only (tracked as `HUMAN-ADP-031-D-1` in Notion). Enabling the connector needs no network allow-list change.
 
 Research pre-flight (`governance/research-security-policy.md` §6) for the future
 Context7 calls: outbound payload is public library names and public API questions
@@ -75,13 +74,13 @@ directly on 2026-09-26 JST.
 | B8 | Current location | `getLastLocation()` can be `null` (location off, no fix yet, Play services restart); `getCurrentLocation()` "is the recommended way to get a fresh location" ([Retrieve current location](https://developer.android.com/develop/sensors-and-location/location/retrieve-current)) | `lastLocation` for initial camera and for walking-route origin | Route silently not fetched when `null` (`SpotViewModel.kt:311`) | **Recommended (P3)**, `getCurrentLocation` fallback for the route origin |
 | B9 | `play-services-location` version | 21.4.0 (2026-06-25): "Changed IMPLICIT_MIN_UPDATE_INTERVAL to represent half of the requested interval." ([Release notes](https://developers.google.com/android/guides/releases)) | 21.3.0, no `requestLocationUpdates` | No impact | No |
 | B10 | `maps-compose` version | Latest 8.6.0 (2026-09-03); `rememberMarkerState` is `@Deprecated` in favour of `rememberUpdatedMarkerState` ([source](https://github.com/googlemaps/android-maps-compose/blob/main/maps-compose/src/main/java/com/google/maps/android/compose/Marker.kt)) | 6.2.1; `remember(id, lat, lng) { MarkerState(...) }` (not the deprecated API) | Two majors behind (7.0.0, 8.0.0). README does not state breaking changes | Upgrade decision out of scope; no bug found |
-| B11 | Compose BOM mapping | Latest BOM 2026.09.00 listed, but the per-library mapping table is rendered by JavaScript and **could not be read** by direct fetch ([BOM mapping](https://developer.android.com/develop/ui/compose/bom/bom-mapping)) | 2024.09.03 | Unknown: which `material3` / `ui` version the app runs on cannot be confirmed from docs alone | Open (Context7 question Q1) |
+| B11 | Compose BOM mapping | The mapping is **determinable**: the published POM `androidx.compose:compose-bom:2024.09.03` (Google Maven) and the app's resolved Gradle graph both state it. In this environment neither could be read: `dl.google.com` / `maven.google.com` are blocked by the network policy and disallowed by robots.txt for WebFetch, Gradle cannot resolve without Google Maven, and the [BOM mapping](https://developer.android.com/develop/ui/compose/bom/bom-mapping) page renders its table with JavaScript | 2024.09.03 | Not a spec gap, only an environment gap. The ground truth is still one POM read away | Open: close it with `./gradlew :app:dependencies --configuration releaseRuntimeClasspath` on a machine with Google Maven access |
 
 Direct-docs friction observed: B10 needed a source clone (README silent), and B11
-was unreadable without a browser. These are the concrete points where Context7 is
+could not be read from this environment (the authoritative POM host is blocked; the docs page needs a browser). These are the concrete points where Context7 is
 expected to help.
 
-## 4. Context7 results (run 2026-09-26 19:05–19:10 JST)
+## 4. Context7 results
 
 Same questions as planned before the run. Context7 offered **no version selection**
 for any Android / Compose documentation library (`resolve-library-id` listed no
@@ -89,7 +88,7 @@ for any Android / Compose documentation library (`resolve-library-id` listed no
 
 | Q | Question | Context7 library used | Result | vs baseline |
 |---|---|---|---|---|
-| Q1 | material3 / ui versions in BOM 2024.09.03 | `/websites/developer_android_develop_ui_compose` | **Fail.** Returns BOM setup snippets (for 2026.08.00, one release behind the live page's 2026.09.00) and a description of the mapping page, not the mapping rows | Same gap as direct read (B11) |
+| Q1 | material3 / ui versions in BOM 2024.09.03 | `/websites/developer_android_develop_ui_compose` | **Fail.** Returns BOM setup snippets (for 2026.08.00, one release behind the live page's 2026.09.00) and a description of the mapping page, not the mapping rows | Neither path produced the rows here. Scoring Q1 does not need the ground-truth values: Context7 returned no mapping rows for any BOM version, so it fails regardless of what the POM says |
 | Q2 | Re-registration after `GEOFENCE_NOT_AVAILABLE` | `/websites/developer_android`, `/websites/developer_android_develop`, `/websites/developer_android_guide` | **Fail.** "No documentation matched" / "Could not fetch" on all 3 attempts | Direct read (B1) found it on the first page |
 | Q3 | `getCurrentLocation` vs `lastLocation` | `/websites/developer_android_guide` (3rd attempt) | **Pass.** Cites `developer.android.com/guide/topics/location/strategies`: null cases and "getCurrentLocation() … the recommended and safer approach" | Matches B8 |
 | Q4 | maps-compose MarkerState / 6→8 changes | `resolve-library-id` ×2, `/googlemaps/android-maps-utils` | **Fail.** `android-maps-compose` is not indexed; closest hits were other map SDKs | Direct read needed a source clone (B10) |
