@@ -129,5 +129,89 @@
    "F9 remember(key)": true,
    "F10 状態ホルダー方針": true
   }
+ },
+ {
+  "file": "D-A-revised-by-jtw.md",
+  "chars_prose": 1867,
+  "code_blocks": 3,
+  "headings": [
+   "# Jetpack Compose の状態保持：remember・rememberSaveable・ViewModel をどう使い分けるか",
+   "## remember はコンポジション限りの記憶装置",
+   "## rememberSaveable：構成変更もプロセス終了後の復元も越える",
+   "## ViewModel：構成変更を越えるが、プロセス終了時は消える",
+   "## 共通して覚えておきたい前提",
+   "## 使い分けの指針"
+  ],
+  "sentences": 43,
+  "avg_sentence_len": 45.5,
+  "short_sentences_le15": 1,
+  "long_sentences_ge80": 3,
+  "paragraphs": 14,
+  "bold": 0,
+  "second_person_anata": 0,
+  "questions": 0,
+  "desu_masu": 0,
+  "i_adj_desu": 0,
+  "jtw_banned_hits": {
+   "接続の型": {
+    "において": 1
+   }
+  },
+  "jtw_banned_total": 1,
+  "crw_leak_hits": {
+   "(?<!メモリ)回収": 1
+  },
+  "fact_coverage": {
+   "F1 コンポジション離脱で破棄": true,
+   "F2 mutableStateOf": true,
+   "F3 構成変更で消える(remember)": true,
+   "F4 rememberSaveable/Bundle": true,
+   "F5 Saver/Parcelize": true,
+   "F6 TransactionTooLarge": true,
+   "F7 SavedStateHandle": true,
+   "F8 明示的に閉じた場合": true,
+   "F9 remember(key)": true,
+   "F10 状態ホルダー方針": true
+  }
+ },
+ {
+  "file": "E-D-revised-by-crw.md",
+  "chars_prose": 1883,
+  "code_blocks": 3,
+  "headings": [
+   "# Jetpack Compose の状態保持：remember・rememberSaveable・ViewModel をどう使い分けるか",
+   "## remember はコンポジション限りの記憶装置",
+   "## rememberSaveable：どこまでなら生き延びるか",
+   "## ViewModel：構成変更は越えるが、プロセス終了では消える",
+   "## 三つがそろって手放す一線",
+   "## 使い分けの指針"
+  ],
+  "sentences": 49,
+  "avg_sentence_len": 40.1,
+  "short_sentences_le15": 3,
+  "long_sentences_ge80": 2,
+  "paragraphs": 16,
+  "bold": 0,
+  "second_person_anata": 0,
+  "questions": 0,
+  "desu_masu": 0,
+  "i_adj_desu": 0,
+  "jtw_banned_hits": {},
+  "jtw_banned_total": 0,
+  "crw_leak_hits": {
+   "(?<!メモリ)回収": 2
+  },
+  "fact_coverage": {
+   "F1 コンポジション離脱で破棄": true,
+   "F2 mutableStateOf": true,
+   "F3 構成変更で消える(remember)": true,
+   "F4 rememberSaveable/Bundle": true,
+   "F5 Saver/Parcelize": true,
+   "F6 TransactionTooLarge": true,
+   "F7 SavedStateHandle": true,
+   "F8 明示的に閉じた場合": true,
+   "F9 remember(key)": true,
+   "F10 状態ホルダー方針": true
+  }
  }
 ]
