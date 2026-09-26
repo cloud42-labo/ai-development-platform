@@ -1,7 +1,7 @@
 # Context7 Evaluation — Compose / Android Location SDK (ADP-031-D)
 
 Date: 2026-09-26 (JST)
-Status: **Partial — baseline complete, Context7 side blocked on `HUMAN-ADP-031-D-1`**
+Status: **Complete — decision: not adopted as a version-pinned verification source; allowed as an optional lookup aid under conditions (§6)**
 Scope: Notion `ADP-031-D｜Context7を導入しCompose・Android SDKを検証する`
 (Story ADP-027 / ADP-028, Approach Review = Approved). Executed as Thread D of the
 `ADP-064-T03` Claude Projects parallel-thread PoC.
@@ -45,11 +45,12 @@ permission sequence (`MainActivity.kt:87-131`).
 | `npx @upstash/context7-mcp` (npm 4.1.1 reachable) | Not viable: the local server calls the same `context7.com` API, so it hits the same 403 |
 | WebFetch of the Context7 REST API | Refused (`robots.txt` disallows `/api`) |
 | WebFetch of the Context7 library page `context7.com/websites/developer_android_develop` | Reachable, but it is only the index page, not the docs query path |
-| claude.ai connector directory | Official **Context7** connector exists (`resolve-library-id`, `query-docs`), not connected |
+| claude.ai connector directory | Official **Context7** connector exists (`resolve-library-id`, `query-docs`), not connected at first |
+| **Context7 connector after Owner connected it** (19:04 JST) | **Works.** All queries in §4 ran through it; the container network policy is irrelevant on this path |
 
 human-gate-preflight Step 0: no AI-only route reaches Context7's query path. Both
 remaining routes are a permission grant (connector OAuth, or network allow-list),
-so they are Human-only → `HUMAN-ADP-031-D-1` (Notion, Status Ready, Assigned Human).
+so they are Human-only → `HUMAN-ADP-031-D-1` (Notion). Human wait: request posted 18:59:00 JST, Owner connected the connector 19:04:15 JST (5 min).
 
 Research pre-flight (`governance/research-security-policy.md` §6) for the future
 Context7 calls: outbound payload is public library names and public API questions
@@ -80,22 +81,31 @@ Direct-docs friction observed: B10 needed a source clone (README silent), and B1
 was unreadable without a browser. These are the concrete points where Context7 is
 expected to help.
 
-## 4. Context7 comparison plan (to run after `HUMAN-ADP-031-D-1`)
+## 4. Context7 results (run 2026-09-26 19:05–19:10 JST)
 
-Same questions, answered through Context7 `resolve-library-id` → `query-docs`,
-pinned to the app's versions where Context7 offers version selection.
+Same questions as planned before the run. Context7 offered **no version selection**
+for any Android / Compose documentation library (`resolve-library-id` listed no
+`Versions`), so none of the answers could be pinned to the app's versions.
 
-| Q | Library (target version) | Question | Compare against |
-|---|---|---|---|
-| Q1 | Compose BOM 2024.09.03 | material3 / ui versions in this BOM | B11 (direct docs failed) |
-| Q2 | play-services-location 21.3.0 | Required handling of `GEOFENCE_NOT_AVAILABLE` / re-registration | B1 |
-| Q3 | play-services-location 21.3.0 | `getCurrentLocation` vs `lastLocation` | B8 |
-| Q4 | maps-compose 6.2.1 vs 8.6.0 | MarkerState creation guidance and breaking changes 6→8 | B10 |
-| Q5 | Compose (BOM 2024.09.03) | `collectAsState` vs `collectAsStateWithLifecycle` for `MainActivity.kt:67` | New |
-| Q6 | Android 16 (API 36) | Location / background behavior changes affecting geofencing | New |
+| Q | Question | Context7 library used | Result | vs baseline |
+|---|---|---|---|---|
+| Q1 | material3 / ui versions in BOM 2024.09.03 | `/websites/developer_android_develop_ui_compose` | **Fail.** Returns BOM setup snippets (for 2026.08.00, one release behind the live page's 2026.09.00) and a description of the mapping page, not the mapping rows | Same gap as direct read (B11) |
+| Q2 | Re-registration after `GEOFENCE_NOT_AVAILABLE` | `/websites/developer_android`, `/websites/developer_android_develop`, `/websites/developer_android_guide` | **Fail.** "No documentation matched" / "Could not fetch" on all 3 attempts | Direct read (B1) found it on the first page |
+| Q3 | `getCurrentLocation` vs `lastLocation` | `/websites/developer_android_guide` (3rd attempt) | **Pass.** Cites `developer.android.com/guide/topics/location/strategies`: null cases and "getCurrentLocation() … the recommended and safer approach" | Matches B8 |
+| Q4 | maps-compose MarkerState / 6→8 changes | `resolve-library-id` ×2, `/googlemaps/android-maps-utils` | **Fail.** `android-maps-compose` is not indexed; closest hits were other map SDKs | Direct read needed a source clone (B10) |
+| Q5 | `collectAsState` vs `collectAsStateWithLifecycle` | `/websites/developer_android_develop_ui_compose` | **Pass.** Cites `developer.android.com/develop/ui/compose/state`: "collectAsStateWithLifecycle … is the recommended way to collect flows in Android apps" | **New diff N1** (not in baseline) |
+| Q6 | Android 16 (API 36) changes affecting location | `/android/skills` | **Partial.** No API 36 geofencing change returned. Returned Play Location Access Policy matrix (official `android/skills` repo): background location disclosure must say "location" and "when closed or not in use" | **New check N2** |
 
-Per question, record: reached the primary source? (Y/N + URL Context7 cites),
-version-correct? , matches or contradicts the baseline, time and tool calls used.
+New findings from Context7:
+
+| # | Topic | Source cited by Context7 | Existing implementation | Impact | Fix needed |
+|---|---|---|---|---|---|
+| N1 | Flow collection in Compose | [State and Jetpack Compose](https://developer.android.com/develop/ui/compose/state) | `viewModel.uiState.collectAsState()` (`MainActivity.kt:67`) | Collection continues while the Activity is in the background (resource use only; no functional bug found) | Recommended (P3) |
+| N2 | Background location prominent disclosure | [android/skills play-policy-insights](https://github.com/android/skills/blob/main/play/play-policy-insights/resources/goal_permissions_and_apis.md) | `OnboardingIntro.kt:66` states location use "アプリを閉じているときや…" before the OS dialog | Meets the stated condition | No |
+
+Usage: 14 Context7 calls (4 `resolve-library-id`, 10 `query-docs`) on the connector's
+free plan. No code or secrets were sent; queries contained public library names and
+API questions only.
 
 ## 5. Adoption criteria (decision rule, fixed before running)
 
@@ -109,8 +119,30 @@ version-correct? , matches or contradicts the baseline, time and tool calls used
 AGENTS.md "Verify current primary documentation" stays the rule either way;
 Context7 is a retrieval aid, not a new source of truth.
 
-## 6. Result
+## 6. Result and decision
 
-_Pending `HUMAN-ADP-031-D-1`._ The acceptance criterion is **not yet met**: the
-baseline (differences, impact, fix need) is recorded above, but Context7 has not
-reached the primary sources, so the adoption decision cannot be made yet.
+Score: 2 pass (Q3, Q5), 1 partial (Q6), 3 fail (Q1, Q2, Q4). No answer
+contradicted the official pages.
+
+**Decision: not adopted as a version-specific verification source for ADP.**
+Q1 and Q4 both failed, and no Android/Compose library in Context7 offers version
+pinning, so the "Do not adopt" condition applies to the task's core question
+("対象バージョンの一次資料"). It also missed the one real defect (B1) that a direct
+read found on the first page.
+
+**Usage conditions (optional aid, not a gate):**
+
+1. Use it for "what is the current recommended API" questions on well-indexed
+   official docs (developer.android.com Compose/guide). It surfaced one diff (N1)
+   and one policy check (N2) that the baseline had not covered.
+2. Always open the cited URL and quote it in evidence; Context7 output alone is
+   not evidence under AGENTS.md.
+3. Do not use it for version mapping, release notes, or libraries it does not
+   index (android-maps-compose). Read the release notes / source directly.
+4. Budget: at most 3 `query-docs` calls per question (the tool's own limit); a
+   miss after that means switch to direct reading.
+5. No standing MCP setup or new infrastructure (Approach Decision). The claude.ai
+   connector is enough and needs no network allow-list change.
+
+Fix candidates for `serendipity-spot` (not changed by this task): B1 (P2),
+B8 (P3), N1 (P3).
