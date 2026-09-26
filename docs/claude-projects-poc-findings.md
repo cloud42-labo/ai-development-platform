@@ -24,8 +24,10 @@ PoCから得た、ADPの設計に効く恒久的な知見だけを残す。各Ta
 ## 知見
 
 1. **並列分解と自律進行は成立する。** Notionで定義済みの独立Taskを1 Task = 1 Threadで
-   渡せば、各ThreadはADPの着手・完了手順（Status / Started At / TTE / Result）を自走できた。
+   渡せば、各ThreadはNotionの着手記録から検証・PR・Result記録までを自走できた。
    T02 §5.3 の「Coordinatorに独自分解をさせず、Notion Taskをそのまま渡す」形で運用可能。
+   ただし着手・完了のNotion操作をThread自身が行っており、T02 §5の所有境界とは異なる
+   （下記「T02のアーキテクチャ案との差分」参照）。
 2. **制約はAI処理能力ではなくHumanの注意になる。** 27分間でHuman対応が7回発生し、
    うち3回は設定不足による不要な待ち、1回は状態表現の誤りだった。Threadを増やすほど
    Humanへの割込みが増えるため、Thread数はHuman処理能力に合わせたWIP制御が要る。
@@ -51,6 +53,13 @@ PoCから得た、ADPの設計に効く恒久的な知見だけを残す。各Ta
 - T02 §5.2 は単一リポジトリのProjectに限ることを推奨したが、本PoCは3リポジトリ構成で実施した。
   マージ権限の誤りは、リポジトリごとにルールが異なることと、それが指示に入っていなかったことの
   両方に起因する。採用する場合も §5.2 の制約は維持する。
+- T02 §5 は、pre-flight（In Progress・Started At・TTE開始）とNotionの完了処理
+  （受入条件の検証 → Result → TTEを`Ended At`で閉じる → `Completed At` → 最後に`Status = Done`）を
+  呼び出し側エージェントの責務とし、Thread自身には行わせないとした（§5 の 1・6）。本PoCでは
+  各Threadがこれらを自ら実行し、C・EはThread自身がDoneまで遷移させた。したがって本PoCは
+  §5 の Execution Adapter 境界を検証したものではなく、「Threadにライフサイクル全体を任せた場合」の
+  観測である。採用する場合の所有境界は T02 §5 の制約（完了処理は呼び出し側）を維持し、
+  その境界での運用は別途検証が要る。
 - T02 §5.4（Project memoryを正本にしない）について、本PoCではCoordinatorの観測記録が
   Project memoryに蓄積された。恒久化すべき内容はこの文書・brain・Notionへ移した。
 
