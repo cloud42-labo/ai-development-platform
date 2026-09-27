@@ -1,0 +1,217 @@
+[
+ {
+  "file": "A-no-skill.md",
+  "chars_prose": 1956,
+  "code_blocks": 3,
+  "headings": [
+   "# Jetpack Compose の状態保持：remember・rememberSaveable・ViewModel をどう使い分けるか",
+   "## remember はコンポジション限りの記憶装置",
+   "## rememberSaveable：構成変更もプロセス終了後の復元も越える",
+   "## ViewModel：構成変更を越えて生きるが、プロセス終了には無力",
+   "## 共通して覚えておきたい前提",
+   "## 使い分けの指針"
+  ],
+  "sentences": 44,
+  "avg_sentence_len": 46.5,
+  "short_sentences_le15": 1,
+  "long_sentences_ge80": 4,
+  "paragraphs": 14,
+  "bold": 0,
+  "second_person_anata": 0,
+  "questions": 0,
+  "desu_masu": 0,
+  "i_adj_desu": 0,
+  "jtw_banned_hits": {
+   "予告・総括": {
+    "この記事では": 1,
+    "ここまでの内容を整理": 1
+   },
+   "接続の型": {
+    "において": 1
+   },
+   "翻訳調": {
+    "筋が悪い": 1
+   }
+  },
+  "jtw_banned_total": 4,
+  "crw_leak_hits": {
+   "(?<!メモリ)回収": 1
+  },
+  "fact_coverage": {
+   "F1 コンポジション離脱で破棄": true,
+   "F2 mutableStateOf": true,
+   "F3 構成変更で消える(remember)": true,
+   "F4 rememberSaveable/Bundle": true,
+   "F5 Saver/Parcelize": true,
+   "F6 TransactionTooLarge": true,
+   "F7 SavedStateHandle": true,
+   "F8 明示的に閉じた場合": true,
+   "F9 remember(key)": true,
+   "F10 状態ホルダー方針": true
+  }
+ },
+ {
+  "file": "B-japanese-tech-writing.md",
+  "chars_prose": 1476,
+  "code_blocks": 2,
+  "headings": [
+   "# 画面の状態はどこに置くか：remember・rememberSaveable・ViewModelの使い分け",
+   "## remember が保持し損なうもの",
+   "## 変更を再コンポーズに伝える",
+   "## rememberSaveable が越えられる範囲",
+   "## ViewModel との役割分担"
+  ],
+  "sentences": 32,
+  "avg_sentence_len": 48.3,
+  "short_sentences_le15": 0,
+  "long_sentences_ge80": 1,
+  "paragraphs": 11,
+  "bold": 0,
+  "second_person_anata": 0,
+  "questions": 0,
+  "desu_masu": 0,
+  "i_adj_desu": 0,
+  "jtw_banned_hits": {},
+  "jtw_banned_total": 0,
+  "crw_leak_hits": {},
+  "fact_coverage": {
+   "F1 コンポジション離脱で破棄": true,
+   "F2 mutableStateOf": true,
+   "F3 構成変更で消える(remember)": true,
+   "F4 rememberSaveable/Bundle": true,
+   "F5 Saver/Parcelize": true,
+   "F6 TransactionTooLarge": true,
+   "F7 SavedStateHandle": true,
+   "F8 明示的に閉じた場合": true,
+   "F9 remember(key)": true,
+   "F10 状態ホルダー方針": true
+  }
+ },
+ {
+  "file": "C-jtw-plus-cognitive-rhythm.md",
+  "chars_prose": 1470,
+  "code_blocks": 3,
+  "headings": [
+   "# 画面を回しただけで消える値",
+   "## `remember`が保持しているもの",
+   "## `rememberSaveable`とBundleの制約",
+   "## `ViewModel`と、それでも消える場合",
+   "## 三つの置き場所"
+  ],
+  "sentences": 40,
+  "avg_sentence_len": 36.8,
+  "short_sentences_le15": 2,
+  "long_sentences_ge80": 0,
+  "paragraphs": 14,
+  "bold": 0,
+  "second_person_anata": 0,
+  "questions": 0,
+  "desu_masu": 0,
+  "i_adj_desu": 0,
+  "jtw_banned_hits": {
+   "予告・総括": {
+    "ここでは": 1
+   }
+  },
+  "jtw_banned_total": 1,
+  "crw_leak_hits": {
+   "(?<!メモリ)回収": 1
+  },
+  "fact_coverage": {
+   "F1 コンポジション離脱で破棄": true,
+   "F2 mutableStateOf": true,
+   "F3 構成変更で消える(remember)": true,
+   "F4 rememberSaveable/Bundle": true,
+   "F5 Saver/Parcelize": true,
+   "F6 TransactionTooLarge": true,
+   "F7 SavedStateHandle": true,
+   "F8 明示的に閉じた場合": true,
+   "F9 remember(key)": true,
+   "F10 状態ホルダー方針": true
+  }
+ },
+ {
+  "file": "D-A-revised-by-jtw.md",
+  "chars_prose": 1867,
+  "code_blocks": 3,
+  "headings": [
+   "# Jetpack Compose の状態保持：remember・rememberSaveable・ViewModel をどう使い分けるか",
+   "## remember はコンポジション限りの記憶装置",
+   "## rememberSaveable：構成変更もプロセス終了後の復元も越える",
+   "## ViewModel：構成変更を越えるが、プロセス終了時は消える",
+   "## 共通して覚えておきたい前提",
+   "## 使い分けの指針"
+  ],
+  "sentences": 43,
+  "avg_sentence_len": 45.5,
+  "short_sentences_le15": 1,
+  "long_sentences_ge80": 3,
+  "paragraphs": 14,
+  "bold": 0,
+  "second_person_anata": 0,
+  "questions": 0,
+  "desu_masu": 0,
+  "i_adj_desu": 0,
+  "jtw_banned_hits": {
+   "接続の型": {
+    "において": 1
+   }
+  },
+  "jtw_banned_total": 1,
+  "crw_leak_hits": {
+   "(?<!メモリ)回収": 1
+  },
+  "fact_coverage": {
+   "F1 コンポジション離脱で破棄": true,
+   "F2 mutableStateOf": true,
+   "F3 構成変更で消える(remember)": true,
+   "F4 rememberSaveable/Bundle": true,
+   "F5 Saver/Parcelize": true,
+   "F6 TransactionTooLarge": true,
+   "F7 SavedStateHandle": true,
+   "F8 明示的に閉じた場合": true,
+   "F9 remember(key)": true,
+   "F10 状態ホルダー方針": true
+  }
+ },
+ {
+  "file": "E-D-revised-by-crw.md",
+  "chars_prose": 1883,
+  "code_blocks": 3,
+  "headings": [
+   "# Jetpack Compose の状態保持：remember・rememberSaveable・ViewModel をどう使い分けるか",
+   "## remember はコンポジション限りの記憶装置",
+   "## rememberSaveable：どこまでなら生き延びるか",
+   "## ViewModel：構成変更は越えるが、プロセス終了では消える",
+   "## 三つがそろって手放す一線",
+   "## 使い分けの指針"
+  ],
+  "sentences": 49,
+  "avg_sentence_len": 40.1,
+  "short_sentences_le15": 3,
+  "long_sentences_ge80": 2,
+  "paragraphs": 16,
+  "bold": 0,
+  "second_person_anata": 0,
+  "questions": 0,
+  "desu_masu": 0,
+  "i_adj_desu": 0,
+  "jtw_banned_hits": {},
+  "jtw_banned_total": 0,
+  "crw_leak_hits": {
+   "(?<!メモリ)回収": 2
+  },
+  "fact_coverage": {
+   "F1 コンポジション離脱で破棄": true,
+   "F2 mutableStateOf": true,
+   "F3 構成変更で消える(remember)": true,
+   "F4 rememberSaveable/Bundle": true,
+   "F5 Saver/Parcelize": true,
+   "F6 TransactionTooLarge": true,
+   "F7 SavedStateHandle": true,
+   "F8 明示的に閉じた場合": true,
+   "F9 remember(key)": true,
+   "F10 状態ホルダー方針": true
+  }
+ }
+]
