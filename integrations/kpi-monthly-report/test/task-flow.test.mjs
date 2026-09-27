@@ -25,7 +25,12 @@ test('queryCreatedTasksForRange_ filters on the built-in Created (created_time) 
   assert.deepEqual(clauses.map((c) => Object.keys(c.created_time)[0]).sort(), ['before', 'on_or_after']);
 });
 
-test('queryClosedTasksForRange_ filters on the custom Closed At date property, with no Status restriction', () => {
+test('queryClosedTasksForRange_ filters on the custom Closed At date property AND requires a terminal Status (Done or Superseded)', () => {
+  // Regression (Codex review, PR #74): a Task can have `Closed At` written
+  // while `Status` is still non-terminal (documented partial-write/Reopen
+  // failure mode in integrations/notion-time-events/README.md). Without the
+  // Status condition, such a Task is double-counted as both "closed" here
+  // and still-open WIP by queryCurrentWipTasks_, corrupting Close/net/ratio.
   let capturedFilter;
   const routes = {
     'POST /v1/data_sources/tasks-ds/query': (body) => {
@@ -38,8 +43,12 @@ test('queryClosedTasksForRange_ filters on the custom Closed At date property, w
   sandbox.queryClosedTasksForRange_('2026-09-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z');
 
   const clauses = capturedFilter.and;
-  assert.ok(clauses.every((c) => c.property === 'Closed At' && c.date));
-  assert.ok(!clauses.some((c) => c.property === 'Status'), 'Task Close is unconditional on Status per Framework §3.1');
+  assert.ok(clauses.some((c) => c.property === 'Closed At' && c.date && c.date.on_or_after));
+  assert.ok(clauses.some((c) => c.property === 'Closed At' && c.date && c.date.before));
+  const statusClause = clauses.find((c) => c.or);
+  assert.ok(statusClause, 'must require a terminal Status alongside the Closed At date range');
+  const statuses = statusClause.or.map((c) => c.select.equals);
+  assert.deepEqual(statuses.sort(), ['Done', 'Superseded'].sort());
 });
 
 test('queryCurrentWipTasks_ matches Ready/In Progress/Review/Blocked only — excludes Backlog and terminal states', () => {

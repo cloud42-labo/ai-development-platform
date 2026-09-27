@@ -94,13 +94,18 @@ Notion page.
   classification this integration's Acceptance Criteria prohibit, so the
   report states plainly what it does and does not compute instead of quietly
   approximating the weekly metric.
-- **Task Flow (Create / Close / WIP) uses three separate queries, none of
-  them Status-restricted the way the Delivery/Human-completed metrics are.**
+- **Task Flow (Create / Close / WIP) uses three separate queries.**
   `queryCreatedTasksForRange_` filters the built-in `Created` (`created_time`)
-  property; `queryClosedTasksForRange_` filters the custom `Closed At` date
-  property with no `Status` condition (Task Close is unconditional
-  intake-drain volume per the Framework's §3.1 definition, not a quality
-  count); `queryCurrentWipTasks_` is a `Status`-snapshot query
+  property, with no `Status` restriction (Task Create is unconditional intake
+  volume per the Framework's §3.1 definition). `queryClosedTasksForRange_`
+  filters the custom `Closed At` date property **AND requires `Status` to be
+  a terminal one (`Done` or `Superseded`)** — `Closed At` can be written
+  while `Status` is still non-terminal (a documented partial-write/Reopen
+  failure mode, `integrations/notion-time-events/README.md`); without the
+  Status condition such a Task would be double-counted as both "closed" here
+  and still-open WIP by `queryCurrentWipTasks_`, corrupting Close, Task純増
+  (net), and the Close/Create ratio (Codex review, PR #74).
+  `queryCurrentWipTasks_` is a `Status`-snapshot query
   (`Ready`/`In Progress`/`Review`/`Blocked`, excluding `Backlog` and the two
   terminal statuses). Task-level Age is **not** computed for the same reason
   given in "Known limitations" below (`Blocked "Age" is not reported`).
@@ -149,19 +154,67 @@ Notion page.
   below this; if it is ever hit, the generated report's top callout says so
   explicitly (`truncated`) rather than silently under-counting.
 - **Re-running for an already-reported month is safe and idempotent.** The
-  page is found by its exact title (`findExistingReportPage_`) under the
-  Framework page, and its content is fully replaced (`replacePageContent_`)
-  rather than appended to — a re-run never creates a duplicate page and
-  never leaves stale sections mixed with fresh ones. `REPORT_TITLE_PREFIX`
-  must stay in exact sync with the live page title under the Framework page
-  (currently `AI Organization KPI / KMI｜`) — a silent drift between the two
-  would make this matching fail and a re-run would create a duplicate page
-  instead of updating the existing one.
+  page is found by its exact title (`findExistingReportPageWithFallback_` —
+  see "Legacy title fallback" below), and its content is fully replaced
+  (`replacePageContent_`) rather than appended to — a re-run never creates a
+  duplicate page and never leaves stale sections mixed with fresh ones.
 - **Sections 5 (構造的問題) and 6 (対策) are intentionally left for the
   monthly Final Review, not auto-generated.** Interpreting *why* a KPI/KMI
   moved is a human/AI judgment call the Framework's own §5 Review Cadence
   assigns to the 1st-of-month Final Review, not a data aggregation this
-  batch job should approximate — see "Report structure" above.
+  batch job should approximate — see "Report structure" above. Because a
+  rerun (`replacePageContent_`) otherwise deletes every top-level block, this
+  content is read back and re-embedded across a rerun — see "Preserving
+  Final Review content across reruns" below.
+
+### Preserving Final Review content across reruns
+
+`replacePageContent_` deletes every existing top-level block before
+rebuilding a page from the latest aggregates — necessary so a rerun never
+leaves stale sections mixed with fresh ones (see "Re-running..." above), but
+that would also silently destroy any §5/§6 content a Final Review had
+written directly onto the page (Codex review, PR #74). Before calling
+`replacePageContent_`, `generateMonthlyKpiReportForMonth_` reads the
+existing page's current children and pulls out whatever sits in §5/§6 beyond
+this file's own regenerated placeholder callout
+(`extractPreservedSections_` / `extractSectionHumanContent_`, matched by the
+exact heading/placeholder text `SECTION5_HEADING`/`SECTION5_PLACEHOLDER_TEXT`
+/ `SECTION6_HEADING`/`SECTION6_PLACEHOLDER_TEXT`/`DATA_QUALITY_HEADING`
+declare once and share with `buildReportBlocks_`). `buildReportBlocks_`
+re-embeds that content immediately after each section's freshly regenerated
+placeholder, so the rebuilt page is a strict superset of the previous one
+(this month's fresh aggregates plus whatever Final Review content already
+existed) rather than a regression to an empty placeholder.
+
+Each preserved block is sanitized (`sanitizeBlockForAppend_`) from the shape
+the Notion API returns (which carries `id`, `created_time`, etc. the create/
+append endpoints reject) down to the shape they accept, recursing into any
+block with children (a table's rows, a toggle's nested content, ...) the
+same way `tableBlock_` already embeds `table_row` children inline. **Known
+gap**: a block whose type-specific data itself contains a short-lived
+reference — most notably an uploaded `image`/`file` block's expiring
+internal URL — cannot be faithfully re-posted this way. Realistic Final
+Review content (headings, paragraphs, lists, callouts, quotes, tables,
+to-dos, code, dividers) has no such field, so this is an accepted,
+documented limitation rather than something this integration solves.
+
+### Legacy title fallback
+
+ADP-055-KMI renamed the live report page title going forward
+(`REPORT_TITLE_PREFIX`, `AI Organization KPI / KMI｜`), but
+`generateMonthlyKpiReportFor` explicitly supports backfilling or rerunning
+ANY past month per its own docstring — a month whose page was created under
+the pre-rename title (`LEGACY_REPORT_TITLE_PREFIX`, `AI Organization KPI｜`)
+and never manually renamed must still be found and updated, not duplicated
+under the new title (Codex review, PR #74; this is also what Acceptance
+Criterion 11 requires). `findExistingReportPageWithFallback_` checks the
+current title first and only falls back to the legacy one if that misses;
+`fetchPreviousMonthRawMetrics_` uses the same fallback so a month-over-month
+comparison isn't lost across the rename either. When a legacy-titled page is
+found, `renameReportPage_` migrates its title to the current one as part of
+that same update, so a later lookup for the same month takes the cheaper,
+first-checked current-title path — the integration converges on one title
+scheme instead of permanently carrying both.
 
 ### Month-over-month raw metrics
 
@@ -306,7 +359,12 @@ responses by method + path.
 `test/open-pr.test.mjs`, and `test/raw-metrics.test.mjs` cover the
 ADP-055-KMI additions (Task Flow queries/aggregation, Value Type coverage,
 AI autonomy, Open PR Age, and the month-over-month raw-metrics round trip).
-`test/full-report-smoke.test.mjs` is an end-to-end smoke test with
+`test/final-review-preservation.test.mjs` and
+`test/legacy-title-migration.test.mjs` cover the three Codex-review fixes on
+PR #74 (preserving §5/§6 human content across a rerun, requiring a terminal
+Status for Task Close, and the legacy-title fallback/migration — see
+"Preserving Final Review content across reruns" and "Legacy title fallback"
+above). `test/full-report-smoke.test.mjs` is an end-to-end smoke test with
 non-trivial data on every query path — the create/update idempotency tests
 use entirely empty data, which would not have caught a runtime error
 (undefined access, division by zero) reachable only when the 9 Management

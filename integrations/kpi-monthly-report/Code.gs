@@ -72,6 +72,14 @@ const MISSING_DATA_LABEL = 'Missing Data（未計測）';
 // title string — otherwise a re-run would create a second, duplicate page
 // instead of updating the existing one (violates Acceptance Criterion 11).
 const REPORT_TITLE_PREFIX = 'AI Organization KPI / KMI｜';
+// The title every report page carried before ADP-055-KMI's rename above.
+// `generateMonthlyKpiReportFor` can be (and per its own README is meant to
+// be) called to backfill/rerun ANY past month, not just ones already
+// migrated to the new title — a month whose page still carries this legacy
+// title must still be found and updated in place, never re-created under
+// the new title as a duplicate (Codex review, PR #74; Acceptance
+// Criterion 11). See findExistingReportPageWithFallback_.
+const LEGACY_REPORT_TITLE_PREFIX = 'AI Organization KPI｜';
 // An Open PR older than this (hours) counts toward the KMI "48h超率" — the
 // same 48h threshold the AI Organization KPI / KMI Framework's Management
 // Point ① KMI column defines ("Open PR Age・48h超率"). Not independently
@@ -88,6 +96,23 @@ const OPEN_PR_AGE_ALERT_HOURS = 48;
 // the following month's run reads that block back structurally instead of
 // parsing rendered text.
 const RAW_METRICS_MARKER = 'ai-organization-kpi-raw-metrics-v1';
+
+// §5/§6 headings and this file's own regenerated placeholder callout text,
+// each declared once here and reused by both buildReportBlocks_ (which
+// writes them) and extractPreservedSections_ (which reads them back before a
+// rerun deletes them) — see "Preserving Final Review content across
+// reruns" below. Keeping one definition prevents the two from silently
+// drifting apart.
+const SECTION5_HEADING = '5. 構造的問題';
+const SECTION5_PLACEHOLDER_TEXT =
+  '本セクションは自動集計の対象外。上記KPI/KMIから構造的問題を判断する作業（Management Point → KPI → KMI → 構造的問題という因果解釈）は、' +
+  'Framework §5 Review Cadenceが定める毎月1日の前月Final Review（Human/AI判断）でこのページへ直接追記する。' +
+  '推測分類を自動生成しないという本統合の一貫した方針（README Scope decisions）に従い、空欄のまま生成する。';
+const SECTION6_HEADING = '6. 対策・Backlog / Sprint / 正本更新';
+const SECTION6_PLACEHOLDER_TEXT =
+  '同じく前月Final Reviewで、セクション5の構造的問題ごとに対策と担当Skill（例: pr-review-convergence / human-gate-preflight / ' +
+  'backlog-refinement / sprint-planning / sprint-retrospective）を追記し、必要な変更をBacklog・Sprint・正本ドキュメントへ反映する。';
+const DATA_QUALITY_HEADING = 'データ品質・Unknown/未分類の扱い';
 
 // Notion search API page size / GitHub search API page size share this cap.
 const MAX_PAGE_SIZE = 100;
@@ -242,14 +267,22 @@ function generateMonthlyKpiReportForMonth_(target) {
     generatedAtIso: new Date().toISOString(),
   };
 
-  const blocks = buildReportBlocks_(report);
   const title = REPORT_TITLE_PREFIX + target.label;
-  const existingPageId = findExistingReportPage_(kpiFrameworkPageId_(), title);
+  const found = findExistingReportPageWithFallback_(kpiFrameworkPageId_(), target.label);
+  // Read back any Final Review content already sitting in §5/§6 BEFORE
+  // replacePageContent_ deletes it, so buildReportBlocks_ can re-embed it
+  // into the freshly generated page instead of silently discarding it.
+  const preserved = found.pageId ? extractPreservedSections_(found.pageId) : { section5: [], section6: [] };
+  const blocks = buildReportBlocks_(report, preserved);
 
-  if (existingPageId) {
-    replacePageContent_(existingPageId, blocks);
-    Logger.log('Updated existing report page ' + existingPageId + ' for ' + target.label);
-    return { pageId: existingPageId, action: 'updated', label: target.label };
+  if (found.pageId) {
+    if (found.legacyTitle) {
+      renameReportPage_(found.pageId, title);
+      Logger.log('Migrated report page ' + found.pageId + ' from the legacy title to ' + title);
+    }
+    replacePageContent_(found.pageId, blocks);
+    Logger.log('Updated existing report page ' + found.pageId + ' for ' + target.label);
+    return { pageId: found.pageId, action: 'updated', label: target.label, migratedFromLegacyTitle: found.legacyTitle };
   }
 
   const pageId = createReportPage_(kpiFrameworkPageId_(), title, blocks);
@@ -527,12 +560,20 @@ function queryCreatedTasksForRange_(startIso, endIsoExclusive) {
 }
 
 // Task Close数 (Framework §3.1): every record whose `Closed At` falls in the
-// target month, regardless of which terminal Status set it (Done or
-// Superseded both write `Closed At` — see integrations/notion-time-events
-// README on Reopen/Superseded). Unlike queryCompletedTasksForRange_ (used for
-// the Done-only Delivery/Human-completed metrics), this one intentionally
-// does not require Status = Done, because Task Close is a Flow/throughput
-// count of the intake pipeline draining, not a quality/outcome count.
+// target month AND whose current `Status` is a terminal one (`Done` or
+// `Superseded` — both write `Closed At`, see integrations/notion-time-events
+// README on Reopen/Superseded). Unlike queryCompletedTasksForRange_ (used
+// for the Done-only Delivery/Human-completed metrics), this one intentionally
+// admits `Superseded` too, because Task Close is a Flow/throughput count of
+// the intake pipeline draining, not a quality/outcome count — but it must
+// still require a terminal Status, not `Closed At` alone. A Task can have
+// `Closed At` written while `Status` is still `Ready`/`In Progress`/
+// `Review`/`Blocked` — an explicitly documented real partial-write/Reopen
+// failure mode (integrations/notion-time-events/README.md, "Reopen guard
+// does not clear a prior Completed At/Closed At automatically"). Without the
+// Status condition, such a Task would be double-counted: once here as
+// "closed", and again by queryCurrentWipTasks_ as still-open WIP, corrupting
+// Close, Task純増 (net), and Close/Create ratio (Codex review, PR #74).
 function queryClosedTasksForRange_(startIso, endIsoExclusive) {
   return paginateNotionQuery_(
     '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
@@ -542,6 +583,11 @@ function queryClosedTasksForRange_(startIso, endIsoExclusive) {
         and: [
           { property: 'Closed At', date: { on_or_after: startIso } },
           { property: 'Closed At', date: { before: endIsoExclusive } },
+          {
+            or: ['Done', 'Superseded'].map(function (s) {
+              return { property: 'Status', select: { equals: s } };
+            }),
+          },
         ],
       },
     }
@@ -1086,7 +1132,11 @@ function fetchPageChildren_(pageId) {
 // rather than throwing and blocking the current month's report entirely.
 function fetchPreviousMonthRawMetrics_(parentPageId, previousLabel) {
   try {
-    const pageId = findExistingReportPage_(parentPageId, REPORT_TITLE_PREFIX + previousLabel);
+    // A previous month spanning the ADP-055-KMI rename may still carry the
+    // legacy title if it was never re-generated since — fall back the same
+    // way findExistingReportPageWithFallback_ does for the current month, so
+    // month-over-month comparison isn't silently lost across the rename.
+    const pageId = findExistingReportPageWithFallback_(parentPageId, previousLabel).pageId;
     if (!pageId) return null;
     const blocks = fetchPageChildren_(pageId);
     function richTextPlain_(rt) { return rt.plain_text || (rt.text && rt.text.content) || ''; }
@@ -1233,7 +1283,15 @@ function buildManagementPointRows_(report) {
   ];
 }
 
-function buildReportBlocks_(report) {
+// `preserved` carries any human/Final-Review content a previous run of this
+// report already had in §5/§6 (see extractPreservedSections_) — {section5:
+// [block,...], section6: [block,...]}, both empty on first generation or
+// when nothing was ever added. Reinserting it here, right after each
+// section's placeholder callout, is what makes a rerun (replacePageContent_,
+// which deletes and rebuilds every top-level block) preserve that content
+// instead of silently discarding it (Codex review, PR #74).
+function buildReportBlocks_(report, preserved) {
+  const preservedSections = preserved || { section5: [], section6: [] };
   const t = report.target;
   const blocks = [];
   const anyTruncated = report.timeEvents.truncated || report.tasks.truncated || report.github.truncated || report.openPr.truncated;
@@ -1365,22 +1423,15 @@ function buildReportBlocks_(report) {
     })));
   }
 
-  blocks.push(textBlock_('heading_2', '5. 構造的問題'));
-  blocks.push(calloutBlock_(
-    '本セクションは自動集計の対象外。上記KPI/KMIから構造的問題を判断する作業（Management Point → KPI → KMI → 構造的問題という因果解釈）は、' +
-    'Framework §5 Review Cadenceが定める毎月1日の前月Final Review（Human/AI判断）でこのページへ直接追記する。' +
-    '推測分類を自動生成しないという本統合の一貫した方針（README Scope decisions）に従い、空欄のまま生成する。',
-    '🧭'
-  ));
+  blocks.push(textBlock_('heading_2', SECTION5_HEADING));
+  blocks.push(calloutBlock_(SECTION5_PLACEHOLDER_TEXT, '🧭'));
+  preservedSections.section5.forEach(function (block) { blocks.push(block); });
 
-  blocks.push(textBlock_('heading_2', '6. 対策・Backlog / Sprint / 正本更新'));
-  blocks.push(calloutBlock_(
-    '同じく前月Final Reviewで、セクション5の構造的問題ごとに対策と担当Skill（例: pr-review-convergence / human-gate-preflight / ' +
-    'backlog-refinement / sprint-planning / sprint-retrospective）を追記し、必要な変更をBacklog・Sprint・正本ドキュメントへ反映する。',
-    '🛠️'
-  ));
+  blocks.push(textBlock_('heading_2', SECTION6_HEADING));
+  blocks.push(calloutBlock_(SECTION6_PLACEHOLDER_TEXT, '🛠️'));
+  preservedSections.section6.forEach(function (block) { blocks.push(block); });
 
-  blocks.push(textBlock_('heading_2', 'データ品質・Unknown/未分類の扱い'));
+  blocks.push(textBlock_('heading_2', DATA_QUALITY_HEADING));
   blocks.push(textBlock_('paragraph',
     'Task Time EventsのTaskリレーションが無い、対応するTaskにProductが未設定、またはGitHub PRに対応するNotion Task（Pull Request URL一致）が' +
     '見つからない場合は "' + UNKNOWN_LABEL + '" として明示している。「' + MISSING_DATA_LABEL + '」はTelemetryが未整備で計測自体ができない項目を示す。' +
@@ -1422,6 +1473,32 @@ function findExistingReportPage_(parentPageId, title) {
   throw new Error('findExistingReportPage_ did not terminate after 20 pages under ' + parentPageId);
 }
 
+// Finds a month's existing report page under EITHER its current title
+// (REPORT_TITLE_PREFIX) or the pre-ADP-055-KMI legacy one
+// (LEGACY_REPORT_TITLE_PREFIX), preferring the current title. Backfilling or
+// rerunning an older month whose page was created before this rename and
+// never manually renamed must still update that existing page, not create a
+// second one under the new title (Codex review, PR #74; Acceptance
+// Criterion 11) — `generateMonthlyKpiReportFor`'s own README explicitly
+// supports rerunning any past month, not only ones already migrated.
+function findExistingReportPageWithFallback_(parentPageId, label) {
+  const currentId = findExistingReportPage_(parentPageId, REPORT_TITLE_PREFIX + label);
+  if (currentId) return { pageId: currentId, legacyTitle: false };
+  const legacyId = findExistingReportPage_(parentPageId, LEGACY_REPORT_TITLE_PREFIX + label);
+  if (legacyId) return { pageId: legacyId, legacyTitle: true };
+  return { pageId: null, legacyTitle: false };
+}
+
+// Migrates a page found under the legacy title to the current one, so a
+// FUTURE lookup for the same month finds it on the (cheaper, first-checked)
+// current-title path and this integration converges on one title scheme
+// instead of permanently carrying two.
+function renameReportPage_(pageId, newTitle) {
+  notionRequest_('patch', '/v1/pages/' + encodeURIComponent(pageId), {
+    properties: { title: { title: [{ type: 'text', text: { content: newTitle } }] } },
+  });
+}
+
 function createReportPage_(parentPageId, title, blocks) {
   const firstChunk = blocks.slice(0, MAX_PAGE_SIZE);
   const rest = blocks.slice(MAX_PAGE_SIZE);
@@ -1452,6 +1529,102 @@ function replacePageContent_(pageId, blocks) {
     notionRequest_('delete', '/v1/blocks/' + encodeURIComponent(blockId));
   });
   appendBlocksChunked_(pageId, blocks);
+}
+
+// ---------------------------------------------------------------------------
+// Preserving Final Review content across reruns (Codex review, PR #74)
+// ---------------------------------------------------------------------------
+//
+// replacePageContent_ above deletes EVERY top-level block before rebuilding
+// a page from scratch. The report's own §5/§6 instruct a monthly Final
+// Review to append structural-problem/countermeasure content directly onto
+// this page (see SECTION5_PLACEHOLDER_TEXT/SECTION6_PLACEHOLDER_TEXT) — a
+// rerun (the trigger firing again, or a manual generateMonthlyKpiReportFor
+// backfill for an already-reported month) must not silently destroy that
+// content. Rather than special-casing replacePageContent_ itself (which
+// would need to know which blocks are "ours" vs. "theirs" mid-delete), this
+// integration reads the existing page's §5/§6 content BEFORE
+// replacePageContent_ runs, and buildReportBlocks_ re-embeds it into the
+// freshly generated page at the same position — so the rebuilt page's
+// content is a strict superset of the previous one plus this month's fresh
+// aggregates, never a regression to the empty placeholder.
+
+// Returns the plain text of any block type that carries `rich_text` under
+// its type-keyed data (heading_1/2/3, paragraph, callout, quote, ...); ''
+// for a block with no rich_text (table, divider, image, ...).
+function blockPlainText_(block) {
+  if (!block || !block.type) return '';
+  const data = block[block.type];
+  if (!data || !Array.isArray(data.rich_text)) return '';
+  return data.rich_text.map(function (rt) { return rt.plain_text || (rt.text && rt.text.content) || ''; }).join('');
+}
+
+// Strips a block fetched FROM the Notion API (id, created_time,
+// created_by, last_edited_*, parent, has_children, ...) down to the shape
+// the API accepts when appended back as new content, recursing into any
+// nested children (a table's rows, a toggle's/bulleted item's nested
+// blocks, ...) the same way tableBlock_ already embeds table_row children
+// inline. Known gap: a block whose type-data itself contains a
+// short-lived reference (e.g. an uploaded `image`/`file` block's expiring
+// internal S3 URL) cannot be faithfully re-posted this way — realistic
+// Final Review content (headings, paragraphs, lists, callouts, quotes,
+// tables, to-dos, code, dividers) has no such field, so this is treated as
+// an accepted, documented limitation (README) rather than solved here.
+function sanitizeBlockForAppend_(block) {
+  const type = block.type;
+  const data = Object.assign({}, block[type]);
+  if (block.has_children) {
+    data.children = fetchPageChildren_(block.id).map(sanitizeBlockForAppend_);
+  }
+  const sanitized = { object: 'block', type: type };
+  sanitized[type] = data;
+  return sanitized;
+}
+
+// Slices out whatever sits between `startHeadingText` and the next
+// recognized boundary heading (`endHeadingTexts`, or end-of-page if none of
+// them appear), drops this file's own regenerated placeholder callout when
+// it is the very first block there (it is always re-added by
+// buildReportBlocks_ itself), and sanitizes everything else for re-append.
+// Returns [] when the heading itself is not found (first-ever generation,
+// or a page whose structure predates this feature) — never throws, so a
+// missing/unexpected page shape degrades to "nothing to preserve" rather
+// than blocking the current month's report.
+function extractSectionHumanContent_(blocks, startHeadingText, endHeadingTexts, placeholderText) {
+  const startIdx = blocks.findIndex(function (b) { return b.type === 'heading_2' && blockPlainText_(b) === startHeadingText; });
+  if (startIdx === -1) return [];
+  let endIdx = blocks.length;
+  for (let i = startIdx + 1; i < blocks.length; i++) {
+    if (blocks[i].type === 'heading_2' && endHeadingTexts.indexOf(blockPlainText_(blocks[i])) !== -1) {
+      endIdx = i;
+      break;
+    }
+  }
+  const body = blocks.slice(startIdx + 1, endIdx);
+  const withoutOwnPlaceholder = body.filter(function (block, i) {
+    return !(i === 0 && block.type === 'callout' && blockPlainText_(block) === placeholderText);
+  });
+  return withoutOwnPlaceholder.map(sanitizeBlockForAppend_);
+}
+
+// Reads back an existing report page's §5/§6 content (see
+// extractSectionHumanContent_) for buildReportBlocks_ to re-embed. Never
+// throws: any failure (page deleted mid-run, unexpected block shape,
+// transient API error) degrades to "nothing to preserve" via the same
+// pattern fetchPreviousMonthRawMetrics_ already uses, rather than blocking
+// the current month's report generation over a best-effort preservation
+// feature.
+function extractPreservedSections_(pageId) {
+  try {
+    const blocks = fetchPageChildren_(pageId);
+    return {
+      section5: extractSectionHumanContent_(blocks, SECTION5_HEADING, [SECTION6_HEADING], SECTION5_PLACEHOLDER_TEXT),
+      section6: extractSectionHumanContent_(blocks, SECTION6_HEADING, [DATA_QUALITY_HEADING], SECTION6_PLACEHOLDER_TEXT),
+    };
+  } catch (err) {
+    Logger.log('extractPreservedSections_ failed for ' + pageId + ': ' + err);
+    return { section5: [], section6: [] };
+  }
 }
 
 function appendBlocksChunked_(pageId, blocks) {
