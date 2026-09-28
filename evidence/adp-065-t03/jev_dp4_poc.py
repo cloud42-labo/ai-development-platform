@@ -247,6 +247,23 @@ def main():
         # Any previous partial/failed entry for this fixture is discarded here
         # (it is not carried over) since the fixture is being re-run from
         # scratch.
+        #
+        # Known limitation (PR #70 round-7 review, 2026-09-28, deferred by
+        # design rather than fixed): if a fixture previously completed 1-3
+        # of its 4 calls before the run was interrupted, resuming discards
+        # those already-completed (already paid-for) calls and re-runs all
+        # 4 from scratch, rather than resuming from the exact call. This
+        # trades a small amount of duplicate paid-call cost (at most 3
+        # extra calls per interrupted fixture, i.e. well under $0.001 at
+        # this API's pricing) for not having to track and resume
+        # per-call state within a fixture. Not fixed further here because
+        # the live PoC recorded in this PR (evidence/adp-065-t03/
+        # dp4_raw_results.json) completed all 24/24 calls successfully on
+        # the first attempt, so this limitation never actually manifested
+        # for the results this PR reports on -- it would only matter for a
+        # hypothetical future rerun that fails mid-fixture. If that
+        # matters for a future rerun, resume from the exact call rather
+        # than re-running the whole fixture.
         results.append({"fixture": fx, "calls": calls})
         for i in range(4):  # 1 initial + 3 reproducibility
             resp, elapsed_ms = call_systemone(fx["state"])
