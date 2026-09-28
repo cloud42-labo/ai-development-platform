@@ -1391,31 +1391,76 @@ Notion Task Time Eventsの`Started At`/`Ended At`による
 なく次の順序尺度としてラベル付けする。
 ```
 
+**実際のScore APIスキーマとの対応（`evidence/adp-065-t03/typesafe_openapi_snapshot_2026-09-28.json`の
+`ScoreQuestion`/`ScoreAnswer`定義に基づき今回のCodex指摘への対応として修正——
+本節は§8.0.1時点ではライブアクセス前提でJevのScoreが2〜10の整数値を直接
+返すものと想定していたが、実際のAPIはそう動作しない）**:
+`ScoreQuestion.criteria`は「各要素の配列上の位置（0始まり）がそのままscore
+levelになる」順序付き配列であり、Jevへ2〜10の整数レンジを直接渡すことは
+できない。`ScoreAnswer`も整数を1つ返すのではなく、`score`（rubric各levelの
+確率加重平均、連続値。整数levelの中間を取り得る）・`confidence`（0〜1）・
+`legend`（`criteria`をそのまま同じ0始まりindexキーで返したもの）・
+`probabilities`（同じ0始まりindexキー文字列ごとの確率、合計は概ね1）の
+4フィールドを返す。
+
+- **`criteria`の構成**: 既存のScore帯（下表、値2〜10の9帯）の語彙・境界は
+  変更しない。ちょうど9要素の順序付き配列とし、配列index `i`（0〜8）には
+  「Score帯`i+2`」の帯説明文をそのまま入れる（index 0 = 下表のScore帯2の
+  説明「1日以内（ちょうど1日を含む）」、……、index 8 = Score帯10の説明
+  「1ヶ月超（上限なし）」）。したがって`criteria`は次の形になる:
+  ```json
+  ["1日以内（ちょうど1日を含む）", "1日超〜1.5日以内", "1.5日超〜2日以内",
+   "2日超〜3日以内", "3日超〜4日以内", "4日超〜1週間（5 AI稼働日）以内",
+   "1週間超〜2週間以内", "2週間超〜1ヶ月以内", "1ヶ月超（上限なし）"]
+  ```
+- **本書の決定値`mapped_score_band`（この文書内で単に「Score」と呼ぶ値は
+  以後すべてこれを指す）**: Choiceの`choice`が「`probabilities`の中で
+  最大確率を持つ選択肢の名前」（実測値, ChoiceAnswerスキーマの記述通り）
+  として定義されているのと同じ考え方を踏襲し、連続値`score`（確率加重
+  平均）を四捨五入・丸めて使うのではなく、
+  `mapped_score_band = argmax(probabilities, index 0..8) + 2`
+  （＝`probabilities`のうち確率最大のindexへ2を足した2〜10の離散値）
+  として算出する。**本書がこれまで（本節を含む）「Score」「Scoreが
+  スケール値2」「`Score == 2`」「`Score != 2`」等と表記してきた箇所は、
+  すべてこの`mapped_score_band`を指すと読み替える。** 連続値`score`
+  （probability-weighted average）はfinal decision・escalationゲート・
+  帯判定のいずれにも使わない——使う場合は「raw score（連続値、参考診断
+  情報）」と明示的にラベル付けした上で、`mapped_score_band`とは別の
+  補助情報としてのみ併記してよい。
+- **Jevが直接2〜10の整数を返すわけではない点の帰結**: `criteria`が常に
+  9要素であるため`probabilities`のキーは常に0〜8の9個であり、
+  `mapped_score_band`は構造的に必ず2〜10のいずれかになる（Choiceのような
+  「未知の選択肢名が返る」失敗モードはScoreには存在しない）。したがって
+  §8.1.3のDP-4と同じfail-closed方針が必要になるのは、`probabilities`/
+  `legend`の欠落やキー不整合など**レスポンス自体が想定スキーマを満たさない
+  場合**であり、「2〜10の整数以外の値が返る」ケースではない
+  （この点は旧稿の記述の誤り）。レスポンスがスキーマを満たさない場合は
+  `unmatched`として扱い、raw値をそのまま自動採用しない。
+
 **Score全9値の帯定義（今回のCodex指摘への対応として全値を確定）**:
 `ADP-065-T01`のNotion記録が確定しているのはJevのScoreが「2–10点スケール」
 であることそのものまでで、各点に何の意味を割り当てるかはJev側の仕様では
 なく、このDP-9 typed question自体の設計（本書が定義するもの）である。
-下表は整数2〜10の全9値それぞれへ一意にAI稼働日数の帯を割り当て、未定義の
-値を残さない。境界は上側を含み下側を排他しない半開区間（`(下限, 上限]`）
-として扱う。
+下表は整数2〜10の全9値（＝`mapped_score_band`が取り得る値）それぞれへ
+一意にAI稼働日数の帯を割り当て、未定義の値を残さない。境界は上側を含み
+下側を排他しない半開区間（`(下限, 上限]`）として扱う。上記`criteria`配列の
+index（0〜8）と本表のScore（2〜10）は「index = Score − 2」の関係で対応する。
 
-| Score | AI稼働日数の帯 |
-|---|---|
-| 2 | 1日以内（ちょうど1日を含む） |
-| 3 | 1日超〜1.5日以内 |
-| 4 | 1.5日超〜2日以内 |
-| 5 | 2日超〜3日以内 |
-| 6 | 3日超〜4日以内 |
-| 7 | 4日超〜1週間（5 AI稼働日）以内 |
-| 8 | 1週間超〜2週間以内 |
-| 9 | 2週間超〜1ヶ月以内 |
-| 10 | 1ヶ月超（上限なし） |
+| Score（`mapped_score_band`） | `criteria`配列index | AI稼働日数の帯 |
+|---|---|---|
+| 2 | 0 | 1日以内（ちょうど1日を含む） |
+| 3 | 1 | 1日超〜1.5日以内 |
+| 4 | 2 | 1.5日超〜2日以内 |
+| 5 | 3 | 2日超〜3日以内 |
+| 6 | 4 | 3日超〜4日以内 |
+| 7 | 5 | 4日超〜1週間（5 AI稼働日）以内 |
+| 8 | 6 | 1週間超〜2週間以内 |
+| 9 | 7 | 2週間超〜1ヶ月以内 |
+| 10 | 8 | 1ヶ月超（上限なし） |
 
 判定基準が「1 AI working day以内に収まるか」である以上、ちょうど1日と
-見積もられたTaskはスコア2（最低帯）に含め、スコア3（1.5日帯）へ繰り上げ
-ない。Jevが2〜10の整数以外（範囲外の値や非整数）を返した場合は、
-§8.1.3のDP-4と同じfail-closed方針（`unmatched`として扱い、Choiceの
-raw値をそのまま自動採用しない）に従う。
+見積もられたTaskは`mapped_score_band`2（最低帯、`argmax`のindexが0）に
+含め、3（1.5日帯）へ繰り上げない。
 
 **`docs/regulations/R06-project-management-regulation.md`が定める通り、
 正式配置されたTaskがReadyになるには階層的refinementと
@@ -1463,12 +1508,19 @@ Finalizeへの入力に添付し、Finalize自体は通常どおり実行する�
 - `choice`が`fits-as-is`である、かつ
 - `choice_confidence`が閾値（`>= 0.7`、上記参照）以上である、かつ
 - `score_confidence`が閾値（`>= 0.7`、上記参照）以上である、かつ
-- `Score`が最低帯（1日以内相当、ちょうど1日を含む、スケール値2）である
+- `Score`（＝`mapped_score_band`、`probabilities`のargmax indexが0のとき
+  のみ）が最低帯（1日以内相当、ちょうど1日を含む、スケール値2）である
+
+**すなわちno-escalateとなるのは`mapped_score_band == 2`（＝Score呼び出し
+レスポンスの`probabilities`においてindex `"0"`が最大確率のindexである）
+場合に限られ、それ以外のargmax index（1〜8、`mapped_score_band` 3〜10）
+ではこの条件を満たさない。**
 
 上記いずれか1つでも満たさない場合（`choice`が`needs-split`/
 `needs-more-design`である、`choice_confidence`が閾値（`0.7`）未満である、
-`score_confidence`が閾値（`0.7`）未満である、または`Score`がスケール値2
-以外（`Score != 2`、1日超のすべての帯）である）、最終決定は
+`score_confidence`が閾値（`0.7`）未満である、または`Score`
+（`mapped_score_band`）がスケール値2以外（`Score != 2`、`argmax` indexが
+1〜8のいずれか、1日超のすべての帯）である）、最終決定は
 `task-approach-review`Finalizeモードへの**通常の（一次分類を添付しない）
 フォールバック**であり、これを**escalate**として扱う。**Choiceが
 `fits-as-is`で`choice_confidence`が高くても、`score_confidence`が閾値
@@ -1760,15 +1812,17 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
      `choice_confidence`で当てた予測（望ましいsafety的判断）を、単に
      `needs-split`であることを理由に低く評価してはならない。
    - **Score calibration**: `score_confidence`をbin化し、各binの
-     正解率は「predicted Score（**§8.2.3のScore全9値の帯定義（2〜10の
-     整数）における実際に返ってきた値そのもの**）が、検証済み
-     duration由来のground truthのScore帯（同じく2〜10の整数のいずれか
-     1つ）と**厳密一致**したか（正解/不正解）」を基準に算出する（今回の
-     Codex指摘への対応として、`Score == 2`かそれ以外かの2値へ折り畳む
-     定義から修正）。**`score_confidence`はJevがtyped question `Score`へ
-     返した値（2〜10の9値のいずれか1つ）そのものに対する確信度であり、
-     §8.2.3の最終決定が用いる`Score == 2`かそれ以外かの2値判定に対する
-     確信度ではない。**したがって、例えば確信度が高い状態でScore 3を
+     正解率は「predicted Score（**§8.2.3の定義通り、Score呼び出しの
+     `probabilities`からargmaxで導出した`mapped_score_band`——2〜10の
+     整数**）が、検証済みduration由来のground truthのScore帯（同じく
+     2〜10の整数のいずれか1つ）と**厳密一致**したか（正解/不正解）」を
+     基準に算出する（今回のCodex指摘への対応として、`Score == 2`か
+     それ以外かの2値へ折り畳む定義から修正）。**`score_confidence`は
+     Jevがtyped question `Score`のレスポンスとして返した`confidence`
+     フィールドを指し、`mapped_score_band`（2〜10の9値のいずれか1つ）
+     そのものに対する確信度として扱う——§8.2.3の最終決定が用いる
+     `Score == 2`かそれ以外かの2値判定に対する確信度ではない。**
+     したがって、例えば確信度が高い状態でScore 3を
      予測し、duration由来のground truthがScore 10だった場合、
      どちらも「`Score != 2`（1日超）」という2値には一致するが、
      Score calibrationとしては**不正解**として扱う——2値への折り畳みを
@@ -2492,7 +2546,13 @@ reliability diagramは`[0.9, 1.0]`binに4/4件が集中し、そのbinの
 Jevが高confidenceを返すこと自体は想定通りだが、この4件だけでは
 中間confidence帯のcalibrationを検証できないという限界として記録する）。
 
-**Latency**: 24回全体でp50=345ms、p95=601ms（最小275ms、最大651ms）。
+**Latency**: §8.1.4手順4の定義（6 fixture個別・初回呼び出しのwall-clock
+時間）に従い、6件の初回呼び出し（`call_index == 0`、reproducibility
+再送3回分は含まない）でp50=332ms、p95=560ms（最小304ms、最大613ms）。
+参考情報として、24回全体（初回6回＋reproducibility 18回）のwall-clock
+時間ではp50=345ms、p95=601ms（最小275ms、最大651ms）——こちらは
+§8.1.4手順4が定義する指標ではなく、あくまで参考の補助情報であり、
+上記6件のp50/p95と混同しないこと。
 
 **Cost**:
 - Per-pass cost（DP-4の初回6回のみ）: input tokens合計6,211 tokens

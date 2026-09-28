@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import statistics
 import requests
@@ -209,9 +210,11 @@ def main():
                 print(f"  call {i}: status={resp.status_code} ERROR={body}")
         results.append({"fixture": fx, "calls": calls})
 
-    with open("/tmp/claude-0/-home-user/2730ab1b-e6e0-5126-ba0e-5ea25701afeb/scratchpad/dp4_raw_results.json", "w") as f:
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dp4_raw_results.json")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
-    print("\nSaved raw results.")
+    print(f"\nSaved raw results to {out_path}.")
 
 
 if __name__ == "__main__":
