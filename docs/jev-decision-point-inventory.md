@@ -1352,8 +1352,12 @@ TTEが捉えない区間を補うために**必ず参照する**。主要指標�
 
 **確定した方針**: DP9-05〜10は、commit→merge区間が暦日をまたがない
 ことが確認できた場合でも、それだけを理由に主要指標へ admitしない。
-Notion Task Time Eventsの`Started At`/`Ended At`による
-ライフサイクル全体（着手〜完了）のエビデンスが、Notionアクセスを持つ
+上記の通りNotion Task Time Eventsの`Started At`/`Ended At`（`Σ Active
+Duration`）だけではライフサイクル全体（着手〜完了）をカバーしない
+ため（`Review`入りの時点でcloseし、その後の独立レビュー・完了判定に
+要した時間を捕捉しない）、これとは別のクロックであるTask自体の
+`Started At`→`Completed At`のelapsed時間（Waiting区間を検証済み控除
+した場合を含む）を合わせた**両方**のエビデンスが、Notionアクセスを持つ
 セッションによって確認されるまで、DP9-05〜10はDP9-01/02/03/04と同じく
 主要指標のいずれからも除外されたままとする（詳細な手順は下記
 §8.2.4 step 5）。commit/PRタイムスタンプの代理指標は、参考値としての
@@ -1881,11 +1885,27 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
      ゲートには適用しない（今回のCodex指摘への対応として明記）**——
      `8時間`はstep 5がfits-as-is母集団（Score帯2相当）を確定するための
      閾値であり、Score calibrationの対象実例をScore帯2のみに限定する
-     意図はない。検証済みのduration値は上限の有無を問わず§8.2.3の
-     Score全9値の帯定義表（2〜10の整数）へそのまま当てはめ、実際に
-     該当する帯をground truthのScore帯とする——8時間を超える検証済み
+     意図はない。**帯が食い違う場合のground truth決定規約（今回のCodex
+     指摘への対応として明記）**：検証済みの`Σ Active Duration`と、検証済みの
+     `Started At`→`Completed At`のelapsed時間（Waiting区間を検証済み控除
+     した場合を含む）は、それぞれ独立に§8.2.3のScore全9値の帯定義表
+     （2〜10の整数）へ当てはめると別々の帯（候補帯）を指すことがある
+     （例：実働`Σ Active Duration`が10時間でも、その実働が数週間の
+     elapsed期間に分散していれば、両者は大きく異なる帯を指す）。この場合、
+     ground truthのScore帯は**2つの候補帯のうち大きい方（より高い帯）**を
+     採用する——両者が同じ帯であれば、その帯をそのまま採用する。これは
+     本書の安全側優先・fail-closedの規約（§8.1.3のDP4-08 escalation
+     tie-break、および本節前段のDP-9 `argmax`同着tie-breakで採用している
+     のと同じ考え方）と整合し、duration・所要時間を決して過小評価しない
+     ための意図的な選択である。（帯が一致する通常の場合は、検証済みの
+     duration値をそのまま§8.2.3の帯定義表へ当てはめ、該当する帯を
+     ground truthのScore帯とする。）8時間を超える検証済み
      durationを持つ実例が確保できれば、Score 3〜10帯のground truthとして
-     そのままScore calibrationへadmitする。DP9-01/02のground truth
+     そのままScore calibrationへadmitする（このground truth決定規約は
+     Score calibrationへのadmission可否そのものを左右しない——上記の
+     両方の値が個別に検証済みであることが引き続きadmissionの要件であり、
+     この規約はadmit済みfixtureの実際のground truth帯をどちらの値から
+     採るかのみを定める）。DP9-01/02のground truth
      （`needs-split`）は review round数の枯渇・実際の分割実施という
      審査結果から確立されており（§8.2.2参照）、実測durationから独立に
      確立されたものではない——`needs-split`というChoiceラベルから

@@ -182,9 +182,22 @@ def call_systemone(state, repro_index=None):
 
 def main():
     results = []
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dp4_raw_results.json")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    def checkpoint():
+        # Re-written after every completed call (not just once at the end) so that
+        # a mid-run failure (timeout, connection error, non-JSON body) on a later
+        # call never discards already-completed, already-paid-for observations.
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+
     for fx in FIXTURES:
         print(f"=== {fx['id']} ===")
         calls = []
+        # Append the (fixture, calls) entry up front; `calls` is mutated in place
+        # below, so each checkpoint() call always reflects the latest state.
+        results.append({"fixture": fx, "calls": calls})
         for i in range(4):  # 1 initial + 3 reproducibility
             resp, elapsed_ms = call_systemone(fx["state"])
             ok = resp.status_code == 200
@@ -213,12 +226,8 @@ def main():
                     "error_body": body,
                 })
                 print(f"  call {i}: status={resp.status_code} ERROR={body}")
-        results.append({"fixture": fx, "calls": calls})
+            checkpoint()
 
-    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dp4_raw_results.json")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"\nSaved raw results to {out_path}.")
 
 
