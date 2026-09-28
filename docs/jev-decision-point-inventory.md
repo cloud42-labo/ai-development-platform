@@ -1885,27 +1885,32 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
      ゲートには適用しない（今回のCodex指摘への対応として明記）**——
      `8時間`はstep 5がfits-as-is母集団（Score帯2相当）を確定するための
      閾値であり、Score calibrationの対象実例をScore帯2のみに限定する
-     意図はない。**帯が食い違う場合のground truth決定規約（今回のCodex
-     指摘への対応として明記）**：検証済みの`Σ Active Duration`と、検証済みの
-     `Started At`→`Completed At`のelapsed時間（Waiting区間を検証済み控除
-     した場合を含む）は、それぞれ独立に§8.2.3のScore全9値の帯定義表
-     （2〜10の整数）へ当てはめると別々の帯（候補帯）を指すことがある
-     （例：実働`Σ Active Duration`が10時間でも、その実働が数週間の
-     elapsed期間に分散していれば、両者は大きく異なる帯を指す）。この場合、
-     ground truthのScore帯は**2つの候補帯のうち大きい方（より高い帯）**を
-     採用する——両者が同じ帯であれば、その帯をそのまま採用する。これは
-     本書の安全側優先・fail-closedの規約（§8.1.3のDP4-08 escalation
-     tie-break、および本節前段のDP-9 `argmax`同着tie-breakで採用している
-     のと同じ考え方）と整合し、duration・所要時間を決して過小評価しない
-     ための意図的な選択である。（帯が一致する通常の場合は、検証済みの
-     duration値をそのまま§8.2.3の帯定義表へ当てはめ、該当する帯を
-     ground truthのScore帯とする。）8時間を超える検証済み
-     durationを持つ実例が確保できれば、Score 3〜10帯のground truthとして
-     そのままScore calibrationへadmitする（このground truth決定規約は
-     Score calibrationへのadmission可否そのものを左右しない——上記の
-     両方の値が個別に検証済みであることが引き続きadmissionの要件であり、
-     この規約はadmit済みfixtureの実際のground truth帯をどちらの値から
-     採るかのみを定める）。DP9-01/02のground truth
+     意図はない。**Score帯ground truthの決定規約（今回のCodexレビューで、
+     直前ラウンドが追加した「帯が食い違う場合は高い方の帯を採用する」
+     規約自体が誤りだと指摘され、その規約を撤回・訂正）**：ground truth
+     のScore帯は、検証済みの`Σ Active Duration`のみを§8.2.3のScore全9値
+     の帯定義表（2〜10の整数、上限キャップなし）へ当てはめて決定する。
+     `Started At`→`Completed At`のelapsed時間との高い方を採用する、
+     という直前ラウンドの規約はここで撤回する。**理由（1行）**：DP-9の
+     typed questionが尋ねているのは「このTaskの完了に要する概算AI稼働
+     日数」というAI自身の実働時間であり、elapsed時間はレビュー待ち等の
+     Waiting・調整時間を含みうる別の量であって、この設問がそもそも
+     問うていないものだからである（例：実働`Σ Active Duration`が10時間で、
+     それが数週間のelapsed期間に分散していた場合、正確な予測は「約1.25日」
+     ＝Score帯3であり、elapsedの高い方を採ると、ground truthを誤って
+     複数週間相当の帯に据えてしまい、正しい予測を不正解と判定してしまう）。
+     ただし、`Σ Active Duration`と`Started At`→`Completed At`のelapsed
+     時間（Waiting区間を検証済み控除した場合を含む）の**両方**が個別に
+     検証済みであることを要求するadmissionゲート自体は変更しない——
+     elapsed時間の検証は、実例がScore calibrationへadmitされるための
+     生存性・記録完全性チェックとして引き続き必須であり、admit後の
+     ground truthの値そのものには使わない。8時間を超える検証済み
+     `Σ Active Duration`を持つ実例が確保できれば、Score 3〜10帯の
+     ground truthとして、そのままScore calibrationへadmitする（上記の
+     通り、admission要件自体は両方の値の個別検証を引き続き要求し、
+     このground truth決定規約はadmission可否そのものを左右しない——
+     admit済みfixtureの実際のground truth帯を`Σ Active Duration`のみ
+     から決めることのみを定める）。DP9-01/02のground truth
      （`needs-split`）は review round数の枯渇・実際の分割実施という
      審査結果から確立されており（§8.2.2参照）、実測durationから独立に
      確立されたものではない——`needs-split`というChoiceラベルから

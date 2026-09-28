@@ -180,10 +180,39 @@ def call_systemone(state, repro_index=None):
     return resp, elapsed_ms
 
 
+def _is_complete_entry(entry):
+    # An entry is only trusted as "already fully succeeded" if all 4 calls
+    # (initial + 3 reproducibility, call_index 0-3) are present and each
+    # returned HTTP 200. Anything less (missing calls, a failed call) is
+    # treated as incomplete and re-run from scratch below.
+    calls = entry.get("calls", [])
+    if len(calls) != 4:
+        return False
+    if {c.get("call_index") for c in calls} != {0, 1, 2, 3}:
+        return False
+    return all(c.get("status") == 200 for c in calls)
+
+
 def main():
-    results = []
     out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dp4_raw_results.json")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    # Resume from a prior checkpoint if one exists, so a rerun after a
+    # partial failure neither re-pays for fixtures that already fully
+    # succeeded nor erases their saved evidence.
+    completed_by_id = {}
+    if os.path.exists(out_path):
+        with open(out_path) as f:
+            try:
+                previous_results = json.load(f)
+            except json.JSONDecodeError:
+                previous_results = []
+        for entry in previous_results:
+            fx_id = entry.get("fixture", {}).get("id")
+            if fx_id and _is_complete_entry(entry):
+                completed_by_id[fx_id] = entry
+
+    results = []
 
     def checkpoint():
         # Re-written after every completed call (not just once at the end) so that
@@ -193,10 +222,21 @@ def main():
             json.dump(results, f, indent=2, ensure_ascii=False)
 
     for fx in FIXTURES:
+        if fx["id"] in completed_by_id:
+            # Already has 4/4 successful calls from a previous run: keep that
+            # evidence as-is and skip re-running (never re-pay for a fixture
+            # that already fully succeeded).
+            print(f"=== {fx['id']} === (skipped: already complete in checkpoint)")
+            results.append(completed_by_id[fx["id"]])
+            continue
+
         print(f"=== {fx['id']} ===")
         calls = []
         # Append the (fixture, calls) entry up front; `calls` is mutated in place
         # below, so each checkpoint() call always reflects the latest state.
+        # Any previous partial/failed entry for this fixture is discarded here
+        # (it is not carried over) since the fixture is being re-run from
+        # scratch.
         results.append({"fixture": fx, "calls": calls})
         for i in range(4):  # 1 initial + 3 reproducibility
             resp, elapsed_ms = call_systemone(fx["state"])
