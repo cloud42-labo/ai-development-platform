@@ -169,8 +169,13 @@ def call_systemone(state, repro_index=None):
             }
         },
     }
+    # Caller must `export TYPESAFE_API_KEY=...` before running this script; never commit the key value.
+    api_key = os.environ.get("TYPESAFE_API_KEY")
+    if not api_key:
+        raise RuntimeError("TYPESAFE_API_KEY environment variable is not set")
+    headers = {"Authorization": f"Bearer {api_key}"}
     t0 = time.monotonic()
-    resp = requests.post(API_URL, json=payload, timeout=60)
+    resp = requests.post(API_URL, json=payload, headers=headers, timeout=60)
     elapsed_ms = (time.monotonic() - t0) * 1000.0
     return resp, elapsed_ms
 

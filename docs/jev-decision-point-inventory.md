@@ -1420,9 +1420,20 @@ levelになる」順序付き配列であり、Jevへ2〜10の整数レンジを
   平均）を四捨五入・丸めて使うのではなく、
   `mapped_score_band = argmax(probabilities, index 0..8) + 2`
   （＝`probabilities`のうち確率最大のindexへ2を足した2〜10の離散値）
-  として算出する。**本書がこれまで（本節を含む）「Score」「Scoreが
-  スケール値2」「`Score == 2`」「`Score != 2`」等と表記してきた箇所は、
-  すべてこの`mapped_score_band`を指すと読み替える。** 連続値`score`
+  として算出する。**tie-break規約（今回のCodex指摘への対応として明記）**：
+  `probabilities`の複数indexが最大確率で同着した場合、この`argmax`は
+  「最大確率を達成するindexのうち最大のもの」を選ぶと定義する（先に
+  出現したindexを機械的に採用する実装依存の挙動には委ねない）。これは
+  本書の安全側優先の規約（§9のDP4-08で、曖昧なDP-4判定においてJevが
+  よりescalateする側を選んだことを望ましい挙動として扱っているのと
+  同じ考え方）に従い、同着時は常により高いScore帯（＝よりescalateする
+  側）へfail-closedするための意図的な選択である——under-escalationは
+  本書がover-escalationより重く見る失敗モードである。index 0（Score帯2、
+  唯一のno-escalate帯）が他のいずれかのindexと同着した場合、この規約に
+  より必ずindex 0以外（escalate側）が選ばれる。**本書がこれまで（本節を
+  含む）「Score」「Scoreがスケール値2」「`Score == 2`」「`Score != 2`」等と
+  表記してきた箇所は、すべてこの`mapped_score_band`を指すと読み替える。**
+  連続値`score`
   （probability-weighted average）はfinal decision・escalationゲート・
   帯判定のいずれにも使わない——使う場合は「raw score（連続値、参考診断
   情報）」と明示的にラベル付けした上で、`mapped_score_band`とは別の
@@ -1488,10 +1499,27 @@ control（R06または`task-approach-review`のSkill定義）を正式に改定�
 confidence_threshold) → { output_kind, value, confidence, below_threshold
 }`が示す通り、typed questionごとに個別の`confidence`が返る）。したがって
 DP-9には単一の「confidence」ではなくChoice呼び出しのconfidence
-（以下`choice_confidence`）とScore呼び出しのconfidence（以下
-`score_confidence`）の2つが独立に存在し、下記の最終決定はこの両方を
-それぞれ閾値`0.7`と比較する（DP-9専用の別閾値は設けず、両方へ同じ`0.7`を
-適用する）。**
+（以下`choice_confidence`、ChoiceAnswerの`confidence`フィールドをそのまま
+用いる）と、Score呼び出しに対する`score_confidence`の2つが独立に存在する。
+**`score_confidence`の定義（今回のCodex指摘への対応として修正）**：
+`score_confidence`はScore呼び出しが返す生の`confidence`フィールドを
+そのまま使わない。committed OpenAPI snapshot
+（`evidence/adp-065-t03/typesafe_openapi_snapshot_2026-09-28.json`の
+`ScoreAnswer.confidence`）が明記する通り、この生の`confidence`は連続値
+`score`（probability-weighted average）に対する確信度であり、本書が
+離散化した`mapped_score_band`（`probabilities`のargmaxで選んだ帯）に
+対する確信度ではない。連続`score`に対する高い確信度は、確率質量が
+argmaxの1帯へ集中していることを意味しない（複数帯へ確率が分散していても
+加重平均自体は安定し得る）ため、`mapped_score_band`の採否ゲートに生の
+`confidence`をそのまま使うと定義上の不一致が生じる。したがって
+`score_confidence`は、`mapped_score_band`の算出に使うのと同じ
+`probabilities`辞書から、選ばれたindex自身が持つ確率質量として定義する:
+`score_confidence = probabilities[str(argmax_index)]`
+（`argmax_index`は`mapped_score_band = argmax(probabilities, index 0..8)
++ 2`で選んだのと同じindexであり、上記のtie-break規約に従って選ばれた
+indexをそのまま使う）。下記の最終決定はこの`choice_confidence`と
+`score_confidence`（いずれも上記の定義）をそれぞれ閾値`0.7`と比較する
+（DP-9専用の別閾値は設けず、両方へ同じ`0.7`を適用する）。**
 
 **最終決定（final decision）の定義**: §8.1.3のDP-4と同様、
 false-escalation/missed-escalationの各指標は、Jevの生のChoice
@@ -1818,10 +1846,18 @@ needs-split。ただし§8.2.4 step 1の対象範囲確定に従い、検証済�
      2〜10の整数のいずれか1つ）と**厳密一致**したか（正解/不正解）」を
      基準に算出する（今回のCodex指摘への対応として、`Score == 2`か
      それ以外かの2値へ折り畳む定義から修正）。**`score_confidence`は
-     Jevがtyped question `Score`のレスポンスとして返した`confidence`
-     フィールドを指し、`mapped_score_band`（2〜10の9値のいずれか1つ）
-     そのものに対する確信度として扱う——§8.2.3の最終決定が用いる
-     `Score == 2`かそれ以外かの2値判定に対する確信度ではない。**
+     §8.2.3で再定義した通り`probabilities[str(argmax_index)]`
+     （`mapped_score_band`として選ばれたindex自身の確率質量）を指し、
+     `mapped_score_band`（2〜10の9値のいずれか1つ）そのものに対する
+     確信度として扱う——Jevがtyped question `Score`のレスポンスとして
+     返す生の`confidence`フィールドはそのまま使わない（committed OpenAPI
+     snapshotの`ScoreAnswer.confidence`が明記する通り、この生の
+     `confidence`は連続値`score`に対する確信度であり、離散化した
+     `mapped_score_band`に対する確信度ではないため）。また、
+     §8.2.3の最終決定が用いる`Score == 2`かそれ以外かの2値判定に対する
+     確信度でもない——2値へ折り畳んだ粗い確信度ではなく、9値のうち
+     選ばれた1帯そのものへの確率質量である点がこのcalibrationの評価
+     対象である。**
      したがって、例えば確信度が高い状態でScore 3を
      予測し、duration由来のground truthがScore 10だった場合、
      どちらも「`Score != 2`（1日超）」という2値には一致するが、
