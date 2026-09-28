@@ -212,7 +212,17 @@ def main():
             if fx_id and _is_complete_entry(entry):
                 completed_by_id[fx_id] = entry
 
-    results = []
+    # Seed `results` with every already-complete fixture's entry up front,
+    # in FIXTURES order, BEFORE the loop below runs anything. This is what
+    # makes checkpoint() safe to call from the very first fixture that still
+    # needs (re-)running: since already-complete fixtures are in `results`
+    # from the start, no checkpoint write -- including one that happens
+    # mid-way through an earlier-ordered fixture -- can ever omit or
+    # overwrite a later-ordered fixture's already-saved evidence. Each
+    # fixture id appears in `results` at most once: either here (as its
+    # already-complete loaded entry) or appended fresh in the loop below
+    # (never both, since the loop skips ids already present here).
+    results = [completed_by_id[fx["id"]] for fx in FIXTURES if fx["id"] in completed_by_id]
 
     def checkpoint():
         # Re-written after every completed call (not just once at the end) so that
@@ -223,11 +233,11 @@ def main():
 
     for fx in FIXTURES:
         if fx["id"] in completed_by_id:
-            # Already has 4/4 successful calls from a previous run: keep that
-            # evidence as-is and skip re-running (never re-pay for a fixture
-            # that already fully succeeded).
+            # Already has 4/4 successful calls from a previous run and was
+            # already seeded into `results` above: keep that evidence as-is
+            # and skip re-running (never re-pay for a fixture that already
+            # fully succeeded, and never append it a second time).
             print(f"=== {fx['id']} === (skipped: already complete in checkpoint)")
-            results.append(completed_by_id[fx["id"]])
             continue
 
         print(f"=== {fx['id']} ===")
