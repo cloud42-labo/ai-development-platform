@@ -24,15 +24,26 @@ sets it on the new Task Time Event's `Work Type` property, non-blockingly
 `unresolved` result never prevents Time Event creation, it only leaves
 `Work Type` unset). See
 [`docs/review-fix-state-model.md`](docs/review-fix-state-model.md) for the
-full decision procedure. Review Source (Codex / Claude / Human / Other)
-classification is still planned but not yet implemented — that is
-`ADP-051-C`'s scope, building against the same document's §5.
-**Review Source resolution requires a `GITHUB_TOKEN`, a second secret this
-file does not yet mention** — when `ADP-051-C` implements it, the "one
-secret, one place" claim in **Security model** and **Success criteria**
-below stops being true and both sections need updating in the same change,
-not left stale (this integration made the identical README update once
-already, in PR #21).
+full decision procedure.
+
+Review Source (`Codex` / `Claude` / `Human` / `Other`) classification
+(`ADP-051-C`) is implemented alongside it, against the same document's §5 —
+`reconcileAuthoritativeTimeEvents_` resolves it (`resolveReviewSource_`) for
+every execution `resolveWorkType_` confidently classified as `Review Fix`
+(Initial Work, and an unresolved Work Type, have nothing for §5 to
+classify) and sets it on the new Task Time Event's `Review Source`
+property. It reuses the identical lower-bound evidence instant Work Type
+classification already resolved (never an independent Sync Log lookup),
+pairs it with the new execution's own observed reopen instant as the upper
+bound, and paginates GitHub's Reviews API (`paginateGithubReviews_`) for the
+Task's `Pull Request` to find the most recent reviewer inside that window.
+It is non-blocking in the same shape as Work Type
+(`resolveNewTimeEventReviewSourceSafely_`), and additionally degrades to
+`Other` — a real, written classification, never a throw — on a missing
+`Pull Request` URL, a missing `GITHUB_TOKEN`, any GitHub API failure, or an
+unexpected response shape. **Review Source resolution requires a
+`GITHUB_TOKEN` Script Property, a second secret** — see **Security model**
+and **Success criteria** below.
 
 ## Behavior
 
@@ -92,7 +103,7 @@ A self-reported event's `Note` must be exactly `Task Origin=<Type>` (the Task's 
 
 Every Time Event `Note` write from `closeNotionTimeEvent_`/`stampExecutionBoundary_`, and every `Sync Log` row from `logSnapshot_`, now also stamps `Write=<Apps Script Date.now() in ms>` (Note) or an 8th `Write` column (Sheet). This is **not** a transition-boundary timestamp and must never be read as one: it times when the Apps Script process performed *this write*, nothing about when the real-world Status change it describes actually happened. Its only purpose is breaking a same-Notion-minute tie between two candidate boundaries/rows that `last_edited_time`'s minute granularity cannot otherwise resolve — see the design doc for the full decision procedure this feeds into. `Write=` joins `Execution=`/`Boundary=`/`Task Origin=` in `appendNote_`'s protected-field list (never evicted by the same-`Note` length cap while any ordinary segment or old `Result Fingerprint=` remains), but unlike `Task Origin=` it is not immutable: `stampExecutionBoundary_` deliberately appends a fresh `Write=` when it retroactively discovers a boundary, and `noteField_`'s existing last-occurrence lookup means that later stamp — the boundary's own discovery time, not the stale original close's — is what any reader gets back. A legacy Note/Sync Log row written before this field existed simply has none; per §4, that is the only case where the older best-effort "was this ever logged elsewhere" heuristic still applies.
 
-This field was infrastructure-only as of `ADP-051-B`'s first landing; `ADP-051-B7` is the first consumer — `resolveWorkType_`/`resolveSyncLogCandidate_` read it (via `compareInstants_`/`compareWriteOnly_`) to resolve Work Type classification. Review Source resolution, `docs/review-fix-state-model.md` §5's other named consumer of this evidence, remains follow-on work (`ADP-051-C`); see that document's own status note and Notion `ADP-051-B`/`C`/`D` for what has landed against it so far.
+This field was infrastructure-only as of `ADP-051-B`'s first landing; `ADP-051-B7` was the first consumer — `resolveWorkType_`/`resolveSyncLogCandidate_` read it (via `compareInstants_`/`compareWriteOnly_`) to resolve Work Type classification. Review Source resolution, `docs/review-fix-state-model.md` §5's other named consumer of this evidence, is now also implemented (`ADP-051-C`, see the top of this file and **Security model**/**Success criteria** below); see Notion `ADP-051-B`/`C`/`D` for the full history of what landed against each.
 
 ## Why there is no webhook receiver
 
@@ -114,7 +125,7 @@ Trade-off, stated plainly: reconciliation is no longer near-instant. A change is
 
 The integration has no inbound attack surface: nothing outside the Apps Script project can invoke the reconciler, so there is no request to authenticate.
 
-- **One secret, one place.** `NOTION_TOKEN` lives only in Apps Script Script Properties. There is no webhook verification token and no relay secret to generate, duplicate across systems, rotate in lockstep, or leak. Never put the token in source code, GitHub, the Sheet, a URL, or logs.
+- **Two secrets, one place.** `NOTION_TOKEN` and `GITHUB_TOKEN` both live only in Apps Script Script Properties. There is no webhook verification token and no relay secret to generate, duplicate across systems, rotate in lockstep, or leak. Never put either token in source code, GitHub, the Sheet, a URL, or logs. `GITHUB_TOKEN` is **optional**: it is read only by Review Source resolution (`ADP-051-C`, `docs/review-fix-state-model.md` §5), which degrades to `Other` — never throws, never blocks reconciliation — when it is absent. A read-only, fine-grained PAT scoped to Pull Requests (Reviews) on the relevant repositories is sufficient; it needs no write access.
 - **No public endpoint.** The project defines no `doGet` / `doPost`, and the Web App deployment is removed. An attacker who learns the script ID has nothing to call.
 - **No credential in any URL.** Satisfied by construction rather than by mitigation — there is no receiver URL.
 - **Notion remains the only source of operational truth.** Every mutation is derived from a page Notion returned over an authenticated call; the reconciler can only move Task Time Events toward the state Notion already holds, and repeating a pass over the same page is a no-op.
@@ -157,9 +168,9 @@ Creating Task Time Events through the Notion API requires **Insert Content** cap
 
 1. Open the PoC Google Sheet → **Extensions → Apps Script**.
 2. Replace `Code.gs` with the current version from this directory.
-3. Confirm `NOTION_TOKEN` is present under **Project Settings → Script Properties**. Add it there through the editor UI if it is missing; never set it from committed code.
+3. Confirm `NOTION_TOKEN` is present under **Project Settings → Script Properties**. Add it there through the editor UI if it is missing; never set it from committed code. Optionally also add `GITHUB_TOKEN` (a read-only, fine-grained PAT with Pull Requests read access) to enable Review Source resolution (`ADP-051-C`) — see **Security model**. Reconciliation works without it; Review Source is simply left `Other`.
 4. Run `setup()` once. It records the spreadsheet/data-source IDs, ensures the `Time Events` and `Sync Log` tabs, and installs the `pollTaskChanges` time-driven trigger. Authorize the script when prompted.
-5. Run `showSetupInfo()` and confirm `notionTokenConfigured: true`, `syncTriggersInstalled: 1`, and the expected `pollIntervalMinutes`.
+5. Run `showSetupInfo()` and confirm `notionTokenConfigured: true`, `syncTriggersInstalled: 1`, and the expected `pollIntervalMinutes`. `githubTokenConfigured` reports whether `GITHUB_TOKEN` is set; `false` is a valid, supported state.
 6. Run `backfillTaskOriginProvenance_()` once, **even on a brand-new deployment with no pre-existing Notion data** — Codex-reported gap (round 25): skipping it as "not needed" on a fresh deploy leaves `TASK_ORIGIN_BACKFILL_COMPLETE` permanently unset, silently blocking `backfillStoryExclusion_()`'s archive path for any Time Event added directly in Notion later (not through this script). A zero-result run still sets the completion flag; see its own entry under "Behavior of the cursor" below.
 7. On an **existing live deployment** being upgraded to a revision that includes `enforceSupersededLifecycle_` (ADP-052-T05), also run `backfillSupersededTasks_()` once — see its own entry under "Behavior of the cursor" below for why an already-`Superseded` Task from before the upgrade would otherwise never be reached again. A fresh deployment has no pre-existing Superseded history and can skip this step.
 
@@ -299,7 +310,9 @@ The Done gate is reactive: it observes a Status that has already been set. An in
 - Notion remains authoritative for Task state and Task Time Events.
 - Sheet rows are reproducible projections of Notion events for touched Tasks.
 - No credential appears in any URL, and no public endpoint exists to hold one.
-- `NOTION_TOKEN` is the only secret, held only in Apps Script Script Properties, and never logged.
+- `NOTION_TOKEN` and `GITHUB_TOKEN` are the only two secrets, both held only in Apps Script Script Properties, and neither ever logged (presence only is reported by `showSetupInfo()`).
+- `GITHUB_TOKEN` is optional; its absence, or any GitHub API failure, degrades Review Source resolution to `Other` rather than throwing or blocking Time Event creation.
+- Work Type (`Initial Work` / `Review Fix`, `ADP-051-B`) and Review Source (`Codex` / `Claude` / `Human` / `Other`, `ADP-051-C`) are both resolved non-blockingly for every freshly-opened execution and never prevent Time Event creation on a resolver error or an unresolved/not-applicable result — they are simply left unset on the Task Time Event in that case.
 - The reconciler is reachable only from inside the Apps Script project (time-driven trigger, or an operator running `reconcileTaskById` from the editor).
 - Beyond the Notion API responses it fetches itself, the reconciler accepts no externally supplied operational claims.
 - Human / Chris / Claude / Codex Task activity uses the same state-driven mechanism.
