@@ -270,8 +270,13 @@ function generateMonthlyKpiReportForMonth_(target) {
   const title = REPORT_TITLE_PREFIX + target.label;
   const found = findExistingReportPageWithFallback_(kpiFrameworkPageId_(), target.label);
   // Read back any Final Review content already sitting in §5/§6 BEFORE
-  // replacePageContent_ deletes it, so buildReportBlocks_ can re-embed it
-  // into the freshly generated page instead of silently discarding it.
+  // renameReportPage_/replacePageContent_ touch the page, so
+  // buildReportBlocks_ can re-embed it into the freshly generated page
+  // instead of silently discarding it. extractPreservedSections_
+  // intentionally throws (rather than degrading to "nothing to preserve")
+  // on a genuine read failure, which aborts this whole function here —
+  // before any mutation below — instead of proceeding to delete the
+  // existing page's content having failed to actually see what was in it.
   const preserved = found.pageId ? extractPreservedSections_(found.pageId) : { section5: [], section6: [] };
   const blocks = buildReportBlocks_(report, preserved);
 
@@ -1608,23 +1613,33 @@ function extractSectionHumanContent_(blocks, startHeadingText, endHeadingTexts, 
 }
 
 // Reads back an existing report page's §5/§6 content (see
-// extractSectionHumanContent_) for buildReportBlocks_ to re-embed. Never
-// throws: any failure (page deleted mid-run, unexpected block shape,
-// transient API error) degrades to "nothing to preserve" via the same
-// pattern fetchPreviousMonthRawMetrics_ already uses, rather than blocking
-// the current month's report generation over a best-effort preservation
-// feature.
+// extractSectionHumanContent_) for buildReportBlocks_ to re-embed.
+//
+// Deliberately does NOT catch and swallow errors here (Codex review, PR #74,
+// second finding on the original preservation fix): "the §5/§6 heading is
+// not present in the fetched blocks" is not an error at all — it is the
+// ordinary, successful return value extractSectionHumanContent_ already
+// gives (an empty array via its own internal findIndex/`-1` check) for a
+// page that legitimately has no such content yet. There is therefore no
+// expected-and-safe-to-ignore exception this function needs to catch. A
+// thrown error here can only mean fetchPageChildren_ itself genuinely failed
+// (transient network/API error, non-2xx response, pagination that never
+// terminated, ...) — i.e. "we could not read what's there", never "there is
+// nothing there". Catching that and returning `{section5: [], section6: []}`
+// would make generateMonthlyKpiReportForMonth_ proceed to
+// replacePageContent_ believing it safe to delete every block, when in fact
+// the read simply failed and any real Final Review content in §5/§6 was
+// never actually seen — silently destroying it. Left uncaught, the error
+// propagates out of generateMonthlyKpiReportForMonth_ (through
+// withRunLock_'s try/finally, which releases the lock but does not swallow
+// the exception) and aborts the whole run for this month BEFORE
+// replacePageContent_ — or any other page mutation — is ever reached.
 function extractPreservedSections_(pageId) {
-  try {
-    const blocks = fetchPageChildren_(pageId);
-    return {
-      section5: extractSectionHumanContent_(blocks, SECTION5_HEADING, [SECTION6_HEADING], SECTION5_PLACEHOLDER_TEXT),
-      section6: extractSectionHumanContent_(blocks, SECTION6_HEADING, [DATA_QUALITY_HEADING], SECTION6_PLACEHOLDER_TEXT),
-    };
-  } catch (err) {
-    Logger.log('extractPreservedSections_ failed for ' + pageId + ': ' + err);
-    return { section5: [], section6: [] };
-  }
+  const blocks = fetchPageChildren_(pageId);
+  return {
+    section5: extractSectionHumanContent_(blocks, SECTION5_HEADING, [SECTION6_HEADING], SECTION5_PLACEHOLDER_TEXT),
+    section6: extractSectionHumanContent_(blocks, SECTION6_HEADING, [DATA_QUALITY_HEADING], SECTION6_PLACEHOLDER_TEXT),
+  };
 }
 
 function appendBlocksChunked_(pageId, blocks) {

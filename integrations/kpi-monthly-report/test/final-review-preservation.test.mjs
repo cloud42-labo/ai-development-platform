@@ -104,14 +104,72 @@ test('sanitizeBlockForAppend_ recurses into a block with children (e.g. a toggle
   assert.equal(sanitized.bulleted_list_item.children[0].paragraph.rich_text[0].plain_text, 'nested');
 });
 
-test('extractPreservedSections_ returns empty sections (never throws) when the page/blocks are unreadable', () => {
+// Regression (Codex review, PR #74, follow-up finding on 8677c85):
+// extractPreservedSections_ previously caught EVERY read failure and
+// returned `{section5: [], section6: []}`, indistinguishable from a page
+// that legitimately has no §5/§6 content yet. That let a transient read
+// failure silently masquerade as "nothing to preserve", after which
+// replacePageContent_ would still delete the page's real (unread) content.
+// A genuine read failure must now propagate instead of being swallowed —
+// "no §5/§6 heading found" already returns cleanly via
+// extractSectionHumanContent_'s own normal control flow (see the "returns []
+// when the heading itself is not found" test above), so there is no
+// legitimate case this needs to catch.
+test('extractPreservedSections_ propagates (does NOT swallow) a genuine read failure, rather than degrading to "nothing to preserve"', () => {
   const routes = {
-    'GET /v1/blocks/broken-page/children': () => { throw new Error('simulated transient failure'); },
+    'GET /v1/blocks/broken-page/children': () => { throw new Error('simulated transient Notion API failure'); },
   };
   const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub(routes) });
-  const result = sandbox.extractPreservedSections_('broken-page');
-  assert.equal(result.section5.length, 0);
-  assert.equal(result.section6.length, 0);
+  assert.throws(() => sandbox.extractPreservedSections_('broken-page'), /simulated transient Notion API failure/);
+});
+
+test('end-to-end: generateMonthlyKpiReportFor ABORTS the whole month (throws) and never calls any destructive/mutating API when the preservation read fails', () => {
+  let deleteCalls = 0;
+  let patchContentCalls = 0;
+  let patchTitleCalls = 0;
+  let createCalls = 0;
+  const routes = {
+    'POST /v1/data_sources/tasks-ds/query': () => ({ results: [], has_more: false }),
+    'POST /v1/data_sources/events-ds/query': () => ({ results: [], has_more: false }),
+    'POST /v1/data_sources/products-ds/query': () => ({ results: [], has_more: false }),
+    'GET /search/issues': () => ({ total_count: 0, items: [] }),
+    'GET /v1/blocks/framework-page-id/children': () => ({
+      results: [{ id: 'existing-page-id', type: 'child_page', child_page: { title: 'AI Organization KPI / KMI｜2026-09' } }],
+      has_more: false,
+    }),
+    // The preservation read for the existing page fails transiently.
+    'GET /v1/blocks/existing-page-id/children': () => { throw new Error('simulated transient Notion API failure'); },
+    'DELETE *': () => { deleteCalls += 1; return {}; },
+    'PATCH /v1/blocks/existing-page-id/children': () => { patchContentCalls += 1; return {}; },
+    'PATCH /v1/pages/existing-page-id': () => { patchTitleCalls += 1; return {}; },
+    'POST /v1/pages': () => { createCalls += 1; return { id: 'should-not-be-created' }; },
+  };
+
+  const { sandbox } = loadCodeGsSandbox({
+    scriptProperties: Object.assign({}, SCRIPT_PROPS, {
+      TASKS_DATA_SOURCE_ID: 'tasks-ds',
+      TIME_EVENTS_DATA_SOURCE_ID: 'events-ds',
+      PRODUCTS_DATA_SOURCE_ID: 'products-ds',
+      KPI_FRAMEWORK_PAGE_ID: 'framework-page-id',
+      GITHUB_REPOS: JSON.stringify(['acme/widgets']),
+    }),
+    fetch: fetchStub(routes),
+  });
+
+  assert.throws(
+    () => sandbox.generateMonthlyKpiReportFor('2026-09'),
+    /simulated transient Notion API failure/,
+    'a failed preservation read must abort the whole run for this month'
+  );
+
+  // The critical assertion: no destructive or mutating call ever happened.
+  // A thrown exception alone would not catch a bug where the code caught
+  // the read error, substituted empty preserved sections, and only failed
+  // later for an unrelated reason after already deleting/replacing content.
+  assert.equal(deleteCalls, 0, 'must never delete existing blocks when preservation could not be read');
+  assert.equal(patchContentCalls, 0, 'must never replace page content when preservation could not be read');
+  assert.equal(patchTitleCalls, 0, 'must never rename the page when preservation could not be read');
+  assert.equal(createCalls, 0, 'must never create a page when updating an existing one failed this early');
 });
 
 // Exact literals from Code.gs's SECTION5_PLACEHOLDER_TEXT /

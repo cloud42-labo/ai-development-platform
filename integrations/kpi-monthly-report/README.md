@@ -186,6 +186,21 @@ placeholder, so the rebuilt page is a strict superset of the previous one
 (this month's fresh aggregates plus whatever Final Review content already
 existed) rather than a regression to an empty placeholder.
 
+**A failed read here aborts the whole month, it does not degrade to
+"nothing to preserve".** `extractPreservedSections_` does not catch its own
+`fetchPageChildren_` call — a genuine read failure (transient network/API
+error, malformed response, ...) propagates all the way out of
+`generateMonthlyKpiReportForMonth_` (through `withRunLock_`'s try/finally,
+which releases the lock but does not swallow the exception) *before*
+`renameReportPage_`/`replacePageContent_` ever runs (Codex review, PR #74,
+follow-up finding on the original fix in 8677c85: catching that error and
+substituting empty sections had made a merely-failed read indistinguishable
+from a page that legitimately has no §5/§6 content yet, after which the
+rerun proceeded to delete the page's real, unread content anyway). "The page
+has no §5/§6 heading" is not an error case needing a catch here — it already
+returns cleanly as an empty array via `extractSectionHumanContent_`'s own
+ordinary `indexOf`-not-found control flow, not via a caught exception.
+
 Each preserved block is sanitized (`sanitizeBlockForAppend_`) from the shape
 the Notion API returns (which carries `id`, `created_time`, etc. the create/
 append endpoints reject) down to the shape they accept, recursing into any
