@@ -3,8 +3,9 @@
 // Purpose: on the 1st of each month (JST), aggregate the PRIOR JST calendar
 // month from Notion `Task Time Events` + `Stories & Tasks` and from GitHub
 // PR activity, and create-or-update one Notion page titled
-// `AI Organization KPI｜YYYY-MM` under the existing
-// `AI Organization KPI Framework｜週次・月次の能力配分とフロー管理` page.
+// `AI Organization KPI / KMI｜YYYY-MM` under the existing
+// `AI Organization KPI / KMI Framework｜事業統制ツリー連動` page, in the
+// unified KPI/KMI-paired-by-Management-Point format ADP-055-KMI defines.
 //
 // This file is a STANDALONE Apps Script project (time-driven trigger only,
 // no Web App, no bound Spreadsheet — there is no Sheets output here, unlike
@@ -38,7 +39,7 @@ const DEFAULTS = {
   TASKS_DATA_SOURCE_ID: 'fc5e770f-c68e-4799-afe7-ec4bff0dab59',
   TIME_EVENTS_DATA_SOURCE_ID: '544b9a17-2653-47aa-b62c-bb52425b3bf2',
   PRODUCTS_DATA_SOURCE_ID: '2cee4878-ea37-485d-a57d-ae117387a640',
-  // "AI Organization KPI Framework｜週次・月次の能力配分とフロー管理"
+  // "AI Organization KPI / KMI Framework｜事業統制ツリー連動"
   KPI_FRAMEWORK_PAGE_ID: '3d0fbd826f3b8109a68ffb338b31280f',
   // Repositories the GitHub aggregation scans. Any repo not listed here is
   // invisible to this report — a documented limitation, not a silent gap.
@@ -62,7 +63,56 @@ const DEFAULTS = {
 };
 
 const UNKNOWN_LABEL = 'Unknown/未分類';
-const REPORT_TITLE_PREFIX = 'AI Organization KPI｜';
+const MISSING_DATA_LABEL = 'Missing Data（未計測）';
+// ADP-055-KMI renamed the live monthly report page from
+// "AI Organization KPI｜YYYY-MM" to "AI Organization KPI / KMI｜YYYY-MM" as
+// part of moving to the unified KPI/KMI format (the 2026-09 page under the
+// Framework page already carries this title). REPORT_TITLE_PREFIX must match
+// the page's REAL title exactly — findExistingReportPage_ matches by exact
+// title string — otherwise a re-run would create a second, duplicate page
+// instead of updating the existing one (violates Acceptance Criterion 11).
+const REPORT_TITLE_PREFIX = 'AI Organization KPI / KMI｜';
+// The title every report page carried before ADP-055-KMI's rename above.
+// `generateMonthlyKpiReportFor` can be (and per its own README is meant to
+// be) called to backfill/rerun ANY past month, not just ones already
+// migrated to the new title — a month whose page still carries this legacy
+// title must still be found and updated in place, never re-created under
+// the new title as a duplicate (Codex review, PR #74; Acceptance
+// Criterion 11). See findExistingReportPageWithFallback_.
+const LEGACY_REPORT_TITLE_PREFIX = 'AI Organization KPI｜';
+// An Open PR older than this (hours) counts toward the KMI "48h超率" — the
+// same 48h threshold the AI Organization KPI / KMI Framework's Management
+// Point ① KMI column defines ("Open PR Age・48h超率"). Not independently
+// invented here.
+const OPEN_PR_AGE_ALERT_HOURS = 48;
+// Marks the machine-readable metrics snapshot appended to every generated
+// report page (see "Month-over-month raw metrics" below). ADP-055-KMI
+// Acceptance Criterion 12 requires 10月以降 (October onward) to add a
+// month-over-month comparison once 2026-09 is Baseline. Re-parsing rendered
+// prose from the previous month's page would be fragile and would risk
+// silently misreading a number — exactly the kind of guessed value this
+// integration's own Scope decisions rule out. Instead each run appends its
+// own key metrics as a fenced JSON code block tagged with this marker, and
+// the following month's run reads that block back structurally instead of
+// parsing rendered text.
+const RAW_METRICS_MARKER = 'ai-organization-kpi-raw-metrics-v1';
+
+// §5/§6 headings and this file's own regenerated placeholder callout text,
+// each declared once here and reused by both buildReportBlocks_ (which
+// writes them) and extractPreservedSections_ (which reads them back before a
+// rerun deletes them) — see "Preserving Final Review content across
+// reruns" below. Keeping one definition prevents the two from silently
+// drifting apart.
+const SECTION5_HEADING = '5. 構造的問題';
+const SECTION5_PLACEHOLDER_TEXT =
+  '本セクションは自動集計の対象外。上記KPI/KMIから構造的問題を判断する作業（Management Point → KPI → KMI → 構造的問題という因果解釈）は、' +
+  'Framework §5 Review Cadenceが定める毎月1日の前月Final Review（Human/AI判断）でこのページへ直接追記する。' +
+  '推測分類を自動生成しないという本統合の一貫した方針（README Scope decisions）に従い、空欄のまま生成する。';
+const SECTION6_HEADING = '6. 対策・Backlog / Sprint / 正本更新';
+const SECTION6_PLACEHOLDER_TEXT =
+  '同じく前月Final Reviewで、セクション5の構造的問題ごとに対策と担当Skill（例: pr-review-convergence / human-gate-preflight / ' +
+  'backlog-refinement / sprint-planning / sprint-retrospective）を追記し、必要な変更をBacklog・Sprint・正本ドキュメントへ反映する。';
+const DATA_QUALITY_HEADING = 'データ品質・Unknown/未分類の扱い';
 
 // Notion search API page size / GitHub search API page size share this cap.
 const MAX_PAGE_SIZE = 100;
@@ -180,32 +230,64 @@ function generateMonthlyKpiReportForMonth_(target) {
 
   const completedTasks = queryCompletedTasksForRange_(target.startIso, target.endIsoExclusive);
   const taskAgg = aggregateTasksByProduct_(completedTasks.results, productMap);
+  const doneTasks = completedTasks.results.filter(function (task) { return selectName_(task.properties.Status) === 'Done'; });
 
   const blockedSnapshot = aggregateBlockedSnapshot_(queryCurrentBlockedTasks_().results, productMap);
   const humanQueueSnapshot = aggregateHumanQueueSnapshot_(queryCurrentOpenHumanRequests_().results, productMap);
   const humanCompletedInMonth = aggregateHumanCompletedInMonth_(completedTasks.results, productMap);
 
+  const createdTasks = queryCreatedTasksForRange_(target.startIso, target.endIsoExclusive);
+  const closedTasks = queryClosedTasksForRange_(target.startIso, target.endIsoExclusive);
+  const wipTasks = queryCurrentWipTasks_();
+  const taskFlow = aggregateTaskFlow_(createdTasks.results, closedTasks.results, wipTasks.results);
+
+  const valueTypeCoverage = aggregateValueTypeCoverage_(doneTasks);
+  const aiAutonomy = aggregateAiAutonomy_(doneTasks);
+
   const githubReport = aggregateGitHub_(target);
+  const openPrReport = aggregateOpenPrs_(githubRepos_(), Date.now());
+
+  const previousLabel = previousMonthLabel_(target);
+  const previousMetrics = fetchPreviousMonthRawMetrics_(kpiFrameworkPageId_(), previousLabel);
 
   const report = {
     target: target,
+    previousLabel: previousLabel,
+    previousMetrics: previousMetrics,
     timeEvents: { truncated: timeEvents.truncated, agg: timeAgg, byProduct: timeByProduct },
-    tasks: { truncated: completedTasks.truncated, agg: taskAgg },
+    tasks: { truncated: completedTasks.truncated || createdTasks.truncated || closedTasks.truncated || wipTasks.truncated, agg: taskAgg },
+    taskFlow: taskFlow,
+    valueTypeCoverage: valueTypeCoverage,
+    aiAutonomy: aiAutonomy,
     blocked: blockedSnapshot,
     humanQueue: humanQueueSnapshot,
     humanCompleted: humanCompletedInMonth,
     github: githubReport,
+    openPr: openPrReport,
     generatedAtIso: new Date().toISOString(),
   };
 
-  const blocks = buildReportBlocks_(report);
   const title = REPORT_TITLE_PREFIX + target.label;
-  const existingPageId = findExistingReportPage_(kpiFrameworkPageId_(), title);
+  const found = findExistingReportPageWithFallback_(kpiFrameworkPageId_(), target.label);
+  // Read back any Final Review content already sitting in §5/§6 BEFORE
+  // renameReportPage_/replacePageContent_ touch the page, so
+  // buildReportBlocks_ can re-embed it into the freshly generated page
+  // instead of silently discarding it. extractPreservedSections_
+  // intentionally throws (rather than degrading to "nothing to preserve")
+  // on a genuine read failure, which aborts this whole function here —
+  // before any mutation below — instead of proceeding to delete the
+  // existing page's content having failed to actually see what was in it.
+  const preserved = found.pageId ? extractPreservedSections_(found.pageId) : { section5: [], section6: [] };
+  const blocks = buildReportBlocks_(report, preserved);
 
-  if (existingPageId) {
-    replacePageContent_(existingPageId, blocks);
-    Logger.log('Updated existing report page ' + existingPageId + ' for ' + target.label);
-    return { pageId: existingPageId, action: 'updated', label: target.label };
+  if (found.pageId) {
+    if (found.legacyTitle) {
+      renameReportPage_(found.pageId, title);
+      Logger.log('Migrated report page ' + found.pageId + ' from the legacy title to ' + title);
+    }
+    replacePageContent_(found.pageId, blocks);
+    Logger.log('Updated existing report page ' + found.pageId + ' for ' + target.label);
+    return { pageId: found.pageId, action: 'updated', label: target.label, migratedFromLegacyTitle: found.legacyTitle };
   }
 
   const pageId = createReportPage_(kpiFrameworkPageId_(), title, blocks);
@@ -461,6 +543,166 @@ function queryCurrentOpenHumanRequests_() {
   );
 }
 
+// Task Flow KPI/KMI (AI Organization KPI / KMI Framework §3.1, Management
+// Point ① row): Task新規作成数 — every Stories & Tasks record (Task / Story /
+// Request, any Type, any Status) whose built-in `Created` timestamp falls in
+// the target month. No Status/Type restriction: Framework §3.1 defines this
+// as unconditional intake volume, separately from how many of those are ever
+// completed.
+function queryCreatedTasksForRange_(startIso, endIsoExclusive) {
+  return paginateNotionQuery_(
+    '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+    {
+      page_size: MAX_PAGE_SIZE,
+      filter: {
+        and: [
+          { property: 'Created', created_time: { on_or_after: startIso } },
+          { property: 'Created', created_time: { before: endIsoExclusive } },
+        ],
+      },
+    }
+  );
+}
+
+// Task Close数 (Framework §3.1): every record whose `Closed At` falls in the
+// target month AND whose current `Status` is a terminal one (`Done` or
+// `Superseded` — both write `Closed At`, see integrations/notion-time-events
+// README on Reopen/Superseded). Unlike queryCompletedTasksForRange_ (used
+// for the Done-only Delivery/Human-completed metrics), this one intentionally
+// admits `Superseded` too, because Task Close is a Flow/throughput count of
+// the intake pipeline draining, not a quality/outcome count — but it must
+// still require a terminal Status, not `Closed At` alone. A Task can have
+// `Closed At` written while `Status` is still `Ready`/`In Progress`/
+// `Review`/`Blocked` — an explicitly documented real partial-write/Reopen
+// failure mode (integrations/notion-time-events/README.md, "Reopen guard
+// does not clear a prior Completed At/Closed At automatically"). Without the
+// Status condition, such a Task would be double-counted: once here as
+// "closed", and again by queryCurrentWipTasks_ as still-open WIP, corrupting
+// Close, Task純増 (net), and Close/Create ratio (Codex review, PR #74).
+function queryClosedTasksForRange_(startIso, endIsoExclusive) {
+  return paginateNotionQuery_(
+    '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+    {
+      page_size: MAX_PAGE_SIZE,
+      filter: {
+        and: [
+          { property: 'Closed At', date: { on_or_after: startIso } },
+          { property: 'Closed At', date: { before: endIsoExclusive } },
+          {
+            or: ['Done', 'Superseded'].map(function (s) {
+              return { property: 'Status', select: { equals: s } };
+            }),
+          },
+        ],
+      },
+    }
+  );
+}
+
+// WIP (Framework §3.1 KMI): a snapshot at report-generation time of every
+// record that has left Backlog but not yet reached a terminal Status —
+// Ready / In Progress / Review / Blocked. Backlog is excluded (not yet
+// Actionable, same boundary the governed Human Queue definition already
+// uses); Done/Superseded are excluded (terminal).
+function queryCurrentWipTasks_() {
+  return paginateNotionQuery_(
+    '/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query',
+    {
+      page_size: MAX_PAGE_SIZE,
+      filter: {
+        or: ['Ready', 'In Progress', 'Review', 'Blocked'].map(function (s) {
+          return { property: 'Status', select: { equals: s } };
+        }),
+      },
+    }
+  );
+}
+
+// Pure aggregation of the three Task Flow queries above into the Management
+// Point ① KPI/KMI pair: Task新規作成数 / Task Close数 (KPI) and Task純増数 /
+// Close-Create比 / WIP数 (KMI). Type breakdown is kept (README "Task Flow")
+// so the report can show intake/drain composition without re-querying.
+function aggregateTaskFlow_(createdTasks, closedTasks, wipTasks) {
+  function byType(tasks) {
+    const counts = {};
+    tasks.forEach(function (task) {
+      const type = selectName_(task.properties.Type) || UNKNOWN_LABEL;
+      counts[type] = (counts[type] || 0) + 1;
+    });
+    return counts;
+  }
+
+  const createdCount = createdTasks.length;
+  const closedCount = closedTasks.length;
+
+  return {
+    createdCount: createdCount,
+    closedCount: closedCount,
+    net: createdCount - closedCount,
+    closeCreateRatioPercent: percentage_(closedCount, createdCount),
+    wipCount: wipTasks.length,
+    byTypeCreated: byType(createdTasks),
+    byTypeClosed: byType(closedTasks),
+  };
+}
+
+// Measurement-quality metric backing Acceptance Criterion 8 ("実測・Proxy・
+// 未計測は推測補完しない"): what share of this month's completed (Status =
+// Done) Tasks even carry a `Value Type`, the axis §4 of the Framework needs
+// for Product別・Value Conversion analysis. A low percentage here is itself
+// the KMI-relevant signal (the Framework's own 2026-09 Baseline flagged
+// 3.1%), not something to interpolate around.
+function aggregateValueTypeCoverage_(doneTasks) {
+  const byValueType = {};
+  let withValueType = 0;
+  doneTasks.forEach(function (task) {
+    const name = selectName_(task.properties['Value Type']);
+    if (name) {
+      withValueType += 1;
+      byValueType[name] = (byValueType[name] || 0) + 1;
+    }
+  });
+  return {
+    total: doneTasks.length,
+    withValueType: withValueType,
+    coveragePercent: percentage_(withValueType, doneTasks.length),
+    byValueType: byValueType,
+  };
+}
+
+// AI自律完遂率 / Human依存率 (Framework Management Point ① / ② KPI): among
+// this month's Done Tasks whose `Assigned Agent` is set at all (denominator
+// excludes tasks where it was never recorded — never guessed as either AI or
+// Human), what share resolved to an AI actor vs. exactly `Human`. Any
+// non-empty, non-"Human" Assigned Agent (Claude, Claude Sonnet, Codex, ...)
+// counts as AI; this mirrors the Framework's own manual 2026-09 calculation
+// ("担当Agent判明済み完了TaskのうちAI完了127/156=81.4%").
+function aggregateAiAutonomy_(doneTasks) {
+  let aiCompleted = 0;
+  let humanCompleted = 0;
+  let unknown = 0;
+  doneTasks.forEach(function (task) {
+    const agent = selectName_(task.properties['Assigned Agent']);
+    if (!agent) {
+      unknown += 1;
+    } else if (agent === 'Human') {
+      humanCompleted += 1;
+    } else {
+      aiCompleted += 1;
+    }
+  });
+  const known = aiCompleted + humanCompleted;
+  return {
+    total: doneTasks.length,
+    known: known,
+    unknown: unknown,
+    aiCompleted: aiCompleted,
+    humanCompleted: humanCompleted,
+    aiAutonomyPercent: percentage_(aiCompleted, known),
+    humanDependencyPercent: percentage_(humanCompleted, known),
+  };
+}
+
 function productNamesForTask_(task, productMap) {
   const ids = relationIds_(task.properties.Product);
   const names = ids.map(function (id) { return productMap[id] || UNKNOWN_LABEL; });
@@ -577,6 +819,8 @@ function aggregateGitHub_(target) {
   const byRepo = {};
   const byProduct = {};
   let anyTruncated = false;
+  let totalCreated = 0;
+  let totalMerged = 0;
 
   function ensureProduct(name) {
     if (!byProduct[name]) byProduct[name] = { created: 0, merged: 0 };
@@ -589,6 +833,8 @@ function aggregateGitHub_(target) {
     anyTruncated = anyTruncated || created.truncated || merged.truncated;
 
     byRepo[repo] = { created: created.totalCount, merged: merged.totalCount };
+    totalCreated += created.totalCount;
+    totalMerged += merged.totalCount;
 
     created.items.forEach(function (item) {
       const product = lookupProductForPr_(repo, item.number) || UNKNOWN_LABEL;
@@ -600,7 +846,7 @@ function aggregateGitHub_(target) {
     });
   });
 
-  return { byRepo: byRepo, byProduct: byProduct, truncated: anyTruncated };
+  return { byRepo: byRepo, byProduct: byProduct, truncated: anyTruncated, totalCreated: totalCreated, totalMerged: totalMerged };
 }
 
 // field: 'created' or 'merged'. Uses GitHub's Search Issues API, scoped to
@@ -632,6 +878,94 @@ function githubSearchPRs_(repo, field, target) {
   if (totalCount > GITHUB_SEARCH_HARD_CAP) truncated = true;
 
   return { totalCount: totalCount, items: items, truncated: truncated };
+}
+
+// Open PR Age / 48h超率 (Framework Management Point ① KMI, Acceptance
+// Criterion 5): a separate, current-time snapshot search (`is:open`), not
+// part of githubSearchPRs_'s created/merged-in-month query. `created_at` on
+// each Search API issue item is used directly — never recomputed from a
+// separately fetched PR object — to compute Age at report-generation time.
+function githubSearchOpenPRs_(repo) {
+  const query = 'repo:' + repo + ' is:pr is:open';
+
+  let items = [];
+  let totalCount = 0;
+  let truncated = false;
+
+  for (let page = 1; page <= GITHUB_SEARCH_MAX_PAGES; page++) {
+    const result = githubRequest_(
+      '/search/issues?q=' + encodeURIComponent(query) + '&per_page=' + MAX_PAGE_SIZE + '&page=' + page
+    );
+    totalCount = result.total_count || 0;
+    items = items.concat(result.items || []);
+    if (!result.items || result.items.length < MAX_PAGE_SIZE) break;
+    if (page === GITHUB_SEARCH_MAX_PAGES && items.length < totalCount) truncated = true;
+  }
+  if (totalCount > GITHUB_SEARCH_HARD_CAP) truncated = true;
+
+  return { totalCount: totalCount, items: items, truncated: truncated };
+}
+
+// Aggregates currently-open PRs (across the configured repos) into the Open
+// PR count / average Age / 48h超率 KMI, split by repo and — via the same
+// lookupProductForPr_ attribution the created/merged aggregation already
+// uses — by Product. `nowMs` is threaded through explicitly (not read from
+// `new Date()` inside) so the pure Age arithmetic stays independently
+// testable.
+function aggregateOpenPrs_(repos, nowMs) {
+  const byRepo = {};
+  const byProduct = {};
+  let allAges = [];
+  let over48h = 0;
+  let anyTruncated = false;
+
+  function ensureProduct(name) {
+    if (!byProduct[name]) byProduct[name] = { count: 0, ages: [], over48h: 0 };
+    return byProduct[name];
+  }
+
+  repos.forEach(function (repo) {
+    const open = githubSearchOpenPRs_(repo);
+    anyTruncated = anyTruncated || open.truncated;
+
+    const ages = open.items.map(function (item) {
+      return (nowMs - new Date(item.created_at).getTime()) / (60 * 60 * 1000);
+    });
+    const repoOver48h = ages.filter(function (h) { return h > OPEN_PR_AGE_ALERT_HOURS; }).length;
+    byRepo[repo] = {
+      count: open.items.length,
+      avgAgeH: ages.length > 0 ? round1_(ages.reduce(function (a, b) { return a + b; }, 0) / ages.length) : null,
+      over48h: repoOver48h,
+    };
+    allAges = allAges.concat(ages);
+    over48h += repoOver48h;
+
+    open.items.forEach(function (item, i) {
+      const product = lookupProductForPr_(repo, item.number) || UNKNOWN_LABEL;
+      const bucket = ensureProduct(product);
+      bucket.count += 1;
+      bucket.ages.push(ages[i]);
+      if (ages[i] > OPEN_PR_AGE_ALERT_HOURS) bucket.over48h += 1;
+    });
+  });
+
+  Object.keys(byProduct).forEach(function (name) {
+    const bucket = byProduct[name];
+    bucket.avgAgeH = bucket.ages.length > 0
+      ? round1_(bucket.ages.reduce(function (a, b) { return a + b; }, 0) / bucket.ages.length)
+      : null;
+    delete bucket.ages;
+  });
+
+  return {
+    total: allAges.length,
+    avgAgeH: allAges.length > 0 ? round1_(allAges.reduce(function (a, b) { return a + b; }, 0) / allAges.length) : null,
+    over48h: over48h,
+    over48hPercent: percentage_(over48h, allAges.length),
+    byRepo: byRepo,
+    byProduct: byProduct,
+    truncated: anyTruncated,
+  };
 }
 
 // Attributes one GitHub PR to a Product by matching its URL against Stories
@@ -767,21 +1101,296 @@ function sortedProductNames_(maps) {
   return list;
 }
 
-function buildReportBlocks_(report) {
+// ---------------------------------------------------------------------------
+// Month-over-month raw metrics (Acceptance Criterion 12)
+// ---------------------------------------------------------------------------
+
+// The prior JST calendar month's report title, for looking up its page under
+// the same Framework parent findExistingReportPage_ already searches.
+function previousMonthLabel_(target) {
+  const prev = previousYearMonth_(target.year, target.month);
+  return prev.y + '-' + pad2_(prev.m);
+}
+
+// Fetches every top-level child block of a page (shared by
+// findExistingReportPage_/replacePageContent_'s own inline loops and this
+// module — kept as its own function here rather than refactoring those two
+// callers, to avoid changing already-tested control flow that isn't part of
+// this change).
+function fetchPageChildren_(pageId) {
+  let cursor = null;
+  const blocks = [];
+  for (let i = 0; i < 20; i++) {
+    const query = cursor ? '?start_cursor=' + encodeURIComponent(cursor) + '&page_size=100' : '?page_size=100';
+    const result = notionRequest_('get', '/v1/blocks/' + encodeURIComponent(pageId) + '/children' + query);
+    (result.results || []).forEach(function (block) { blocks.push(block); });
+    if (!result.has_more) return blocks;
+    cursor = result.next_cursor;
+  }
+  throw new Error('fetchPageChildren_ did not terminate after 20 pages under ' + pageId);
+}
+
+// Reads back the JSON metrics snapshot a prior run of this file appended via
+// buildRawMetricsBlock_ (see RAW_METRICS_MARKER). Returns null on any miss —
+// no page found, no tagged block found, or unparseable JSON — so a missing
+// or corrupt snapshot degrades to "no month-over-month comparison available"
+// rather than throwing and blocking the current month's report entirely.
+function fetchPreviousMonthRawMetrics_(parentPageId, previousLabel) {
+  try {
+    // A previous month spanning the ADP-055-KMI rename may still carry the
+    // legacy title if it was never re-generated since — fall back the same
+    // way findExistingReportPageWithFallback_ does for the current month, so
+    // month-over-month comparison isn't silently lost across the rename.
+    const pageId = findExistingReportPageWithFallback_(parentPageId, previousLabel).pageId;
+    if (!pageId) return null;
+    const blocks = fetchPageChildren_(pageId);
+    function richTextPlain_(rt) { return rt.plain_text || (rt.text && rt.text.content) || ''; }
+    const marked = blocks.filter(function (block) {
+      return block.type === 'code' && block.code && Array.isArray(block.code.rich_text) &&
+        block.code.rich_text.some(function (rt) { return richTextPlain_(rt).indexOf(RAW_METRICS_MARKER) === 0; });
+    })[0];
+    if (!marked) return null;
+    const text = marked.code.rich_text.map(richTextPlain_).join('');
+    const jsonText = text.slice(text.indexOf('\n') + 1);
+    return JSON.parse(jsonText);
+  } catch (err) {
+    Logger.log('fetchPreviousMonthRawMetrics_ failed for ' + previousLabel + ': ' + err);
+    return null;
+  }
+}
+
+// Builds this month's own machine-readable snapshot block, appended at the
+// end of every generated report so the FOLLOWING month's run can read it
+// back via fetchPreviousMonthRawMetrics_. Kept intentionally small (only the
+// headline Flow numbers the Framework's §3 Flow KPI/KMI section defines) —
+// this is a comparison aid, not a duplicate of the full report.
+function buildRawMetricsBlock_(metrics) {
+  const marker = RAW_METRICS_MARKER + '\n' + JSON.stringify(metrics, null, 2);
+  return {
+    object: 'block',
+    type: 'code',
+    code: {
+      rich_text: [{ type: 'text', text: { content: marker } }],
+      language: 'json',
+    },
+  };
+}
+
+// Percentage-point-safe delta formatter for the month-over-month callout:
+// null when either side is missing (never guessed), otherwise a signed
+// integer/one-decimal difference with an explicit +/- sign so a reader can't
+// misread a negative delta as the current value.
+function formatDelta_(current, previous) {
+  if (current === null || current === undefined || previous === null || previous === undefined) return 'N/A';
+  const delta = round1_(current - previous);
+  return (delta > 0 ? '+' : '') + delta;
+}
+
+// Builds one Management Point row for the §1 table. `kpi`/`kmi` are
+// already-formatted strings (built by the caller from real aggregates, with
+// MISSING_DATA_LABEL substituted per metric where no data source exists) —
+// this function only lays out the row, it never decides what counts as
+// measured.
+function managementPointRow_(area, point, kpi, kmi) {
+  return [area, point, kpi, kmi];
+}
+
+function joinMetrics_(parts) {
+  return parts.join(' ／ ');
+}
+
+function buildManagementPointRows_(report) {
+  const timeAgg = report.timeEvents.agg;
+  const humanActive = timeAgg.byActor.Human || { active: 0, waiting: 0 };
+  const totalActive = timeAgg.totalActive;
+  const humanActiveRatio = percentage_(humanActive.active, totalActive);
+  const humanWaitingRatio = percentage_(humanActive.waiting, humanActive.active + humanActive.waiting);
+
+  return [
+    managementPointRow_(
+      'AI-Human協働実行', '① タスク自律完遂率の最大化',
+      joinMetrics_([
+        'Task新規作成数: ' + report.taskFlow.createdCount,
+        'Task Close数: ' + report.taskFlow.closedCount,
+        '完了Task数: ' + report.aiAutonomy.total,
+        'PR作成: ' + report.github.totalCreated,
+        'PR Merge: ' + report.github.totalMerged,
+        'AI自律完遂率: ' + formatPercent_(report.aiAutonomy.aiAutonomyPercent) + '（担当Agent判明' + report.aiAutonomy.known + '件中）',
+        '初回完了率: ' + MISSING_DATA_LABEL,
+      ]),
+      joinMetrics_([
+        'Task純増数: ' + report.taskFlow.net,
+        'Close/Create比: ' + formatPercent_(report.taskFlow.closeCreateRatioPercent),
+        'WIP: ' + report.taskFlow.wipCount,
+        'Retry率: ' + MISSING_DATA_LABEL,
+        'Review Fix率: ' + formatPercent_(timeAgg.reviewFixRatio),
+        'Open PR: ' + report.openPr.total + '件 平均Age ' + formatMaybeHours_(report.openPr.avgAgeH) +
+          ' 48h超: ' + report.openPr.over48h + '件（' + formatPercent_(report.openPr.over48hPercent) + '）',
+      ])
+    ),
+    managementPointRow_(
+      'AI-Human協働実行', '② Humanレビュー工数比率の抑制',
+      joinMetrics_([
+        'Humanレビュー工数比率（Proxy: Human Actor Active/全体Active）: ' + formatPercent_(humanActiveRatio),
+        'Review処理件数: ' + MISSING_DATA_LABEL,
+        '承認Lead Time: ' + MISSING_DATA_LABEL,
+      ]),
+      joinMetrics_([
+        'Review待ち件数（Actionable Human Queue）: ' + report.humanQueue.total + '件',
+        'Review Queue Age: ' + MISSING_DATA_LABEL,
+        'Human Waiting Ratio（Proxy）: ' + formatPercent_(humanWaitingRatio),
+        'Human Escalation率: ' + MISSING_DATA_LABEL,
+      ])
+    ),
+    managementPointRow_(
+      '知見蓄積・成果物変換', '③ 実験ログから成果化への変換速度',
+      '実験→成果化率 / 実証完了→公開Lead Time / 成果物数: ' + MISSING_DATA_LABEL,
+      '未成果化ログ残高 / 形式知化待ちAge / 成果化停滞件数: ' + MISSING_DATA_LABEL
+    ),
+    managementPointRow_(
+      '知見蓄積・成果物変換', '④ 形式知化可能なプロジェクト並列数',
+      '同時実験数 / 形式知化完了数 / 並列Project数: ' + MISSING_DATA_LABEL,
+      '未整理ログ残高 / 並列過多率 / 形式知化Backlog Age: ' + MISSING_DATA_LABEL
+    ),
+    managementPointRow_(
+      'システム・データ', '⑤ コンテキスト記憶保持精度',
+      'Context保持精度 / 誤参照率の逆指標 / 正答率: ' + MISSING_DATA_LABEL,
+      'Error率 / 再入力回数 / 前提知識再投入頻度: ' + MISSING_DATA_LABEL
+    ),
+    managementPointRow_(
+      'システム・データ', '⑥ 同時実行エージェント上限',
+      '同時稼働Agent数 / 処理Throughput: ' + MISSING_DATA_LABEL,
+      'Rate Limit到達率 / Queue待ち時間 / 処理遅延率: ' + MISSING_DATA_LABEL
+    ),
+    managementPointRow_(
+      '財務', '⑦ 収益化変換効率',
+      '商用化件数 / 売上・収益 / 商用化率 / 投資回収率: ' + MISSING_DATA_LABEL,
+      '商用化待ち件数 / 投資回収Lead Time / API・人件費増加率: ' + MISSING_DATA_LABEL
+    ),
+    managementPointRow_(
+      '組織', '⑧ Humanの認知負荷の定量化',
+      joinMetrics_([
+        'Human Attention時間: ' + MISSING_DATA_LABEL,
+        '意思決定Lead Time: ' + MISSING_DATA_LABEL,
+        'Human処理件数（Proxy: Human Request完了数）: ' + report.humanCompleted.total + '件',
+      ]),
+      joinMetrics_([
+        '割込み数 / 滞留Task数 / 疲弊兆候: ' + MISSING_DATA_LABEL,
+        'Human Queue Age: ' + MISSING_DATA_LABEL + '（件数は②のActionable Human Queue: ' + report.humanQueue.total + '件を参照）',
+      ])
+    ),
+    managementPointRow_(
+      '組織', '⑨ タスク評価基準の標準化',
+      '評価基準適用率 / 再現性ある判定率 / Review一致率: ' + MISSING_DATA_LABEL,
+      '同一失敗再発率 / 評価ブレ率 / 差戻し率 / Context漏れ率 / 例外処理件数: ' + MISSING_DATA_LABEL +
+        '（Postmortemの再発分類は週次Sprint Retrospectiveの人手判断領域であり本自動集計の対象外）'
+    ),
+  ];
+}
+
+// `preserved` carries any human/Final-Review content a previous run of this
+// report already had in §5/§6 (see extractPreservedSections_) — {section5:
+// [block,...], section6: [block,...]}, both empty on first generation or
+// when nothing was ever added. Reinserting it here, right after each
+// section's placeholder callout, is what makes a rerun (replacePageContent_,
+// which deletes and rebuilds every top-level block) preserve that content
+// instead of silently discarding it (Codex review, PR #74).
+function buildReportBlocks_(report, preserved) {
+  const preservedSections = preserved || { section5: [], section6: [] };
   const t = report.target;
   const blocks = [];
+  const anyTruncated = report.timeEvents.truncated || report.tasks.truncated || report.github.truncated || report.openPr.truncated;
 
   blocks.push(calloutBlock_(
     '対象期間: JST ' + t.year + '-' + pad2_(t.month) + '-01 00:00 〜 翌月01日 00:00（' + t.startIso + ' 〜 ' + t.endIsoExclusive + ', UTC表記）。' +
-    '生成時刻: ' + report.generatedAtIso + '。定義は AI Organization KPI Framework を正本とする。' +
-    (report.timeEvents.truncated || report.tasks.truncated || report.github.truncated
+    '生成時刻: ' + report.generatedAtIso + '。定義は AI Organization KPI / KMI Framework を正本とする。KPI/KMIは同Frameworkの' +
+    '9 Management Pointsへ主帰属させて表示する（推測補完はしない）。' +
+    (anyTruncated
       ? ' ⚠️ 一部集計がページング上限に達し切り捨てられている可能性があります（Known limitationsを参照）。'
       : ''),
     '🎯'
   ));
 
-  blocks.push(textBlock_('heading_2', '1. Product別 Capacity Allocation & Outcome'));
+  blocks.push(textBlock_('heading_2', 'Executive Summary'));
+  const prevM = report.previousMetrics;
+  blocks.push(textBlock_('paragraph', joinMetrics_([
+    'Task新規作成: ' + report.taskFlow.createdCount + (prevM ? '（前月比 ' + formatDelta_(report.taskFlow.createdCount, prevM.createdCount) + '）' : ''),
+    'Task Close: ' + report.taskFlow.closedCount + (prevM ? '（前月比 ' + formatDelta_(report.taskFlow.closedCount, prevM.closedCount) + '）' : ''),
+    'WIP: ' + report.taskFlow.wipCount + (prevM ? '（前月比 ' + formatDelta_(report.taskFlow.wipCount, prevM.wipCount) + '）' : ''),
+    'AI自律完遂率: ' + formatPercent_(report.aiAutonomy.aiAutonomyPercent) + (prevM ? '（前月比pt ' + formatDelta_(report.aiAutonomy.aiAutonomyPercent, prevM.aiAutonomyPercent) + '）' : ''),
+    'PR作成/Merge: ' + report.github.totalCreated + '/' + report.github.totalMerged +
+      (prevM ? '（前月比 ' + formatDelta_(report.github.totalCreated, prevM.prCreated) + '/' + formatDelta_(report.github.totalMerged, prevM.prMerged) + '）' : ''),
+    'Open PR: ' + report.openPr.total + '件（48h超 ' + report.openPr.over48h + '件）' +
+      (prevM ? '（前月比 ' + formatDelta_(report.openPr.total, prevM.openPrTotal) + '）' : ''),
+    'Value Type付与率: ' + formatPercent_(report.valueTypeCoverage.coveragePercent) + '（' + report.valueTypeCoverage.withValueType + '/' + report.valueTypeCoverage.total + '）',
+  ])));
+  blocks.push(calloutBlock_(
+    prevM
+      ? '前月（' + report.previousLabel + '）の機械可読スナップショットと比較した月次推移を上記括弧内に表示。'
+      : '前月（' + report.previousLabel + '）のレポート、または前月分の機械可読スナップショットが見つからないため、月次推移は表示していません' +
+        '（2026-09を本Frameworkの初回Baselineとする ADP-055-KMI Acceptance Criterion 12 のとおり、10月分以降で比較が有効になります）。',
+    prevM ? '📈' : '📌'
+  ));
 
+  blocks.push(textBlock_('heading_2', '1. 事業統制ツリー別 9 Management Points KPI / KMI'));
+  blocks.push(calloutBlock_(
+    '各指標の定義・主帰属Management Pointは AI Organization KPI / KMI Framework｜事業統制ツリー連動 を正本とする。' +
+    '「' + MISSING_DATA_LABEL + '」はTelemetry未整備で実測できない項目であり、推測値では埋めていない。',
+    '📋'
+  ));
+  blocks.push(tableBlock_(
+    ['領域', 'Management Point', 'KPI｜成果・状態', 'KMI｜先行警戒'],
+    buildManagementPointRows_(report)
+  ));
+
+  blocks.push(textBlock_('heading_2', '2. Task Flow（Create / Close / 純増 / WIP / Age）'));
+  blocks.push(textBlock_('paragraph', joinMetrics_([
+    'Task新規作成数: ' + report.taskFlow.createdCount,
+    'Task Close数: ' + report.taskFlow.closedCount,
+    'Task純増数: ' + report.taskFlow.net,
+    'Close/Create比: ' + formatPercent_(report.taskFlow.closeCreateRatioPercent),
+    '現在WIP: ' + report.taskFlow.wipCount,
+  ])));
+  const typeNames = sortedProductNames_([report.taskFlow.byTypeCreated, report.taskFlow.byTypeClosed]);
+  blocks.push(tableBlock_(['Type', 'Create', 'Close'], typeNames.map(function (name) {
+    return [name, report.taskFlow.byTypeCreated[name] || 0, report.taskFlow.byTypeClosed[name] || 0];
+  })));
+  blocks.push(calloutBlock_(
+    'Task単位のAge分布: ' + MISSING_DATA_LABEL + '。Notionに「Blocked/WIPへ遷移した時刻」を記録する専用プロパティが無く、' +
+    '既存のStarted At/Closed Atだけでは状態別滞留時間を算出できない（README Known limitations「Blocked "Age" is not reported」を参照）。',
+    '⚠️'
+  ));
+
+  blocks.push(textBlock_('heading_2', '3. Delivery Flow（PR Create / Merge / Open PR Age）'));
+  blocks.push(textBlock_('heading_3', '3.1 PR Flow（Create / Merge）'));
+  blocks.push(textBlock_('paragraph', 'PR作成: ' + report.github.totalCreated + ' ／ PR Merge: ' + report.github.totalMerged +
+    ' ／ Merge/Create比: ' + formatPercent_(percentage_(report.github.totalMerged, report.github.totalCreated))));
+  const repoNames = Object.keys(report.github.byRepo).sort();
+  blocks.push(tableBlock_(['Repository', 'PR作成', 'PR Merge'], repoNames.map(function (name) {
+    const r = report.github.byRepo[name];
+    return [name, r.created, r.merged];
+  })));
+  const ghProductNames = sortedProductNames_([report.github.byProduct]);
+  blocks.push(tableBlock_(['Product', 'PR作成', 'PR Merge'], ghProductNames.map(function (name) {
+    const p = report.github.byProduct[name];
+    return [name, p.created, p.merged];
+  })));
+
+  blocks.push(textBlock_('heading_3', '3.2 Open PR Age（現在スナップショット）'));
+  blocks.push(textBlock_('paragraph', 'Open PR: ' + report.openPr.total + '件 ／ 平均Age: ' + formatMaybeHours_(report.openPr.avgAgeH) +
+    ' ／ ' + OPEN_PR_AGE_ALERT_HOURS + 'h超: ' + report.openPr.over48h + '件（' + formatPercent_(report.openPr.over48hPercent) + '）'));
+  const openRepoNames = Object.keys(report.openPr.byRepo).sort();
+  blocks.push(tableBlock_(['Repository', 'Open PR', '平均Age(h)', '48h超'], openRepoNames.map(function (name) {
+    const r = report.openPr.byRepo[name];
+    return [name, r.count, formatMaybeHours_(r.avgAgeH), r.over48h];
+  })));
+  const openProductNames = sortedProductNames_([report.openPr.byProduct]);
+  blocks.push(tableBlock_(['Product', 'Open PR', '平均Age(h)', '48h超'], openProductNames.map(function (name) {
+    const p = report.openPr.byProduct[name];
+    return [name, p.count, formatMaybeHours_(p.avgAgeH), p.over48h];
+  })));
+
+  blocks.push(textBlock_('heading_2', '4. Product別・Value Conversion横断分析'));
   const productNames = sortedProductNames_([
     report.timeEvents.byProduct,
     report.tasks.agg,
@@ -790,7 +1399,6 @@ function buildReportBlocks_(report) {
     report.humanCompleted.byProduct,
     report.github.byProduct,
   ]);
-
   const header = ['Product', 'Active(h)', 'Waiting(h)', 'Flow Eff.', '完了Task', '平均Lead Time(h)', 'PR作成', 'PR Merge', 'Blocked(現在)', 'Human Queue(現在)', 'Human Request完了'];
   const rows = productNames.map(function (name) {
     const time = report.timeEvents.byProduct[name] || { active: 0, waiting: 0 };
@@ -811,51 +1419,42 @@ function buildReportBlocks_(report) {
     ];
   });
   blocks.push(tableBlock_(header, rows));
+  blocks.push(textBlock_('paragraph', 'Value Type付与率（完了Task, Secondary Axis）: ' + formatPercent_(report.valueTypeCoverage.coveragePercent) +
+    '（' + report.valueTypeCoverage.withValueType + '/' + report.valueTypeCoverage.total + '件）'));
+  const valueTypeNames = Object.keys(report.valueTypeCoverage.byValueType).sort();
+  if (valueTypeNames.length > 0) {
+    blocks.push(tableBlock_(['Value Type', '完了Task数'], valueTypeNames.map(function (name) {
+      return [name, report.valueTypeCoverage.byValueType[name]];
+    })));
+  }
 
-  blocks.push(textBlock_('heading_2', '2. 組織全体サマリー（Task Time Events）'));
-  blocks.push(textBlock_('paragraph', 'Active延べ時間: ' + formatHours_(report.timeEvents.agg.totalActive) +
-    ' ／ Waiting延べ時間: ' + formatHours_(report.timeEvents.agg.totalWaiting) +
-    ' ／ Flow Efficiency: ' + formatPercent_(report.timeEvents.agg.flowEfficiency) +
-    ' ／ Review Fix Ratio: ' + formatPercent_(report.timeEvents.agg.reviewFixRatio) +
-    ' ／ 対象Time Event件数: ' + report.timeEvents.agg.eventCount));
+  blocks.push(textBlock_('heading_2', SECTION5_HEADING));
+  blocks.push(calloutBlock_(SECTION5_PLACEHOLDER_TEXT, '🧭'));
+  preservedSections.section5.forEach(function (block) { blocks.push(block); });
 
-  const actorHeader = ['Actor', 'Active(h)', 'Waiting(h)'];
-  const actorNames = Object.keys(report.timeEvents.agg.byActor).sort();
-  blocks.push(tableBlock_(actorHeader, actorNames.map(function (name) {
-    const a = report.timeEvents.agg.byActor[name];
-    return [name, round1_(a.active), round1_(a.waiting)];
-  })));
+  blocks.push(textBlock_('heading_2', SECTION6_HEADING));
+  blocks.push(calloutBlock_(SECTION6_PLACEHOLDER_TEXT, '🛠️'));
+  preservedSections.section6.forEach(function (block) { blocks.push(block); });
 
-  const workTypeHeader = ['Work Type', 'Active(h)'];
-  const workTypeNames = Object.keys(report.timeEvents.agg.byWorkType).sort();
-  blocks.push(tableBlock_(workTypeHeader, workTypeNames.map(function (name) {
-    return [name, round1_(report.timeEvents.agg.byWorkType[name])];
-  })));
-
-  blocks.push(textBlock_('heading_2', '3. Repository別 PR実績（補助軸）'));
-  const repoHeader = ['Repository', 'PR作成', 'PR Merge'];
-  const repoNames = Object.keys(report.github.byRepo).sort();
-  blocks.push(tableBlock_(repoHeader, repoNames.map(function (name) {
-    const r = report.github.byRepo[name];
-    return [name, r.created, r.merged];
-  })));
-
-  blocks.push(textBlock_('heading_2', '4. Blocked / Human Gate（現在スナップショット）'));
-  blocks.push(calloutBlock_(
-    'ここでの「Blocked」「Human Queue」は本レポート生成時点のスナップショットであり、対象月中の推移ではありません。' +
-    'また Blocked理由（AI Dependency / True Human Gate / External Condition / Stale Blocker）の分類は行っていません — ' +
-    'この分類は週次Sprint ReviewでのHuman/AI判断を要するため、本自動集計の対象外です（推測分類はしません）。' +
-    '「Human Request完了」は対象月中にCompleted Atが入り、かつStatus=DoneのType=Human Requestの件数です' +
-    '（Reopen後Supersededで閉じたTaskはCompleted Atが残っていても対象外）。',
-    '⚠️'
-  ));
-  blocks.push(textBlock_('paragraph', '現在Blocked件数（全Product合計）: ' + report.blocked.total +
-    ' ／ 現在Human Queue件数（全Product合計、Assigned Agent=Human かつ Status: Ready/In Progress/Review）: ' + report.humanQueue.total));
-
-  blocks.push(textBlock_('heading_2', '5. データ欠損・Unknown/未分類の扱い'));
+  blocks.push(textBlock_('heading_2', DATA_QUALITY_HEADING));
   blocks.push(textBlock_('paragraph',
     'Task Time EventsのTaskリレーションが無い、対応するTaskにProductが未設定、またはGitHub PRに対応するNotion Task（Pull Request URL一致）が' +
-    '見つからない場合は "' + UNKNOWN_LABEL + '" として明示しています。値を推測して埋めることはしていません。'));
+    '見つからない場合は "' + UNKNOWN_LABEL + '" として明示している。「' + MISSING_DATA_LABEL + '」はTelemetryが未整備で計測自体ができない項目を示す。' +
+    'いずれも値を推測して埋めることはしていない（Measurement Debtとして Framework 側に記録済み）。'));
+
+  blocks.push(buildRawMetricsBlock_({
+    label: t.label,
+    createdCount: report.taskFlow.createdCount,
+    closedCount: report.taskFlow.closedCount,
+    wipCount: report.taskFlow.wipCount,
+    prCreated: report.github.totalCreated,
+    prMerged: report.github.totalMerged,
+    openPrTotal: report.openPr.total,
+    openPrOver48h: report.openPr.over48h,
+    aiAutonomyPercent: report.aiAutonomy.aiAutonomyPercent,
+    humanQueueTotal: report.humanQueue.total,
+    valueTypeCoveragePercent: report.valueTypeCoverage.coveragePercent,
+  }));
 
   return blocks;
 }
@@ -877,6 +1476,32 @@ function findExistingReportPage_(parentPageId, title) {
     cursor = result.next_cursor;
   }
   throw new Error('findExistingReportPage_ did not terminate after 20 pages under ' + parentPageId);
+}
+
+// Finds a month's existing report page under EITHER its current title
+// (REPORT_TITLE_PREFIX) or the pre-ADP-055-KMI legacy one
+// (LEGACY_REPORT_TITLE_PREFIX), preferring the current title. Backfilling or
+// rerunning an older month whose page was created before this rename and
+// never manually renamed must still update that existing page, not create a
+// second one under the new title (Codex review, PR #74; Acceptance
+// Criterion 11) — `generateMonthlyKpiReportFor`'s own README explicitly
+// supports rerunning any past month, not only ones already migrated.
+function findExistingReportPageWithFallback_(parentPageId, label) {
+  const currentId = findExistingReportPage_(parentPageId, REPORT_TITLE_PREFIX + label);
+  if (currentId) return { pageId: currentId, legacyTitle: false };
+  const legacyId = findExistingReportPage_(parentPageId, LEGACY_REPORT_TITLE_PREFIX + label);
+  if (legacyId) return { pageId: legacyId, legacyTitle: true };
+  return { pageId: null, legacyTitle: false };
+}
+
+// Migrates a page found under the legacy title to the current one, so a
+// FUTURE lookup for the same month finds it on the (cheaper, first-checked)
+// current-title path and this integration converges on one title scheme
+// instead of permanently carrying two.
+function renameReportPage_(pageId, newTitle) {
+  notionRequest_('patch', '/v1/pages/' + encodeURIComponent(pageId), {
+    properties: { title: { title: [{ type: 'text', text: { content: newTitle } }] } },
+  });
 }
 
 function createReportPage_(parentPageId, title, blocks) {
@@ -909,6 +1534,112 @@ function replacePageContent_(pageId, blocks) {
     notionRequest_('delete', '/v1/blocks/' + encodeURIComponent(blockId));
   });
   appendBlocksChunked_(pageId, blocks);
+}
+
+// ---------------------------------------------------------------------------
+// Preserving Final Review content across reruns (Codex review, PR #74)
+// ---------------------------------------------------------------------------
+//
+// replacePageContent_ above deletes EVERY top-level block before rebuilding
+// a page from scratch. The report's own §5/§6 instruct a monthly Final
+// Review to append structural-problem/countermeasure content directly onto
+// this page (see SECTION5_PLACEHOLDER_TEXT/SECTION6_PLACEHOLDER_TEXT) — a
+// rerun (the trigger firing again, or a manual generateMonthlyKpiReportFor
+// backfill for an already-reported month) must not silently destroy that
+// content. Rather than special-casing replacePageContent_ itself (which
+// would need to know which blocks are "ours" vs. "theirs" mid-delete), this
+// integration reads the existing page's §5/§6 content BEFORE
+// replacePageContent_ runs, and buildReportBlocks_ re-embeds it into the
+// freshly generated page at the same position — so the rebuilt page's
+// content is a strict superset of the previous one plus this month's fresh
+// aggregates, never a regression to the empty placeholder.
+
+// Returns the plain text of any block type that carries `rich_text` under
+// its type-keyed data (heading_1/2/3, paragraph, callout, quote, ...); ''
+// for a block with no rich_text (table, divider, image, ...).
+function blockPlainText_(block) {
+  if (!block || !block.type) return '';
+  const data = block[block.type];
+  if (!data || !Array.isArray(data.rich_text)) return '';
+  return data.rich_text.map(function (rt) { return rt.plain_text || (rt.text && rt.text.content) || ''; }).join('');
+}
+
+// Strips a block fetched FROM the Notion API (id, created_time,
+// created_by, last_edited_*, parent, has_children, ...) down to the shape
+// the API accepts when appended back as new content, recursing into any
+// nested children (a table's rows, a toggle's/bulleted item's nested
+// blocks, ...) the same way tableBlock_ already embeds table_row children
+// inline. Known gap: a block whose type-data itself contains a
+// short-lived reference (e.g. an uploaded `image`/`file` block's expiring
+// internal S3 URL) cannot be faithfully re-posted this way — realistic
+// Final Review content (headings, paragraphs, lists, callouts, quotes,
+// tables, to-dos, code, dividers) has no such field, so this is treated as
+// an accepted, documented limitation (README) rather than solved here.
+function sanitizeBlockForAppend_(block) {
+  const type = block.type;
+  const data = Object.assign({}, block[type]);
+  if (block.has_children) {
+    data.children = fetchPageChildren_(block.id).map(sanitizeBlockForAppend_);
+  }
+  const sanitized = { object: 'block', type: type };
+  sanitized[type] = data;
+  return sanitized;
+}
+
+// Slices out whatever sits between `startHeadingText` and the next
+// recognized boundary heading (`endHeadingTexts`, or end-of-page if none of
+// them appear), drops this file's own regenerated placeholder callout when
+// it is the very first block there (it is always re-added by
+// buildReportBlocks_ itself), and sanitizes everything else for re-append.
+// Returns [] when the heading itself is not found (first-ever generation,
+// or a page whose structure predates this feature) — never throws, so a
+// missing/unexpected page shape degrades to "nothing to preserve" rather
+// than blocking the current month's report.
+function extractSectionHumanContent_(blocks, startHeadingText, endHeadingTexts, placeholderText) {
+  const startIdx = blocks.findIndex(function (b) { return b.type === 'heading_2' && blockPlainText_(b) === startHeadingText; });
+  if (startIdx === -1) return [];
+  let endIdx = blocks.length;
+  for (let i = startIdx + 1; i < blocks.length; i++) {
+    if (blocks[i].type === 'heading_2' && endHeadingTexts.indexOf(blockPlainText_(blocks[i])) !== -1) {
+      endIdx = i;
+      break;
+    }
+  }
+  const body = blocks.slice(startIdx + 1, endIdx);
+  const withoutOwnPlaceholder = body.filter(function (block, i) {
+    return !(i === 0 && block.type === 'callout' && blockPlainText_(block) === placeholderText);
+  });
+  return withoutOwnPlaceholder.map(sanitizeBlockForAppend_);
+}
+
+// Reads back an existing report page's §5/§6 content (see
+// extractSectionHumanContent_) for buildReportBlocks_ to re-embed.
+//
+// Deliberately does NOT catch and swallow errors here (Codex review, PR #74,
+// second finding on the original preservation fix): "the §5/§6 heading is
+// not present in the fetched blocks" is not an error at all — it is the
+// ordinary, successful return value extractSectionHumanContent_ already
+// gives (an empty array via its own internal findIndex/`-1` check) for a
+// page that legitimately has no such content yet. There is therefore no
+// expected-and-safe-to-ignore exception this function needs to catch. A
+// thrown error here can only mean fetchPageChildren_ itself genuinely failed
+// (transient network/API error, non-2xx response, pagination that never
+// terminated, ...) — i.e. "we could not read what's there", never "there is
+// nothing there". Catching that and returning `{section5: [], section6: []}`
+// would make generateMonthlyKpiReportForMonth_ proceed to
+// replacePageContent_ believing it safe to delete every block, when in fact
+// the read simply failed and any real Final Review content in §5/§6 was
+// never actually seen — silently destroying it. Left uncaught, the error
+// propagates out of generateMonthlyKpiReportForMonth_ (through
+// withRunLock_'s try/finally, which releases the lock but does not swallow
+// the exception) and aborts the whole run for this month BEFORE
+// replacePageContent_ — or any other page mutation — is ever reached.
+function extractPreservedSections_(pageId) {
+  const blocks = fetchPageChildren_(pageId);
+  return {
+    section5: extractSectionHumanContent_(blocks, SECTION5_HEADING, [SECTION6_HEADING], SECTION5_PLACEHOLDER_TEXT),
+    section6: extractSectionHumanContent_(blocks, SECTION6_HEADING, [DATA_QUALITY_HEADING], SECTION6_PLACEHOLDER_TEXT),
+  };
 }
 
 function appendBlocksChunked_(pageId, blocks) {

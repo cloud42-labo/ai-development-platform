@@ -40,7 +40,7 @@ test('generateMonthlyKpiReportFor CREATES a new page when none exists yet for th
   assert.equal(result.action, 'created');
   assert.equal(result.pageId, 'new-page-id');
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].body.properties.title.title[0].text.content, 'AI Organization KPI｜2026-09');
+  assert.equal(calls[0].body.properties.title.title[0].text.content, 'AI Organization KPI / KMI｜2026-09');
   assert.equal(calls[0].body.parent.page_id, 'framework-page-id');
   assert.ok(Array.isArray(calls[0].body.children) && calls[0].body.children.length > 0);
 });
@@ -51,7 +51,7 @@ test('generateMonthlyKpiReportFor UPDATES the existing page in place on a re-run
   const created = [];
   const routes = Object.assign({}, emptyDbRoutes(), {
     'GET /v1/blocks/framework-page-id/children': () => ({
-      results: [{ id: 'existing-page-id', type: 'child_page', child_page: { title: 'AI Organization KPI｜2026-09' } }],
+      results: [{ id: 'existing-page-id', type: 'child_page', child_page: { title: 'AI Organization KPI / KMI｜2026-09' } }],
       has_more: false,
     }),
     'GET /v1/blocks/existing-page-id/children': () => ({
