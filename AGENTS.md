@@ -85,4 +85,4 @@ PRを止めるFindingは、次をすべて満たす場合だけ投稿する。
 1. 前回のblocking Findingがcurrent headで解消したか
 2. 前回review後のcommit/deltaが新しいblockerを導入したか
 
-毎回PR全体をゼロから再探索して新しい改善候補を掘り続けない。新しいblocking Findingを追加する場合は、**前回review後のdeltaで新たに導入・露呈した具体的Evidence**を示す。同じ論点の言い換えは新規Findingにせず既存Findingへ紐づける。
+毎回PR全体をゼロから再探索して改善候補を掘り続けることはしない。ただし、再レビュー中に**PR自身が原因の、current headに成立する新たなEvidence-backed blocker**を発見した場合は、delta起因でなくても報告しなければならない。この場合もFinding Admission Gateを満たす具体的Evidenceを示す。同じ論点の言い換えは新規Findingにせず既存Findingへ紐づける。
