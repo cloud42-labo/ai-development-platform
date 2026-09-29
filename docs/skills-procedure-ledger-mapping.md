@@ -192,9 +192,11 @@ version 追加は同期が安定してから別 Task で判断する。
    9/22 以降）、GitHub 直接編集の頻度は高い。設計原則 4「緊急修正は GitHub を正として Notion に戻す」を
    既定とし、同期状態 `GitHub Ahead` は自動で Notion を上書き再同期する。`Notion Ahead` と
    `GitHub Ahead` が同時に立つ場合のみ `Conflict` として人間に提示する。
-6. **`skills` repo は自己 merge 可、ADP は Owner 承認必須。** 同期 Adapter が生成する PR は skills repo
-   向けなので自己 merge の対象になる。Adapter 実装（T03）は ADP 側に置かれるため、
-   実装 PR と Skill 変更 PR で merge 権限が異なる点を T03 の手順に明記する。
+6. **`skills` repo は自己 merge 可、ADP は protected branch への merge に承認が必要。**
+   `governance/agent-policy.yaml` の `github-protected-merge` は `decision: approve` で、承認者は
+   定めていない（実運用は Codex レビュー後に Chris の PR Flow Gate が merge）。同期 Adapter が生成する
+   PR は skills repo 向けなので自己 merge の対象になる。Adapter 実装（T03）は ADP 側に置かれるため、
+   実装 PR と Skill 変更 PR で merge の手順が異なる点を T03 の手順に明記する。
 
 ## 5. 受け入れ基準との対応
 
