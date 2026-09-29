@@ -37,11 +37,12 @@ schema_version: 0.1.0-experimental
 # Version of the Rules asset class (README.md, AGENTS.md,
 # governance/ai-execution-constraints.md, governance/source-of-truth.md,
 # governance/research-security-policy.md,
+# governance/review-loop-control.md,
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md, docs/regulations/README.md and
 # R01-R06).
-rules_version: 3.5.0
+rules_version: 3.6.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -577,3 +578,19 @@ migration_path:
       lacks either a safe fix or an explicit recorded disposition
       (Evidence/Owner/Next Action). The executable How is the paired
       cloud42-labo/skills weekly-sprint Composite's Step 0.
+
+  - field: rules_version
+    from: "3.5.0"
+    to: "3.6.0"
+    date: "2026-09-30"
+    change: >-
+      ADP issue #78: review-loop-control and AGENTS add a Blocking Finding
+      Admission Gate, 100% Author Disposition Coverage, and delta-first
+      re-review. This is an additive review-control constraint intended to
+      stop partial review fixes and low-value review-loop expansion.
+      MINOR per docs/versioning-policy.md.
+    action_required: >-
+      Reviewers must only block merge on current-head, evidence-backed,
+      actionable failure modes. Authors must disposition every applicable
+      finding before re-review or Merge Ready. Re-reviews must verify prior
+      blockers and the new delta before opening new blocking findings.

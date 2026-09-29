@@ -48,3 +48,41 @@ Immediately before marking a Notion task Done, **re-read** and execute the compl
 - transition `Status = Done` only after the supporting evidence/time records exist.
 
 If the Time Event is absent or still open, stop: the Task is not Done.
+
+
+## Code Review Rules — Finding Quality Contract
+
+Codex Automatic Reviews / `@codex review` は、一般的な改善提案を列挙する場ではなく、**このPRをmergeすると具体的に壊れるものを検出するGate**として使う。詳細Authorityは [governance/review-loop-control.md](governance/review-loop-control.md)。
+
+### Finding Admission Gate
+
+PRを止めるFindingは、次をすべて満たす場合だけ投稿する。
+
+1. **Current headに成立する** — 古いcommitだけに成立する指摘は再提起しない。
+2. **具体的failure modeがある** — correctness / security / data loss / policy invariant / Acceptance Criteriaのどれが、どの条件で壊れるかを説明できる。
+3. **変更scopeとの因果がある** — 変更前から存在するscope外の問題は、このPRのMerge Blockerにしない。
+4. **Actionableである** — 修正対象と、何を確認すれば解消と判断できるかを示せる。
+
+各blocking Findingには最低限、`Severity / Location / Failure mode / Evidence / Required fix` を含める。
+
+### 投稿しないもの
+
+次は原則としてblocking inline Findingとして投稿しない。
+
+- style / naming / formatting / nit
+- 一般的best practiceだけの指摘
+- 具体的実行経路のない「将来問題になるかもしれない」
+- このPRの目的に不要なrefactor
+- changed scope外の既存問題
+- 同一根因の重複指摘
+
+必要なら非ブロッキングなまとめとして残せるが、P0/P1へ昇格させない。重大な問題が無ければ、追加Findingを作るために探索を続けずclean verdictで終了する。
+
+### Re-reviewはdelta-first
+
+2回目以降のレビューでは、まず以下に限定して確認する。
+
+1. 前回のblocking Findingがcurrent headで解消したか
+2. 前回review後のcommit/deltaが新しいblockerを導入したか
+
+毎回PR全体をゼロから再探索して改善候補を掘り続けることはしない。ただし、再レビュー中に**PR自身が原因の、current headに成立する新たなEvidence-backed blocker**を発見した場合は、delta起因でなくても報告しなければならない。この場合もFinding Admission Gateを満たす具体的Evidenceを示す。同じ論点の言い換えは新規Findingにせず既存Findingへ紐づける。
