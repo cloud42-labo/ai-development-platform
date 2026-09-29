@@ -37,6 +37,7 @@ schema_version: 0.1.0-experimental
 # Version of the Rules asset class (README.md, AGENTS.md,
 # governance/ai-execution-constraints.md, governance/source-of-truth.md,
 # governance/research-security-policy.md,
+# governance/review-loop-control.md,
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md, docs/regulations/README.md and
