@@ -180,27 +180,28 @@ def call_systemone(state, repro_index=None):
     return resp, elapsed_ms
 
 
-def _is_complete_entry(entry):
-    # An entry is only trusted as "already fully succeeded" if all 4 calls
-    # (initial + 3 reproducibility, call_index 0-3) are present and each
-    # returned HTTP 200. Anything less (missing calls, a failed call) is
-    # treated as incomplete and re-run from scratch below.
-    calls = entry.get("calls", [])
-    if len(calls) != 4:
-        return False
-    if {c.get("call_index") for c in calls} != {0, 1, 2, 3}:
-        return False
-    return all(c.get("status") == 200 for c in calls)
+def _successful_calls(entry):
+    # Only HTTP-200 calls for a valid call_index (0-3) are trustworthy
+    # evidence to carry over from a prior checkpoint. A previously failed
+    # call for a given call_index is discarded here (not carried over) --
+    # that index is simply retried fresh below, since there is nothing
+    # worth keeping from a failed attempt.
+    return [
+        c for c in entry.get("calls", [])
+        if c.get("status") == 200 and c.get("call_index") in (0, 1, 2, 3)
+    ]
 
 
 def main():
     out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dp4_raw_results.json")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    # Resume from a prior checkpoint if one exists, so a rerun after a
-    # partial failure neither re-pays for fixtures that already fully
-    # succeeded nor erases their saved evidence.
-    completed_by_id = {}
+    # Resume from a prior checkpoint if one exists, at per-call granularity:
+    # any call_index that already succeeded -- whether the fixture it
+    # belongs to had completed all 4 calls or only some of them -- is
+    # reused as-is and never re-run, so an interrupted run neither re-pays
+    # for, nor loses, any call that already succeeded.
+    prior_calls_by_id = {}
     if os.path.exists(out_path):
         with open(out_path) as f:
             try:
@@ -209,20 +210,26 @@ def main():
                 previous_results = []
         for entry in previous_results:
             fx_id = entry.get("fixture", {}).get("id")
-            if fx_id and _is_complete_entry(entry):
-                completed_by_id[fx_id] = entry
+            if fx_id:
+                prior_calls_by_id[fx_id] = _successful_calls(entry)
 
-    # Seed `results` with every already-complete fixture's entry up front,
-    # in FIXTURES order, BEFORE the loop below runs anything. This is what
-    # makes checkpoint() safe to call from the very first fixture that still
-    # needs (re-)running: since already-complete fixtures are in `results`
-    # from the start, no checkpoint write -- including one that happens
-    # mid-way through an earlier-ordered fixture -- can ever omit or
-    # overwrite a later-ordered fixture's already-saved evidence. Each
-    # fixture id appears in `results` at most once: either here (as its
-    # already-complete loaded entry) or appended fresh in the loop below
-    # (never both, since the loop skips ids already present here).
-    results = [completed_by_id[fx["id"]] for fx in FIXTURES if fx["id"] in completed_by_id]
+    # Seed `results` for every fixture up front, in FIXTURES order, before
+    # the loop below runs anything, carrying over any previously-successful
+    # calls (whether the whole fixture or only part of it had succeeded
+    # before). This is what makes checkpoint() safe to call from the very
+    # first call that runs: since every fixture is already in `results`
+    # from the start (each with whatever calls it already has), no
+    # checkpoint write can ever omit or overwrite another fixture's
+    # already-saved evidence. `calls_by_fixture_id[fx_id]` and the `calls`
+    # list inside each `results` entry are the same list object, so
+    # mutating one via `.append()` below is reflected in the other and in
+    # every subsequent checkpoint() write.
+    results = []
+    calls_by_fixture_id = {}
+    for fx in FIXTURES:
+        calls = list(prior_calls_by_id.get(fx["id"], []))
+        calls_by_fixture_id[fx["id"]] = calls
+        results.append({"fixture": fx, "calls": calls})
 
     def checkpoint():
         # Re-written after every completed call (not just once at the end) so that
@@ -232,40 +239,24 @@ def main():
             json.dump(results, f, indent=2, ensure_ascii=False)
 
     for fx in FIXTURES:
-        if fx["id"] in completed_by_id:
-            # Already has 4/4 successful calls from a previous run and was
-            # already seeded into `results` above: keep that evidence as-is
-            # and skip re-running (never re-pay for a fixture that already
-            # fully succeeded, and never append it a second time).
+        calls = calls_by_fixture_id[fx["id"]]
+        done_indices = {c["call_index"] for c in calls}
+        if done_indices == {0, 1, 2, 3}:
+            # All 4 calls already succeeded in a previous run: keep that
+            # evidence as-is (already seeded into `results` above) and skip
+            # re-running entirely -- never re-pay for a fixture that already
+            # fully succeeded.
             print(f"=== {fx['id']} === (skipped: already complete in checkpoint)")
             continue
 
         print(f"=== {fx['id']} ===")
-        calls = []
-        # Append the (fixture, calls) entry up front; `calls` is mutated in place
-        # below, so each checkpoint() call always reflects the latest state.
-        # Any previous partial/failed entry for this fixture is discarded here
-        # (it is not carried over) since the fixture is being re-run from
-        # scratch.
-        #
-        # Known limitation (PR #70 round-7 review, 2026-09-28, deferred by
-        # design rather than fixed): if a fixture previously completed 1-3
-        # of its 4 calls before the run was interrupted, resuming discards
-        # those already-completed (already paid-for) calls and re-runs all
-        # 4 from scratch, rather than resuming from the exact call. This
-        # trades a small amount of duplicate paid-call cost (at most 3
-        # extra calls per interrupted fixture, i.e. well under $0.001 at
-        # this API's pricing) for not having to track and resume
-        # per-call state within a fixture. Not fixed further here because
-        # the live PoC recorded in this PR (evidence/adp-065-t03/
-        # dp4_raw_results.json) completed all 24/24 calls successfully on
-        # the first attempt, so this limitation never actually manifested
-        # for the results this PR reports on -- it would only matter for a
-        # hypothetical future rerun that fails mid-fixture. If that
-        # matters for a future rerun, resume from the exact call rather
-        # than re-running the whole fixture.
-        results.append({"fixture": fx, "calls": calls})
         for i in range(4):  # 1 initial + 3 reproducibility
+            if i in done_indices:
+                # This specific call already succeeded in a previous run
+                # (carried over into `calls` above): reuse it, don't re-pay
+                # for it, and don't overwrite it.
+                print(f"  call {i}: skipped (already succeeded in a previous run)")
+                continue
             resp, elapsed_ms = call_systemone(fx["state"])
             ok = resp.status_code == 200
             body = resp.json()
