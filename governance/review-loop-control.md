@@ -37,12 +37,13 @@ Blocking Findingは最低限 `Finding ID / Severity / Location / Failure mode / 
 
 Authorはreview findingの一部だけを修正して次roundへ進んではならない。current headへ適用可能なFindingをすべて列挙し、各Findingを `Fix / Reject / Duplicate / Out of scope` のいずれかへDispositionする。
 
-`Disposition Coverage = disposed findings / applicable findings` とし、**100%未満ではreview対応完了、再レビュー要求、Merge Ready判定へ進めない**。
+`Disposition Coverage = disposed applicable findings / applicable findings` とし、applicable findingsが0件なら100%と定義する。**100%未満ではreview対応完了、再レビュー要求、Merge Ready判定へ進めない**。
 
 - Fix: commit/pathとverification evidenceが必要
 - Reject: current headで成立しないことの反証が必要
 - Duplicate: 統合先Finding IDが必要
 - Out of scope: 別Task化またはscope外とする根拠が必要
+- `Applies to Current Head`、failure mode、scope因果、required fix / verificationのいずれかが未確定なら `Unresolved` として保持し、disposedに数えない。Evidenceでfalseと確定してから Reject / Out of scope 等へ移す
 
 ## 2.3. Re-review scope — delta first
 
@@ -51,7 +52,7 @@ Authorはreview findingの一部だけを修正して次roundへ進んではな�
 1. prior blocking findingsがcurrent headで解消したか
 2. prior review後のdeltaが新しいblocking defectを導入したか
 
-再レビューのたびにPR全体をゼロから探索し直して新しい改善候補を増やす運用は禁止する。新規Blocking Findingを追加する場合は、前回review後のdeltaによって導入または新たに露呈したEvidenceを示す。同じ論点の言い換えは新規Findingではなく既存Findingへ紐づける。
+再レビューのたびにPR全体をゼロから探索し直して改善候補を増やす運用は禁止する。ただし、再レビュー中にPR自身が原因の、current headに成立する新たなEvidence-backed blockerを発見した場合は、前回review後のdelta起因でなくても新規Blocking Findingとして報告し、解消前にclean verdictへ進んではならない。同じ論点の言い換えは新規Findingではなく既存Findingへ紐づける。
 
 current headにBlocking Findingが無い場合、Reviewerはclean verdictでreviewを終了する。レビュー件数を作ること自体を成果にしない。
 
