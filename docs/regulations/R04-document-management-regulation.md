@@ -4,7 +4,7 @@
 > **規程ID:** R04  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-13 JST  
+> **最終改定日:** 2026-09-30 JST  
 > **関連基準:** `governance/source-of-truth.md`  
 > **関連手順:** `cloud42-labo/skills`  
 > **移管元:** `docs/operating-guide.md` §1、§5、§13 / `governance/source-of-truth.md`
@@ -33,7 +33,8 @@
 | 規程・基準・耐久的ADP成果物 | `cloud42-labo/ai-development-platform` | 規程、基準、統制、Architecture、Template、Capability Map等 |
 | 実行手順 | `cloud42-labo/skills` | Backlog Refinement、Sprint、Human Gate等のExecutable Skill |
 | Product固有コード・テスト・仕様・Release | 各Product GitHub Repository | source code、tests、CI、technical spec、release、PR履歴 |
-| 現在の業務状態・実行記録 | Notion | Product、Epic、Story、Task、Sprint、Priority、Status、Timestamp、Result、Blocker等 |
+| Demo Entry Point / 人間向け配布入口 | Google DriveのProduct別Demo領域 | `latest` から現在の実行可能DemoまたはDemo URLへ到達するためのcontrolled distribution surface |
+| 現在の業務状態・実行記録 | Notion | Product、Epic、Story、Task、Sprint、Priority、Status、Timestamp、Result、Blocker、Demo URL等 |
 | 判断記録 | Notion Decisionまたは対象Task | 何を決めたか、理由、対象範囲、日時 |
 | 組織記憶 | `cloud42-labo/brain` | journal、lesson、context、historical rationale、learning |
 
@@ -58,6 +59,17 @@ Notionは、現在の業務状態、実行状態および判断記録の正本�
 3. 日報、Sprint Review、Retrospective、Human Requestその他の業務記録はNotionに保持する。
 4. Decisionは、結論・理由・対象・時点を残す判断記録としてNotionに保持する。
 5. NotionのDashboardやTop Pageは現在状態への入口であり、規程本文の唯一の正本とはしない。
+
+## 第5条の2 Demo Entry Pointと配布面
+
+Google DriveはProductコードやReleaseの正本ではなく、Humanが現在のDemoへ迷わず到達するための**Demo Entry Point / controlled distribution surface**として使用する。
+
+1. Demoを持つProductは、原則としてProductごとのGoogle Drive Demo領域に `latest` を持ち、Humanが最初に参照する入口とする。
+2. `latest` の実体はProduct特性に応じて、APK、HTML / ZIP、GitHub Pages、Cloud Runその他のDemo URL、Google Play test導線等を利用できる。
+3. 配布方式そのものは統一しない。統一するのは、`latest` から現在の実行可能Demoへ到達できることである。
+4. Source code、tests、CI、technical spec、release、PR履歴の正本は引き続き各Product GitHub Repositoryとし、Google Driveをコード正本として扱わない。
+5. NotionはTask / Productの運用状態と、必要な `Demo URL` / Demo Entry Point参照を保持する。配布物そのものをNotionへ重複保存しない。
+6. Demo対象Taskの完了判定はR05のDemo Delivery Completion Gateに従う。
 
 ## 第6条 規程類のNotion閲覧面
 
