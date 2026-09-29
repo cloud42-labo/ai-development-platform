@@ -133,7 +133,11 @@ function setup() {
   ensureProjectionHeaders_();
   ensureSyncLogSheet_();
   installSyncTrigger();
-  Logger.log('Setup complete. This project has no public endpoint and stores only NOTION_TOKEN.');
+  // ADP-051-C: GITHUB_TOKEN is a second, OPTIONAL secret — Review Source
+  // resolution degrades to `Other` (never throws, never blocks reconciler
+  // setup or operation) when it is absent. Setup completes the same either
+  // way; showSetupInfo() below reports its presence separately.
+  Logger.log('Setup complete. This project has no public endpoint and stores only NOTION_TOKEN and (optionally) GITHUB_TOKEN.');
 }
 
 function showSetupInfo() {
@@ -142,8 +146,11 @@ function showSetupInfo() {
     spreadsheetId: props.getProperty('SPREADSHEET_ID'),
     tasksDataSourceId: tasksDataSourceId_(),
     timeEventsDataSourceId: timeEventsDataSourceId_(),
-    // Presence only. The token value is never logged.
+    // Presence only. Neither token's value is ever logged.
     notionTokenConfigured: Boolean(props.getProperty('NOTION_TOKEN')),
+    // ADP-051-C: optional — Review Source resolution degrades to `Other`
+    // (not an error) whenever this is absent.
+    githubTokenConfigured: Boolean(props.getProperty('GITHUB_TOKEN')),
     pollIntervalMinutes: pollIntervalMinutes_(),
     syncTriggersInstalled: syncTriggers_().length,
     lastSyncCursor: props.getProperty('LAST_SYNC_CURSOR') || '(never run)',
@@ -2124,7 +2131,41 @@ function reconcileAuthoritativeTimeEvents_(task, currentStatus, desiredActor, ch
         restartCutoffOverride: restartCutoffOverride,
       });
       const resolvedWorkType = (workTypeResult && !workTypeResult.unresolved) ? workTypeResult.workType : '';
-      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, resolvedWorkType);
+      // ADP-051-C: Review Source only ever applies to a confidently-resolved
+      // Review Fix execution (docs/review-fix-state-model.md §5 classifies
+      // "each Review-Fix cycle's Review Source" — an Initial Work execution,
+      // or one Work Type left unresolved, has nothing for it to classify).
+      // Reuses the IDENTICAL evidence instance Work Type classification just
+      // produced (`workTypeResult.resolvedAt`) as the lower bound — never an
+      // independent Sync Log/boundary re-lookup (failure #13) — and the same
+      // `startAt` this call already computed as the upper bound (the
+      // observed reopen instant, per §5 step 2's own description of it).
+      const reviewSourceResult = resolveNewTimeEventReviewSourceSafely_({
+        taskId: taskId,
+        allEvents: allEvents,
+        expectedExecutionId: executionIdIsVerified ? executionId : '',
+        sameCallOutgoingChurnEvents: sameCallChurnEvents,
+        workType: resolvedWorkType,
+        lowerBound: (workTypeResult && !workTypeResult.unresolved) ? workTypeResult.resolvedAt : null,
+        lowerBoundFloor: reviewSourceLowerBoundFloor_(workTypeResult, allEvents),
+        upperBound: { timestamp: startAt },
+        // failure #52: the upper bound's own backlog-dependent widening
+        // applies whenever `startAt` came from the untrusted
+        // `authoritativeEditTime_`-derived fallback (`trustedTaskStart` is
+        // null) rather than a directly-observed, independently-trusted
+        // Task `Started At`. The lower bound's own instant is itself an
+        // earlier, independently corroborated point in this Task's history
+        // (the Review evidence Work Type just resolved necessarily precedes
+        // the reopen it is paired with) — reused here as the widening
+        // anchor rather than a fresh Sync Log lookup, consistent with never
+        // re-deriving evidence Work Type already resolved (failure #13).
+        upperBoundFloor: (!trustedTaskStart && workTypeResult && !workTypeResult.unresolved && workTypeResult.resolvedAt)
+          ? workTypeResult.resolvedAt.timestamp
+          : null,
+        prUrl: propertyUrl_(task.properties['Pull Request']),
+      });
+      const resolvedReviewSource = (reviewSourceResult && reviewSourceResult.reviewSource) ? reviewSourceResult.reviewSource : '';
+      const created = createNotionTimeEvent_(taskId, taskTitle, desiredActor, changedBy, snapshotId, startAt, executionId, taskType, resolvedWorkType, resolvedReviewSource);
       actions.push('opened:' + created.id);
     }
   } else if (openEvents.length) {
@@ -2809,7 +2850,7 @@ function updateTaskStatus_(taskId, statusName) {
   });
 }
 
-function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, taskType, workType) {
+function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId, when, executionId, taskType, workType, reviewSource) {
   const note = buildNote_({
     source: 'notion_reconcile',
     execution: executionId,
@@ -2863,6 +2904,14 @@ function createNotionTimeEvent_(taskId, taskTitle, actor, changedBy, snapshotId,
   // called (see resolveNewTimeEventWorkTypeSafely_).
   if (workType) {
     properties['Work Type'] = { select: { name: workType } };
+  }
+  // ADP-051-C: same non-blocking, "leave unset rather than write a
+  // placeholder" contract as `Work Type` immediately above — an omitted
+  // argument, an explicit non-classification (Initial Work, or Work Type
+  // itself unresolved), or a caught resolver error all reach here as a
+  // falsy `reviewSource`, and none of them write the property at all.
+  if (reviewSource) {
+    properties['Review Source'] = { select: { name: reviewSource } };
   }
   return notionRequest_('post', '/v1/pages', {
     parent: {
@@ -3173,6 +3222,14 @@ function propertyText_(property) {
   if (property.type === 'title') return (property.title || []).map(function (x) { return x.plain_text || ''; }).join('');
   if (property.type === 'rich_text') return (property.rich_text || []).map(function (x) { return x.plain_text || ''; }).join('');
   return '';
+}
+
+// ADP-051-C: `Stories & Tasks`.`Pull Request` is a Notion `url` property
+// (the same schema `integrations/kpi-monthly-report`'s Code.gs already
+// reads from this identical data source — see its `lookupProductForPr_`).
+function propertyUrl_(property) {
+  if (!property || property.type !== 'url') return '';
+  return property.url || '';
 }
 
 function mapActor_(assignedAgent) {
@@ -4861,5 +4918,433 @@ function resolveNewTimeEventWorkTypeSafely_(options) {
     return resolveWorkType_(options);
   } catch (e) {
     return { unresolved: true, workType: '', resolvedAt: null, reasonCode: 'resolver_error:' + (e && e.message ? e.message : String(e)) };
+  }
+}
+
+// =============================================================================
+// ADP-051-C: Review Source resolution — docs/review-fix-state-model.md §5
+// =============================================================================
+//
+// Classifies which reviewer's GitHub PR review actually triggered a
+// Review-Fix execution's reopen, into `Codex` / `Claude` / `Human` / `Other`
+// — added alongside ADP-051-B's Work Type resolver (`resolveWorkType_` and
+// everything it composes), never modifying it. Review Source is computed
+// ONLY for an execution `resolveNewTimeEventWorkTypeSafely_` confidently
+// classified as `Review Fix`: Initial Work and an unresolved Work Type both
+// have nothing for §5 to classify (there is no Review Fix cycle to
+// attribute a review to).
+//
+// Every entry point below degrades to `Other` rather than throwing — a
+// missing `Pull Request` URL, a missing `GITHUB_TOKEN`, any GitHub API
+// failure, or an unexpected response shape (§5 step 4) — and the live poll
+// path additionally wraps the whole resolver in
+// `resolveNewTimeEventReviewSourceSafely_` as defense in depth, mirroring
+// `resolveNewTimeEventWorkTypeSafely_`: a bug here must never block Time
+// Event creation.
+
+const REVIEW_SOURCE_CODEX = 'Codex';
+const REVIEW_SOURCE_CLAUDE = 'Claude';
+const REVIEW_SOURCE_HUMAN = 'Human';
+const REVIEW_SOURCE_OTHER = 'Other';
+
+// Best-effort login -> category mapping. No shared convention for exact bot
+// account logins exists yet elsewhere in this repository (checked: neither
+// `integrations/kpi-monthly-report/Code.gs` nor any governance doc names
+// one) — substring matching on `codex`/`claude` covers the account shapes
+// GitHub Apps/connectors for each actually use (e.g.
+// `chatgpt-codex-connector[bot]`, `claude[bot]`) without hardcoding a
+// single exact login that would silently stop matching if the connector's
+// account name changes. Any other bot-shaped login (`[bot]` suffix, GitHub's
+// own convention for both Apps and the legacy machine-user pattern) is
+// `Other`, not `Human` — crediting an unrecognized bot as a human reviewer
+// would misrepresent who/what actually reviewed the fix. Revisit this list
+// (not the surrounding resolver) once real account names are confirmed
+// against production review history.
+function classifyReviewerLogin_(login) {
+  const normalized = String(login || '').toLowerCase();
+  if (!normalized) return REVIEW_SOURCE_OTHER;
+  if (normalized.indexOf('codex') !== -1) return REVIEW_SOURCE_CODEX;
+  if (normalized.indexOf('claude') !== -1) return REVIEW_SOURCE_CLAUDE;
+  if (/\[bot\]$/.test(normalized)) return REVIEW_SOURCE_OTHER;
+  return REVIEW_SOURCE_HUMAN;
+}
+
+// Parses `https://github.com/<owner>/<repo>/pull/<number>` (optionally with
+// a trailing path/query/fragment, e.g. `#pullrequestreview-...`). Returns
+// `null` for anything else — an empty/blank URL, a non-GitHub URL, or a
+// GitHub URL that isn't a PR link — which every caller here treats the same
+// as "no Pull Request" (degrade to `Other`, never throw).
+function parsePullRequestUrl_(url) {
+  const match = /^https?:\/\/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/.exec(String(url || '').trim());
+  if (!match) return null;
+  return { owner: match[1], repo: match[2], number: Number(match[3]) };
+}
+
+// GitHub I/O primitive, mirroring `integrations/kpi-monthly-report`'s own
+// `githubRequest_` (same auth header shape, same `muteHttpExceptions` +
+// explicit status-code check so a failure is a catchable `Error`, never a
+// silent bad response). Kept local to this file rather than shared — each
+// `Code.gs` in this repo is a single self-contained Apps Script project
+// with no module system to share it through.
+function githubRequest_(path) {
+  const token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
+  if (!token) throw new Error('GITHUB_TOKEN is not configured in Apps Script Script Properties.');
+
+  const options = {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    muteHttpExceptions: true,
+  };
+  const response = UrlFetchApp.fetch('https://api.github.com' + path, options);
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+  if (code < 200 || code >= 300) {
+    throw new Error('GitHub API failed: GET ' + path + ' HTTP ' + code + ' ' + text);
+  }
+  return text ? JSON.parse(text) : {};
+}
+
+// Generous safety valve mirroring QUERY_PAGE_SAFETY_LIMIT's own role for
+// Notion pagination — high enough that hitting it means something
+// structurally unusual is going on (a PR with an enormous review history)
+// rather than ordinary operation.
+const GITHUB_REVIEWS_MAX_PAGES = 20;
+const GITHUB_REVIEWS_PAGE_SIZE = 100;
+
+// docs/review-fix-state-model.md §5 step 1 (failure #1): walks EVERY page
+// of `GET /repos/{owner}/{repo}/pulls/{number}/reviews`, not just the
+// first. Returns the raw array of GitHub review objects; throws (never
+// swallows) on any request failure, exactly like `paginateNotionQuery_`'s
+// own per-page requests — the caller (`resolveReviewSource_`) is what
+// degrades that to `Other`, so this primitive stays a faithful, unadorned
+// fetch.
+function paginateGithubReviews_(owner, repo, number) {
+  let results = [];
+  for (let page = 1; page <= GITHUB_REVIEWS_MAX_PAGES; page++) {
+    const pagePath = '/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo)
+      + '/pulls/' + number + '/reviews?per_page=' + GITHUB_REVIEWS_PAGE_SIZE + '&page=' + page;
+    const body = githubRequest_(pagePath);
+    if (!Array.isArray(body)) {
+      throw new Error('Unexpected GitHub reviews response shape (not an array) for ' + pagePath);
+    }
+    results = results.concat(body);
+    if (body.length < GITHUB_REVIEWS_PAGE_SIZE) return results;
+  }
+  // The safety valve was hit and the last page fetched was still full —
+  // there may be more pages beyond it. Returning `results` here would let
+  // the caller classify Review Source from a silently truncated history
+  // (Codex review on PR #76). Throw instead so the caller degrades to
+  // `Other`, matching every other "can't prove I saw everything" gate in
+  // §5 step 4.
+  throw new Error('GitHub reviews pagination hit the ' + GITHUB_REVIEWS_MAX_PAGES
+    + '-page safety limit with the last page still full; history may be truncated for '
+    + owner + '/' + repo + '#' + number);
+}
+
+function reviewSourceMinuteFloor_(date) {
+  return new Date(Math.floor(date.getTime() / 60000) * 60000);
+}
+
+// Inclusive end-of-minute instant (`:59.999`) for `date`'s own recorded
+// minute — never used to ADMIT a review by rounding a bound up to it (§5
+// step 2 explicitly rules that out, failures #17/#21/#23/#25/#34); only to
+// mark the far edge of an ambiguous span a review's timestamp is compared
+// against.
+function reviewSourceMinuteEnd_(date) {
+  return new Date(reviewSourceMinuteFloor_(date).getTime() + 59999);
+}
+
+// docs/review-fix-state-model.md §5 steps 2-3: the pure classification
+// algorithm, given already-fetched, already-parsed reviews
+// (`{ login, submittedAt: Date }`) and the two evidence-carried bounds.
+//
+// `lowerBound`/`upperBound`: `{ timestamp: Date, exact: boolean }`.
+// `exact: true` means a trusted, second-precision timestamp is available
+// (not produced anywhere in this codebase today — failure #41 — but
+// supported here so a future evidence source can supply one without this
+// function changing) and the bound applies with no ambiguity window at all
+// (§5 step 2's own carve-out for that case). Otherwise the bound is treated
+// as minute-granular, per Notion's documented precision.
+//
+// `lowerBoundFloor`/`upperBoundFloor` (optional `Date`): widens the
+// respective ambiguous span back to this earlier, independently
+// corroborated instant instead of just "the recorded minute" — failures
+// #50/#52, for when the bound itself is sourced from a backlog-inflatable
+// value (a genuine Time Event close's `Ended At`, or the untrusted
+// `authoritativeEditTime_` reopen fallback). Ignored when the bound is
+// `exact`, or when the floor is not actually earlier than the bound.
+//
+// Returns `{ reviewSource, reason }` — `reviewSource` is always one of the
+// four categories (never throws, degrades to `Other`; see each `reason`
+// for why).
+function classifyReviewSourceFromReviews_(reviews, lowerBound, lowerBoundFloor, upperBound, upperBoundFloor) {
+  if (!lowerBound || !lowerBound.timestamp || !upperBound || !upperBound.timestamp) {
+    return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'missing_bounds' };
+  }
+
+  const lowerExact = Boolean(lowerBound.exact);
+  const upperExact = Boolean(upperBound.exact);
+
+  const lowerSpanEnd = lowerExact ? lowerBound.timestamp : reviewSourceMinuteEnd_(lowerBound.timestamp);
+  const lowerSpanStart = lowerExact
+    ? lowerBound.timestamp
+    : (lowerBoundFloor && lowerBoundFloor.getTime() < lowerSpanEnd.getTime() ? lowerBoundFloor : reviewSourceMinuteFloor_(lowerBound.timestamp));
+
+  const upperSpanStart = upperExact ? upperBound.timestamp : reviewSourceMinuteFloor_(upperBound.timestamp);
+  const upperSpanEnd = upperExact ? upperBound.timestamp : reviewSourceMinuteEnd_(upperBound.timestamp);
+  const upperFloor = (!upperExact && upperBoundFloor && upperBoundFloor.getTime() < upperSpanStart.getTime())
+    ? upperBoundFloor
+    : upperSpanStart;
+
+  // Anything strictly before the lower span, or strictly after the upper
+  // span, is definitely outside `[lower, upper]` regardless of any
+  // remaining sub-minute ambiguity — never a candidate at all.
+  const inRange = (reviews || []).filter(function (r) {
+    return r && r.submittedAt
+      && r.submittedAt.getTime() >= lowerSpanStart.getTime()
+      && r.submittedAt.getTime() <= upperSpanEnd.getTime();
+  });
+  if (!inRange.length) return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'no_reviews_in_window' };
+
+  // §5 step 2, lower bound: a review inside the lower-bound ambiguous span
+  // can never be safely asserted as "the most recent reviewer" — it can
+  // only ever be older than or equal to one clearly outside (after) that
+  // span. Degrade to `Other` whenever no such clearly-outside candidate
+  // exists (failure #30), never fall back to the ambiguous one.
+  const lowerDefinite = inRange.filter(function (r) {
+    return lowerExact || r.submittedAt.getTime() > lowerSpanEnd.getTime();
+  });
+  if (!lowerDefinite.length) {
+    return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'lower_bound_no_definite_candidate' };
+  }
+
+  // §5 step 2/3, upper bound: split the lower-bound-safe candidates into
+  // those clearly BEFORE the upper-bound ambiguous span (safe — definitely
+  // predate the reopen) and those inside it (ambiguous — may or may not
+  // predate the true, sub-minute reopen instant).
+  const upperDefinite = upperExact
+    ? lowerDefinite
+    : lowerDefinite.filter(function (r) { return r.submittedAt.getTime() < upperFloor.getTime(); });
+  const upperAmbiguous = upperExact
+    ? []
+    : lowerDefinite.filter(function (r) { return r.submittedAt.getTime() >= upperFloor.getTime(); });
+
+  // failure #47: with no candidate clearly outside (before) the upper-bound
+  // ambiguous span, there is nothing definite to compare anything against
+  // — degrade to `Other` outright, never promote the latest ambiguous-span
+  // review as if it were a definite answer.
+  if (!upperDefinite.length) {
+    return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'upper_bound_no_definite_candidate' };
+  }
+
+  const definiteBest = upperDefinite.reduce(function (best, r) {
+    return r.submittedAt.getTime() > best.submittedAt.getTime() ? r : best;
+  }, upperDefinite[0]);
+  const definiteCategory = classifyReviewerLogin_(definiteBest.login);
+
+  // failures #37/#43 (unlike the lower bound, an outside/definite candidate
+  // existing here is NOT automatically safe — an ambiguous-span review
+  // could still be more recent under some possible sub-minute reopen
+  // ordering) + #44/#49 (check EVERY later ambiguous-span review, not only
+  // the single latest one, and degrade only on a genuine CATEGORY
+  // disagreement — two reviewers in the same category never need
+  // degradation, since the persisted value is the category, not the
+  // specific reviewer identity).
+  const laterAmbiguous = upperAmbiguous.filter(function (r) {
+    return r.submittedAt.getTime() > definiteBest.submittedAt.getTime();
+  });
+  const hasConflictingCategory = laterAmbiguous.some(function (r) {
+    return classifyReviewerLogin_(r.login) !== definiteCategory;
+  });
+  if (hasConflictingCategory) {
+    return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'upper_bound_ambiguous_category_conflict' };
+  }
+  return { reviewSource: definiteCategory, reason: 'resolved' };
+}
+
+// docs/review-fix-state-model.md §6: a reassignment REPLACEMENT event
+// inherits Review Source from the outgoing sub-interval it continues,
+// exactly like Work Type (`resolveChurnInheritedWorkType_`) — same
+// execution, never re-resolved fresh. A thin, independent mirror of that
+// function reading the `Review Source` property instead of `Work Type`,
+// rather than a change to it: ADP-051-C must not modify Work Type
+// classification logic. See `resolveChurnInheritedWorkType_`'s own doc
+// comment for the full Reason/Boundary/`options.closeReason`-override
+// rationale, identical here.
+function resolveChurnInheritedReviewSource_(outgoingEvent, options) {
+  if (!outgoingEvent) return { inherits: false, reasonCode: 'no_outgoing_event' };
+  const meta = parseNoteMeta_(propertyText_(outgoingEvent.properties.Note));
+  const closeReasonOverride = options && options.closeReason;
+  const effectiveReason = closeReasonOverride || meta.reason;
+  const effectiveBoundary = closeReasonOverride ? '' : meta.boundary;
+  if (effectiveReason === 'ambiguous_provenance_restart') {
+    return { inherits: false, reasonCode: 'ambiguous_provenance_restart_never_inherits' };
+  }
+  if (isExecutionBoundary_({ reason: effectiveReason, boundary: effectiveBoundary })) {
+    return { inherits: false, reasonCode: 'outgoing_event_is_execution_boundary' };
+  }
+  if (effectiveReason !== 'reassignment' && effectiveReason !== 'duplicate_reconciliation') {
+    return { inherits: false, reasonCode: 'outgoing_event_not_a_churn_close' };
+  }
+  const reviewSourceProp = outgoingEvent.properties['Review Source'];
+  const inherited = (reviewSourceProp && reviewSourceProp.type === 'select' && reviewSourceProp.select)
+    ? reviewSourceProp.select.name
+    : '';
+  return { inherits: true, reviewSource: inherited, reasonCode: 'inherited_from_outgoing_churn_close' };
+}
+
+// docs/review-fix-state-model.md §5 (+ §6 churn inheritance) — the single
+// entry point the live poll path calls (via
+// `resolveNewTimeEventReviewSourceSafely_` below) to resolve Review Source
+// for a freshly-opened execution. Mirrors `resolveWorkType_`'s own
+// structure (churn inheritance checked first, via the SAME
+// `mostRecentlyClosedEvent_`/`churnCandidateExecutionMatches_` helpers
+// ADP-051-B6 already built and tests — reused here, not duplicated or
+// modified) but is otherwise fully independent: it never calls
+// `resolveWorkType_` or any of its §3/§4 internals.
+//
+// `options`:
+//   - `workType` — this execution's already-resolved Work Type
+//     (`resolveNewTimeEventWorkTypeSafely_`'s own result). Anything other
+//     than `Review Fix` short-circuits to no classification at all (empty
+//     `reviewSource`, left unset on the Notion page) — §5 only ever applies
+//     to a Review-Fix cycle.
+//   - `lowerBound` — `workTypeResult.resolvedAt` verbatim (§3 step 5): the
+//     IDENTICAL evidence instance Work Type classification used, never an
+//     independently re-derived one (failure #13). `null` (Work Type
+//     resolved via churn inheritance, or is itself unresolved) degrades to
+//     `Other` for a fresh resolution — but churn inheritance is checked
+//     BEFORE this matters, so a churned execution never actually needs it.
+//   - `lowerBoundFloor` / `upperBound` / `upperBoundFloor` — see
+//     `classifyReviewSourceFromReviews_`'s own doc comment.
+//   - `prUrl` — the Task's `Pull Request` URL (`propertyUrl_`), or `''`.
+//   - `allEvents`, `expectedExecutionId`, `sameCallOutgoingChurnEvents` —
+//     identical contracts to `resolveWorkType_`'s own options, for the
+//     churn-inheritance check only.
+//
+// Returns `{ reviewSource, reason }`; `reviewSource` is `''` (no
+// classification at all — not `Other`) when this execution isn't a
+// confidently-resolved Review Fix, and one of the four categories
+// otherwise. Never throws by design, but the live poll path still wraps
+// this in `resolveNewTimeEventReviewSourceSafely_` as defense in depth.
+function resolveReviewSource_(options) {
+  const opts = options || {};
+  if (opts.workType !== WORK_TYPE_REVIEW_FIX) {
+    return { reviewSource: '', reason: 'not_review_fix' };
+  }
+
+  const allEvents = opts.allEvents || [];
+  const expectedExecutionId = opts.expectedExecutionId || '';
+
+  // §6 churn inheritance, checked first — identical candidate discovery to
+  // resolveWorkType_'s own (same-call closes, then the most recently
+  // closed event across allEvents), applied here against Review Source's
+  // own mirror resolver instead.
+  const sameCallCandidates = opts.sameCallOutgoingChurnEvents || [];
+  for (let k = 0; k < sameCallCandidates.length; k++) {
+    const candidate = sameCallCandidates[k];
+    if (!candidate || !candidate.event) continue;
+    if (!churnCandidateExecutionMatches_(candidate.event, expectedExecutionId)) continue;
+    const churn = resolveChurnInheritedReviewSource_(candidate.event, { closeReason: candidate.closeReason });
+    if (churn.inherits) {
+      return { reviewSource: churn.reviewSource || '', reason: 'churn_same_call' };
+    }
+  }
+  const crossPollCandidate = mostRecentlyClosedEvent_(allEvents, expectedExecutionId);
+  if (crossPollCandidate && churnCandidateExecutionMatches_(crossPollCandidate, expectedExecutionId)) {
+    const churn = resolveChurnInheritedReviewSource_(crossPollCandidate);
+    if (churn.inherits) {
+      return { reviewSource: churn.reviewSource || '', reason: 'churn_cross_poll' };
+    }
+  }
+
+  // Fresh resolution (§5 steps 1-3), with §5 step 4's degrade-to-`Other`
+  // gates checked explicitly, in order, before ever calling GitHub.
+  if (!opts.lowerBound || !opts.lowerBound.timestamp) {
+    return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'missing_lower_bound' };
+  }
+  const parsedPr = parsePullRequestUrl_(opts.prUrl);
+  if (!parsedPr) {
+    return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'missing_or_unparseable_pull_request_url' };
+  }
+
+  let rawReviews;
+  try {
+    rawReviews = paginateGithubReviews_(parsedPr.owner, parsedPr.repo, parsedPr.number);
+  } catch (e) {
+    return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'github_api_failure:' + (e && e.message ? e.message : String(e)) };
+  }
+  if (!Array.isArray(rawReviews)) {
+    return { reviewSource: REVIEW_SOURCE_OTHER, reason: 'unexpected_response_shape' };
+  }
+
+  const reviews = [];
+  rawReviews.forEach(function (review) {
+    if (!review || typeof review !== 'object') return;
+    // A pending (not-yet-submitted) review carries no `submitted_at` at
+    // all — never a real, dated review event, so it is silently skipped
+    // rather than treated as a malformed response.
+    if (!review.submitted_at) return;
+    const submittedAt = new Date(review.submitted_at);
+    if (isNaN(submittedAt.getTime())) return;
+    reviews.push({ login: review.user && review.user.login, submittedAt: submittedAt });
+  });
+
+  const classification = classifyReviewSourceFromReviews_(
+    reviews,
+    { timestamp: opts.lowerBound.timestamp, exact: Boolean(opts.lowerBound.exact) },
+    opts.lowerBoundFloor || null,
+    { timestamp: opts.upperBound.timestamp, exact: Boolean(opts.upperBound && opts.upperBound.exact) },
+    opts.upperBoundFloor || null
+  );
+  return classification;
+}
+
+// docs/review-fix-state-model.md §3 step 1 (failure #50): when Work Type's
+// winning lower-bound instant came from a GENUINE Time Event close's own
+// `Ended At`, that value can be inflated by a backlog-dependent number of
+// deferred poll cycles (README's documented `last_edited_time` imprecision)
+// — widen the Review Source lower-bound ambiguous span back to this same
+// closed event's own `Started At`, the earliest independently corroborated
+// point this codebase has cheaply on hand for it, per §5 step 2's own
+// example anchor. Re-derives WHICH candidate won by calling
+// `mostRecentBoundaryCandidate_` again — a second, pure call over the
+// IDENTICAL `allEvents` `resolveWorkType_` already read, never a new lookup
+// of different evidence — solely to reach the event object itself; it does
+// not recompute, question, or override the winning timestamp
+// `workTypeResult.resolvedAt` already carries (failure #13 still holds:
+// that instant is used exactly as `resolveWorkType_` produced it).
+// Returns `null` (no widening) whenever Work Type resolved via anything
+// other than a genuine boundary win (a Sync Log candidate is not subject to
+// this specific inflation) or is itself unresolved/absent.
+function reviewSourceLowerBoundFloor_(workTypeResult, allEvents) {
+  if (!workTypeResult || workTypeResult.unresolved) return null;
+  const genuineBoundarySources = {
+    genuine_boundary: true,
+    genuine_boundary_wins: true,
+    genuine_boundary_and_sync_log_tied: true,
+    genuine_boundary_wins_intervening_row: true,
+  };
+  if (!genuineBoundarySources[workTypeResult.source]) return null;
+  const boundary = mostRecentBoundaryCandidate_(allEvents);
+  if (!boundary || boundary.conflictingTie || !boundary.event) return null;
+  return eventStartedAt_(boundary.event);
+}
+
+// Non-blocking wrapper for the live poll path, mirroring
+// `resolveNewTimeEventWorkTypeSafely_` exactly: any exception anywhere in
+// `resolveReviewSource_` (a resolver bug, or a GitHub/parsing failure that
+// somehow escapes its own internal degrade-to-`Other` handling) must never
+// prevent Time Event creation — it only means `Review Source` is left
+// unset on the new page. Never throws.
+function resolveNewTimeEventReviewSourceSafely_(options) {
+  try {
+    return resolveReviewSource_(options);
+  } catch (e) {
+    return { reviewSource: '', reason: 'resolver_error:' + (e && e.message ? e.message : String(e)) };
   }
 }
