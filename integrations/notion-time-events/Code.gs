@@ -5032,9 +5032,17 @@ function paginateGithubReviews_(owner, repo, number) {
       throw new Error('Unexpected GitHub reviews response shape (not an array) for ' + pagePath);
     }
     results = results.concat(body);
-    if (body.length < GITHUB_REVIEWS_PAGE_SIZE) break;
+    if (body.length < GITHUB_REVIEWS_PAGE_SIZE) return results;
   }
-  return results;
+  // The safety valve was hit and the last page fetched was still full —
+  // there may be more pages beyond it. Returning `results` here would let
+  // the caller classify Review Source from a silently truncated history
+  // (Codex review on PR #76). Throw instead so the caller degrades to
+  // `Other`, matching every other "can't prove I saw everything" gate in
+  // §5 step 4.
+  throw new Error('GitHub reviews pagination hit the ' + GITHUB_REVIEWS_MAX_PAGES
+    + '-page safety limit with the last page still full; history may be truncated for '
+    + owner + '/' + repo + '#' + number);
 }
 
 function reviewSourceMinuteFloor_(date) {

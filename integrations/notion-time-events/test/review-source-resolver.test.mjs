@@ -145,6 +145,36 @@ test('failure #1: a PR with fewer reviews than one page stops after the first re
   assert.equal(fetchLog.length, 1);
 });
 
+test('failure #1: hitting the page-20 safety cap with a still-full last page throws instead of returning a silently truncated history', () => {
+  // Every page returns exactly 100 reviews (a full page), so the loop never
+  // sees a short page to stop on and runs out the safety valve at page 20 —
+  // there could be a page 21+ this call never saw. Returning `results` here
+  // would let the caller classify Review Source from an incomplete history
+  // (Codex review comment on PR #76, cloud42-labo/ai-development-platform).
+  const { sandbox, fetchLog } = harness((url) => {
+    const pageMatch = /[?&]page=(\d+)/.exec(url);
+    const page = pageMatch ? Number(pageMatch[1]) : 1;
+    return {
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify(Array.from({ length: 100 }, (_, i) => review('r' + page + '-' + i, '2026-08-01T12:00:00.000Z'))),
+    };
+  });
+  assert.throws(() => sandbox.paginateGithubReviews_('acme', 'widgets', 42), /page.*limit|truncat/i);
+  assert.equal(fetchLog.length, 20);
+});
+
+test('failure #1: resolveReviewSource_ degrades to Other when pagination is truncated at the safety cap', () => {
+  const { sandbox } = harness(() => ({
+    getResponseCode: () => 200,
+    getContentText: () => JSON.stringify(Array.from({ length: 100 }, (_, i) => review('r-' + i, '2026-08-01T12:00:00.000Z'))),
+  }));
+  const result = sandbox.resolveReviewSource_({
+    workType: 'Review Fix', prUrl: 'https://github.com/acme/widgets/pull/42', lowerBound: LOWER, upperBound: UPPER,
+  });
+  assert.equal(result.reviewSource, 'Other');
+  assert.match(result.reason, /^github_api_failure:/);
+});
+
 // ---------------------------------------------------------------------------
 // classifyReviewSourceFromReviews_ — §5 steps 2-3
 // ---------------------------------------------------------------------------
