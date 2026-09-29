@@ -20,6 +20,41 @@ Review roundは、独立Reviewerが1つのrevisionを実際に評価し、findin
 - round countはPR番号ではなく、同一のchange objective / Task目的に追随する。
 - Refinementの結果として意図的にTask/PRを分割し、NotionにSplit / Superseded判断を記録したreplacement PRは、新しい独立change objectiveとしてcountを開始できる。
 
+## 2.1. Blocking Finding Admission Gate
+
+Review findingはEvidenceとして全件記録できるが、PRを止めるBlocking Findingとして扱えるのは次をすべて満たす場合だけとする。
+
+1. current headに適用可能である。
+2. correctness / security / data loss / policy invariant / Acceptance Criteriaの具体的failure modeを説明できる。
+3. 変更scopeとの因果がある。
+4. required fixとverification conditionが明確である。
+
+style、naming、formatting、一般的best practice、将来refactor案、具体的failure pathのない推測、変更scope外の既存問題は原則Merge Blockerにしない。SeverityラベルだけでBlocking Findingへ昇格させてはならない。
+
+Blocking Findingは最低限 `Finding ID / Severity / Location / Failure mode / Evidence / Required fix` を持つ。同一根因の指摘は別Findingとして増殖させず、1つのFindingまたはDuplicateとして束ねる。
+
+## 2.2. Author Disposition completeness
+
+Authorはreview findingの一部だけを修正して次roundへ進んではならない。current headへ適用可能なFindingをすべて列挙し、各Findingを `Fix / Reject / Duplicate / Out of scope` のいずれかへDispositionする。
+
+`Disposition Coverage = disposed findings / applicable findings` とし、**100%未満ではreview対応完了、再レビュー要求、Merge Ready判定へ進めない**。
+
+- Fix: commit/pathとverification evidenceが必要
+- Reject: current headで成立しないことの反証が必要
+- Duplicate: 統合先Finding IDが必要
+- Out of scope: 別Task化またはscope外とする根拠が必要
+
+## 2.3. Re-review scope — delta first
+
+初回reviewはPR全体を評価してよい。2回目以降は、まず次の2点を対象にする。
+
+1. prior blocking findingsがcurrent headで解消したか
+2. prior review後のdeltaが新しいblocking defectを導入したか
+
+再レビューのたびにPR全体をゼロから探索し直して新しい改善候補を増やす運用は禁止する。新規Blocking Findingを追加する場合は、前回review後のdeltaによって導入または新たに露呈したEvidenceを示す。同じ論点の言い換えは新規Findingではなく既存Findingへ紐づける。
+
+current headにBlocking Findingが無い場合、Reviewerはclean verdictでreviewを終了する。レビュー件数を作ること自体を成果にしない。
+
 ## 3. Round 3 — Approach Refinement trigger
 
 同一subsystem、state transition、invariant、migration、retry/failure mode、provenance modelその他の同一領域について、3 substantive roundsまで新規findingが継続した場合は、patch-by-patch修正を停止してApproach Refinementへ戻る。
