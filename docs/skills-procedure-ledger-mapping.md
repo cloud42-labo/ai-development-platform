@@ -27,24 +27,24 @@ Notion は Human-readable な authoring / controlled copy に限る（R04 第9�
 ### 2.2 自作 Skill 一覧
 
 `refs` = `references/` のファイル数、`scripts` = `scripts/` のファイル数、`行` = SKILL.md の行数、
-`最終変更` = そのディレクトリに触れた最新コミット（取得できた履歴内）。
-`Actor` は根拠が明示できるものだけ具体名を書き、SKILL.md 内に特定 Actor の記述がないものは
-`共通`（どの Actor からも呼べる）とした。推定で埋めていない。
+`最終変更` = `0f228d4` 時点で、そのディレクトリに触れた最新コミット（短縮 SHA と UTC 日付。全履歴で確認）。
+`Actor` の根拠は 2 つだけとする: (a) `config/scheduled-skills.yaml` の `actor`、(b) `SKILL.md` 本文の明示記述。
+どちらも無いものは `共通`（どの Actor からも呼べる）とし、推測で具体名を入れない。
 
 **A. Sprint / Backlog 運用ループ（11）**
 
 | Skill | 種別 | Actor | 用途（要約） | 行 | refs | scripts | 最終変更 |
 |---|---|---|---|---|---|---|---|
 | weekly-sprint | Composite | ChatGPT（registry: mon-08:00） | 週次マネジメントループ全体の実行 | 251 | 0 | 0 | e8484c2 09-22 |
-| upstream-change-review | Atomic | 共通 | AI ベンダー公式変更の影響判定 | 105 | 0 | 0 | 8588e0c 09-06 |
-| sprint-review | Atomic | 共通 | 直前 Sprint の成果を証拠ベースで評価 | 71 | 0 | 0 | 8588e0c 09-06 |
-| sprint-retrospective | Atomic | 共通 | 未達・手戻りの構造的原因分析 | 62 | 0 | 0 | 8588e0c 09-06 |
+| upstream-change-review | Atomic | 共通 | AI ベンダー公式変更の影響判定 | 105 | 0 | 0 | 1d25055 09-06 |
+| sprint-review | Atomic | 共通 | 直前 Sprint の成果を証拠ベースで評価 | 71 | 0 | 0 | c426f0c 09-02 |
+| sprint-retrospective | Atomic | 共通 | 未達・手戻りの構造的原因分析 | 62 | 0 | 0 | c426f0c 09-02 |
 | backlog-refinement | Composite | 共通 | MISC 収束と Product→Task 再配置 | 415 | 0 | 1 | e8484c2 09-22 |
 | hierarchical-refinement | Atomic | 共通 | Vision→Epic→Story→Task の階層妥当性検証 | 293 | 0 | 0 | c38e288 09-22 |
 | task-approach-review | Atomic | 共通 | Task の How 確定（Analyze / Finalize） | 291 | 0 | 0 | e8484c2 09-22 |
 | task-state-reconcile | Atomic | 共通 | terminal 後の依存解放と Story 完了判定 | 161 | 0 | 0 | e8484c2 09-22 |
 | sprint-close | Atomic | 共通 | 旧 Sprint の正式クローズ | 83 | 0 | 0 | e8484c2 09-22 |
-| sprint-goal-review | Atomic | 共通 | 次 Sprint Goal の維持・変更・廃棄判断 | 67 | 0 | 0 | 8588e0c 09-06 |
+| sprint-goal-review | Atomic | 共通 | 次 Sprint Goal の維持・変更・廃棄判断 | 67 | 0 | 0 | c426f0c 09-02 |
 | sprint-planning | Atomic | 共通 | Goal に対する実行計画の作成 | 139 | 0 | 0 | e8484c2 09-22 |
 
 **B. 日次運用 / Control Plane / ゲート（7）**
@@ -54,7 +54,7 @@ Notion は Human-readable な authoring / controlled copy に限る（R04 第9�
 | daily-close | Atomic | ChatGPT（registry: 23:00） | In Progress=0 への収束 | 63 | 0 | 0 | e8484c2 09-22 |
 | canonical-consistency-check | Atomic | ChatGPT（registry: 23:00） | Registry / Scheduler / Notion の 3 者照合 | 76 | 0 | 0 | 56d35dc 09-27 |
 | adp-daily-report | Atomic | ChatGPT（registry: 05:00） | 前日分の共同日報作成・検証 | 50 | 0 | 0 | 49139cd 09-20 |
-| scheduled-skill-dispatcher | Atomic | ChatGPT / Claude 両方 | 定時窓で実行対象を決める Trigger Bus | 77 | 0 | 4 | 0f228d4 09-28 |
+| scheduled-skill-dispatcher | Atomic | 共通 | 定時窓で実行対象を決める Trigger Bus | 77 | 0 | 4 | 0f228d4 09-28 |
 | pr-flow-gate | Atomic | ChatGPT（Control Plane） | Open PR 全件の分類と MERGE_READY 先行処理 | 198 | 0 | 0 | 7bdf953 09-22 |
 | pr-review-convergence | Atomic | 共通（Codex 指摘の収束） | PR レビューラリーの収束・Merge Gate | 243 | 0 | 0 | 01f3920 09-24 |
 | human-gate-preflight | Atomic | 共通 | Human Request 作成前の AC 分類 | 139 | 0 | 0 | e8484c2 09-22 |
@@ -72,11 +72,11 @@ Notion は Human-readable な authoring / controlled copy に限る（R04 第9�
 | Skill | 種別 | Actor | 用途（要約） | 行 | refs | scripts | 最終変更 |
 |---|---|---|---|---|---|---|---|
 | adp-bootstrap | Bootstrap | 共通 | ADP パッケージの Install / Upgrade | 196 | 2 | 4 | 9043914 09-16 |
-| brain-setup | Bootstrap | Claude Code | 個人知識ベースの新規セットアップ | 146 | 0 | 1（+`assets/` 42、`evals/` 1） | 8588e0c 09-06 |
-| to-prd | Atomic | Claude Code | 実装前 PRD の作成 | 133 | 0 | 0 | 8588e0c 09-06 |
-| to-project | Atomic | Claude Code | 会話からプロジェクト計画書を作成 | 198 | 0 | 0 | 8588e0c 09-06 |
-| vibe-pipeline | Composite（手順書） | Claude Code / Gemini CLI | vibe coding → Cloud Run の 4 フェーズ | 123 | 1 | 0 | 8588e0c 09-06 |
-| external-security-skill-selector | Atomic | Claude Code | 外部防御セキュリティ Skill の検索 | 79 | 0 | 4 | b95b384 09-26 |
+| brain-setup | Bootstrap | Claude Code | 個人知識ベースの新規セットアップ | 146 | 0 | 1（+`assets/` 42、`evals/` 1） | 1ad3797 07-31 |
+| to-prd | Atomic | 共通 | 実装前 PRD の作成 | 133 | 0 | 0 | 623874b 07-29 |
+| to-project | Atomic | 共通 | 会話からプロジェクト計画書を作成 | 198 | 0 | 0 | b95e2a3 07-25 |
+| vibe-pipeline | Composite（手順書） | Claude Code / Gemini CLI | vibe coding → Cloud Run の 4 フェーズ | 123 | 1 | 0 | e263622 08-23 |
+| external-security-skill-selector | Atomic | 共通 | 外部防御セキュリティ Skill の検索 | 79 | 0 | 4 | b95b384 09-26 |
 
 合計: SKILL.md 27、references 3 ファイル（adp-bootstrap 2、vibe-pipeline 1）、scripts 14 ファイル
 （brain-setup の 1 を含む）、Skill 内の非 SKILL.md/references/scripts ファイルは brain-setup の 43（`assets/` 42、`evals/` 1）のみ。
@@ -123,7 +123,7 @@ external-security-skill-selector / to-project は依存も被依存も 0。
   台帳化するかは 4 章の判断事項。
 - `config/external-security-skills.json` — Skill 本文ではなく外部 Skill の参照 registry。構成データ。
 
-## 3. Notion 手順書台帳の項目（確定案）
+## 3. Notion 手順書台帳の項目（確定）
 
 ### 3.1 必須項目
 
@@ -133,31 +133,54 @@ external-security-skill-selector / to-project は依存も被依存も 0。
 | 2 | 名称 | Text | Skill ID の日本語表示名 | Human 向け。同期対象外 |
 | 3 | 目的 | Text | `description` の前半（何をするか） | 同期方向は GitHub→Notion のみ |
 | 4 | 適用条件 | Text | `description` の後半（いつ起動するか） | 同上。`description` は起動判定を決めるため編集は PR 経由 |
-| 5 | 対象 Actor | Multi-select（ChatGPT / Claude / Codex / 共通 / Human handoff） | 2.2 の分類を初期値とする | registry の `actor` と一致確認 |
+| 5 | 対象 Actor | Multi-select（ChatGPT / Claude / Codex / Gemini CLI / 共通 / Human handoff） | 2.2 の分類を初期値とする。`vibe-pipeline` は `Claude` と `Gemini CLI`（SKILL.md が明示） | registry の `actor` と一致確認 |
 | 6 | 本文 | ページ本文 | `SKILL.md`（frontmatter 除く） | 編集可能な唯一の面。Notion→GitHub の対象 |
 | 7 | 関連規程・基準 | Relation | R01–R06、各 Quality Standard | 手動維持 |
-| 8 | Status | Select: Draft / Review / Effective / Superseded / Deprecated | **Effective = GitHub main に merge 済み** | 3.2 参照 |
-| 9 | Version | Text | GitHub 側の tag またはコミット SHA 由来 | frontmatter に version が無いため（3.2） |
+| 8 | Status | Select: Draft / Review / Effective / Superseded / Deprecated | Notion 上の本文の状態。定義は 3.2 | Adapter が 3.2 の表に従って更新 |
+| 9 | Version | Text | **main 上の Effective version** = 有効 commit の短縮 SHA | frontmatter に version が無いため。未 merge の版は入れない（3.2） |
 | 10 | GitHub path | URL | `.claude/skills/<id>/SKILL.md` | 派生値。手で編集させない |
-| 11 | PR | URL | 直近の同期 PR | 同期 Adapter が書く |
-| 12 | commit | Text | 最終同期コミット SHA | 同期 Adapter が書く |
-| 13 | 改定日時 | Date（時刻付き） | merge 時刻（JST） | Adapter が書く |
-| 14 | 同期状態 | Select: In Sync / Notion Ahead / GitHub Ahead / Conflict / Sync Failed | Adapter が commit と本文 hash の比較で算出 | 3.3 |
+| 11 | PR | URL | Review 中は未 merge の同期 PR、それ以外は直近に merge した PR | 同期 Adapter が書く |
+| 12 | commit | Text | **有効 commit** = main 上でこの Skill を最後に変更した commit の SHA | merge 後に Adapter が書く。PR の head SHA は入れない |
+| 13 | 改定日時 | Date（時刻付き） | 有効 commit の merge 時刻（JST） | Adapter が書く |
+| 14 | 同期状態 | Select: In Sync / Notion Ahead / GitHub Ahead / Conflict / Sync Failed | Adapter が有効 commit・有効本文 hash と、現在の Notion 本文・main の HEAD を比較して算出 | 3.2 |
+| 15 | 有効本文 hash | Text | main 上の `SKILL.md` 本文（frontmatter 除く）の SHA-256 | merge 後に Adapter が書く。Notion 本文の hash は同期のたびに計算し、保存しない |
 
-### 3.2 追加を推奨する項目
+### 3.2 追加項目と Status / Version の定義
 
 - **種別**（Atomic / Composite / Domain / Bootstrap）— 2.2 で分類済み。Composite は変更影響が大きく
   レビュー強度を変える根拠になる。
 - **関連 Skill**（自己 Relation）— 2.3 の依存辺。
 - **付属物**（refs / scripts / assets の件数と GitHub パス）— 責任境界（3.3）を台帳側で可視化する。
-- **Owner Registry ID** — registry の `skill_id` との対応（該当する 4 件のみ埋まる）。
-- **本文 hash** — 同期状態の判定用（GitHub の `SKILL.md` 本文の SHA-256）。
+- **Registry ID** — registry の `skill_id` との対応（該当する 4 件のみ埋まる）。
 
-**Version と Status の扱い（設計判断）:** 現行 Skill は frontmatter に `version` / `status` を持たない。
-frontmatter に足すと 27 件全部の `SKILL.md` に触れ、起動判定に使われる `name` / `description` の
-周辺を変えることになる。したがって **初期は GitHub 側を変更せず**、Version は「最終変更コミット SHA
-（短縮）」、Status は「main に存在すれば Effective」と Notion 側だけで導出する。frontmatter への
-version 追加は同期が安定してから別 Task で判断する。
+**Effective の定義（確定）:** Effective なのは **GitHub main 上にある版だけ**。Notion で編集中の本文、および
+PR が未 merge の本文は、Notion にどれだけ書かれていても Effective ではない（proposed）。Version（#9）・
+有効 commit（#12）・有効本文 hash（#15）には、main に merge 済みの値だけを入れる。未 merge の Notion 本文の
+hash と PR の head SHA は、台帳に保存しない。
+
+現行 Skill は frontmatter に `version` / `status` を持たない。frontmatter に足すと 27 件全部の `SKILL.md` に
+触れ、起動判定に使われる `name` / `description` の周辺を変えることになる。したがって **初期は GitHub 側を
+変更せず**、Version は有効 commit の短縮 SHA として Notion 側だけで持つ。frontmatter への version 追加は
+同期が安定してから別 Task で判断する。
+
+**Status・Version・commit・有効本文 hash・同期状態の組み合わせ:**
+
+| ケース | Status | 同期状態 | Version / 有効 commit / 有効本文 hash | PR（#11） |
+|---|---|---|---|---|
+| Notion 本文が main の有効版と一致 | Effective | In Sync | main の値 | 直近に merge した PR |
+| Notion で本文を編集中（PR 未作成） | Draft | Notion Ahead | **変更しない**（直前の有効版のまま） | 直近に merge した PR |
+| 同期 PR を作成済み・未 merge | Review | Notion Ahead | **変更しない** | 未 merge の PR |
+| PR を merge した直後（Notion 未反映） | Review のまま | GitHub Ahead | 更新前の値のまま。Adapter が再同期して更新 | merge 済みの PR |
+| Adapter が反映を完了 | Effective | In Sync | 新しい main の値 | merge 済みの PR |
+| GitHub 直接修正で main が進んだ | 変更しない | GitHub Ahead | 更新前の値のまま。Adapter が再同期して更新 | 変更しない |
+| Notion の編集と main の変更が同時にある | Draft / Review のまま | Conflict | 変更しない。GitHub を正として人間に提示 | 変更しない |
+| 同期処理が失敗 | 変更しない | Sync Failed | 変更しない | 変更しない |
+| Notion で新しい Skill を起票（main に無い） | Draft / Review | Notion Ahead | **空**（Effective な版が存在しない） | 未 merge の PR、または空 |
+| main で Skill が削除・置換された | Superseded / Deprecated | In Sync | 削除・置換前の最後の値 | 削除・置換の PR |
+
+不変条件: (1) Status = Effective のとき、Notion 本文は台帳に記録した有効版（有効 commit / 有効本文 hash）と一致している。
+(2) Version・有効 commit・有効本文 hash は、Adapter が merge 済みの main から読んだ値だけを書く。
+(3) 同期状態が In Sync 以外のとき、Effective なのは main の版であって Notion の本文ではない。
 
 ### 3.3 GitHub / Notion の責任境界
 
@@ -174,29 +197,31 @@ version 追加は同期が安定してから別 Task で判断する。
 決める文字列で、誤編集は実行時の起動漏れ・誤起動に直結する。本文より一段厳しいレビューを要求する
 価値がある。
 
-## 4. T02 以降への引き継ぎ（未確定の判断事項）
+## 4. T02 以降への引き継ぎ（確定事項）
 
-1. **Routine 責任 5 件（`claude-daily-execution` 等）を台帳に載せるか。** 実体（SKILL.md）が repo に
-   無いため、載せるなら「手順書の実体が存在しない」状態を表す区分が要る。載せない場合は、Registry を
-   Notion「Job Schedule」で管理する既存の分担を維持する。**推奨: 今回は載せない**（Story の AC は
-   `.claude/skills/` 配下を対象としており、実体のない ID を台帳に入れると同期状態の意味が崩れる）。
-2. **`brain-setup` の `assets/`（42 ファイル）を台帳でどう表すか。** 3.3 のとおり「存在のみ」を推奨。
-   PoC の対象 Skill にはしない。
-3. **PoC の対象 Skill の選定（T02/T03 で使う）。** 条件: 依存も被依存も 0・scripts/references を持たない・
-   誤って壊しても他 Skill に波及しない。**推奨: `to-project`**（198 行、依存・被依存とも 0、
-   references/scripts なし）。`sprint-review` は他 Skill 7 本から名前を言及されるので PoC 向きではない。
-   Composite（`weekly-sprint`）・scripts 付き・被依存の多い Skill は避ける。
-4. **rename / delete の検出。** 2.3 のとおり依存元本文にも波及する。Adapter は「Skill 名の変更・削除」を
+以下は ADP-066-T01 の決定であり、T02 以降で再判断しない。変更が要る場合は新しい Task で行う。
+
+1. **Routine 責任 5 件は台帳の対象外とする。** 対象は `claude-daily-execution` / `brain-weekly-review` /
+   `skills-weekly-review` / `control-plane` / `aod-production`。`.claude/skills/` に `SKILL.md` の実体が
+   無いため、今回の「Skill 手順書台帳」には載せない。これらは Registry（`config/scheduled-skills.yaml`）と
+   Notion「Job Schedule」で管理する。
+2. **PoC 対象 Skill は `to-project` とする。** 根拠: 他 Skill への言及 0、他 Skill からの言及 0、
+   references 0、scripts 0で、壊しても他 Skill への波及が最小。`sprint-review` は他 Skill 7 本から
+   言及されるため PoC 対象にしない。Composite（`weekly-sprint`）・scripts 付き・被言及の多い Skill も
+   対象にしない。
+3. **`brain-setup` の `assets/`（42 ファイル）・`evals/`（1 ファイル）は「存在の記録のみ」とする。**
+   3.3 のとおり。PoC の対象にしない。
+4. **rename / delete の検出。** 2.3 のとおり依存元本文にも波及する。Adapter は Skill 名の変更・削除を
    検出したとき、依存元 Skill の一覧を PR 本文に出す。
 5. **GitHub 直接編集との競合。** 直近の変更が 2026-09-22〜09-28 に集中しており（27 件中 17 件が
    9/22 以降）、GitHub 直接編集の頻度は高い。設計原則 4「緊急修正は GitHub を正として Notion に戻す」を
-   既定とし、同期状態 `GitHub Ahead` は自動で Notion を上書き再同期する。`Notion Ahead` と
-   `GitHub Ahead` が同時に立つ場合のみ `Conflict` として人間に提示する。
-6. **`skills` repo は自己 merge 可、ADP は protected branch への merge に承認が必要。**
-   `governance/agent-policy.yaml` の `github-protected-merge` は `decision: approve` で、承認者は
-   定めていない（実運用は Codex レビュー後に Chris の PR Flow Gate が merge）。同期 Adapter が生成する
-   PR は skills repo 向けなので自己 merge の対象になる。Adapter 実装（T03）は ADP 側に置かれるため、
-   実装 PR と Skill 変更 PR で merge の手順が異なる点を T03 の手順に明記する。
+   既定とし、同期状態 `GitHub Ahead` は Adapter が Notion を再同期する。`Notion Ahead` と `GitHub Ahead` が
+   同時に立つ場合は `Conflict` とし、GitHub を正として人間に提示する（3.2 の表）。
+6. **merge の権限と手順は、最新の policy と PR Flow Gate に従う。** この文書は merge 権限を決めない。
+   確認済みの事実は `governance/agent-policy.yaml` の `github-protected-merge`（`decision: approve`、
+   承認者の指定なし）だけである。同期 Adapter の実装 PR と、Adapter が生成する Skill 変更 PR は、
+   どちらも作成時点の最新の policy・各リポジトリの運用文書・`pr-flow-gate` に従って扱う。
+   `skills` repo の merge 権限も、この文書では断定しない。
 
 ## 5. 受け入れ基準との対応
 
@@ -204,7 +229,7 @@ version 追加は同期が安定してから別 Task で判断する。
 |---|---|
 | 1) `.claude/skills` 全件棚卸し（名前・SKILL.md・references・scripts・Actor・用途） | 2.2 |
 | 2) vendor を自作から分離 | 2.1, 2.4 |
-| 3) 台帳の必須項目確定 | 3.1（必須 14 項目）、3.2（追加推奨） |
+| 3) 台帳の必須項目確定 | 3.1（必須 15 項目）、3.2（Status・Version・commit・hash の定義） |
 | 4) SKILL.md 本文・references・scripts の Notion/GitHub 責任境界 | 3.3 |
 
 ## 6. 再現手順（棚卸しの根拠）
