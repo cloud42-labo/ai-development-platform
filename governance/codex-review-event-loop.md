@@ -64,7 +64,7 @@ review request送信前に必ず次を満たすこと。
 Re-review the current head. Prioritize resolution of prior blocking findings and the delta since the previous reviewed head. Follow the repository AGENTS.md Finding Admission Gate; do not create blocking findings for style, nits, general best practices, or unrelated refactors.
 ```
 
-このmarkerをhead単位のidempotency keyとする。同じheadへ同じrequestを再送してはならない。
+このmarkerをhead単位のidempotency keyとする。同じheadへ同じrequestを再送してはならない。（例外: reviewer-latency timeout後の1回限りの再requestは、別namespaceの`adp-codex-review-retry`markerを使う。詳細は「3.1 Reviewer-latency timeout」参照。）
 
 ### 2.4 Review result -> route
 
@@ -107,8 +107,18 @@ request markerを送信済みでも、mentionが無視される・Reviewerが利
 
 `pr-flow-gate` は、request marker投稿時刻（marker自体をPRへ投稿した時刻。Gateが自分で送信した場合はその実行時刻、`source=work-event`の場合はevent handlerがmarkerと合わせて記録した投稿時刻）から**60分以上経過してもcurrent headに対するCodex reviewが到着していない**場合を `WAITING_REVIEW(reviewer_latency_timeout)` として区別する。この場合、review-round Gate（hard cap / Owner承認）を再確認したうえで次のいずれかを行う。
 
-1. hard capにまだ余地があり、Owner承認が不要な範囲なら、同一headへ新しいround番号で1回だけ再requestする（`source=pr-flow-fallback-retry`）。以後の待機は新しいmarker投稿時刻から再度60分の猶予とする。
-2. 再requestも同様にtimeoutした、またはhard capで新規requestを送れない場合は、`pr-review-convergence` のReviewer unavailable fallback（Claude等の独立Final Reviewerへの切替）へ進める。Codex reviewが到着済みだが処理できていないだけの状態（reviewer_latency、review submission待ち）とは区別し、reviewer_latency_timeoutをEvidenceとしてTask Result/Blockerへ記録する。
+1. hard capにまだ余地があり、Owner承認が不要な範囲なら、同一headへ1回だけ再requestする。この再requestは§2.3の`adp-codex-review-request`とは別のmarker namespaceを使う。
+
+   ```text
+   <!-- adp-codex-review-retry:v1 head=<HEAD_SHA> for_round=<TIMED_OUT_ROUND> attempt=2 source=pr-flow-fallback-retry -->
+   @codex review
+
+   Re-review the current head. The prior request for this head appears to have gone unanswered (no review after 60 minutes). Prioritize resolution of prior blocking findings and the delta since the previous reviewed head. Follow the repository AGENTS.md Finding Admission Gate; do not create blocking findings for style, nits, general best practices, or unrelated refactors.
+   ```
+
+   `adp-codex-review-retry` markerは§2.3 step 4（`adp-codex-review-request` markerが存在しない場合のみ送信できる、というper-head idempotency）の対象外とする。同一headに`adp-codex-review-request`markerが既にあっても、そのrequestがreviewer-latency-timeout状態であることが確認できていれば、`adp-codex-review-retry`markerを（`for_round`ごとに）1回だけ追加投稿してよい。以後の待機はこのretry marker投稿時刻から再度60分の猶予とする。retry markerが既に存在する同じ`for_round`へ重複投稿してはならない。
+   このretry attempt自体は、実際にreviewが返るまで[review-loop-control.md](review-loop-control.md)のsubstantive round counterを増やさない（review-loop-control.md 2章の定義どおり、review結果が生成されなかった呼出しは数えない）。reviewが到着した時点で初めてそのroundをsubstantiveとして数える。
+2. retryも同様にtimeoutした（同一`for_round`のretryが60分超過）、またはhard capで新規requestを送れない場合は、`pr-review-convergence` のReviewer unavailable fallback（Claude等の独立Final Reviewerへの切替）へ進める。Codex reviewが到着済みだが処理できていないだけの状態（reviewer_latency、review submission待ち）とは区別し、reviewer_latency_timeoutをEvidenceとしてTask Result/Blockerへ記録する。
 
 `reviewer_latency`（markerはあるがtimeoutにはまだ達していない通常の待機）と`reviewer_latency_timeout`（60分超過し次アクションが必要）は別状態として扱う。timeoutに達するまでは重複requestを送らない。
 
