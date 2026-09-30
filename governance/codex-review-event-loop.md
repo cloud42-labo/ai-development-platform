@@ -161,12 +161,12 @@ Never use a metered external OpenAI API, never expose secrets, never bypass Auth
 導入完了には次のEvidenceが必要。
 
 1. Workで上記event-triggered taskが作成・Enabled。
-2. GitHub connectorが対象repositoryのPR activityを受信できる。
-3. test/実PRのcommit update 1件でrequest markerが自動投稿される。
+2. GitHub connectorが対象repositoryのPR activityを受信でき、event taskからPR conversationへのcomment writeが許可される。connected-appのapproval requirementで毎回Human承認待ちになる場合、このreview-request経路をActive扱いにしない。
+3. test/実PRのcommit update 1件でHuman承認なしにrequest markerが自動投稿される。
 4. Codex current-head review結果がreview_fixまたはcleanへrouteされる。
 5. Notion Job ScheduleへActive状態と責務が反映される。
 
-これらが揃うまでは `work_event_trigger_enabled = false` と扱い、既存Control Plane fallbackを維持する。
+これらが揃うまでは `work_event_trigger_enabled = false` と扱い、既存Control Plane fallbackを維持する。Workのevent trigger自体が利用可能でも、GitHub write権限またはapproval policyにより自動commentが止まる場合は同様にfalseとする。
 
 ## 7. Observability
 
