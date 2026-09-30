@@ -56,6 +56,17 @@ Authorはreview findingの一部だけを修正して次roundへ進んではな�
 
 current headにBlocking Findingが無い場合、Reviewerはclean verdictでreviewを終了する。レビュー件数を作ること自体を成果にしない。
 
+## 2.4. Event-driven re-review handshake
+
+Review Fix後の再レビューは、Humanの手入力ではなく**PR head更新イベント**を正常系の起点とする。詳細なstate machine、idempotency marker、Work event task設定、fallbackは [codex-review-event-loop.md](codex-review-event-loop.md) をAuthorityとする。
+
+- AuthorはDisposition Coverage=100%を確認してfix commitをpushし、current headをExpected Review Headとしてhandoffする。
+- Workのcommit-update handlerはreview request送信前に本基準のround count / hard capを確認する。イベント駆動であっても第6回以降を自動送信してはならない。
+- 同一headにcurrent-head reviewまたはrequest markerがある場合、重複requestを送らない。
+- current-head reviewにEvidence-backed blockerがあれば元の実装TaskへReview Fixとして戻し、cleanならPR Flow Gate / Merge Gateへ送る。
+- Codexの結果を待つことだけを目的とする受動的なReview Taskは新規作成しない。
+- Work event trigger未導入・停止・miss時は既存Control Planeが自動fallbackする。manual `@codex review` は正常系ではなく例外経路とする。
+
 ## 3. Round 3 — Approach Refinement trigger
 
 同一subsystem、state transition、invariant、migration、retry/failure mode、provenance modelその他の同一領域について、3 substantive roundsまで新規findingが継続した場合は、patch-by-patch修正を停止してApproach Refinementへ戻る。
