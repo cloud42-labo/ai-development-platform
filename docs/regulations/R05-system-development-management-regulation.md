@@ -4,7 +4,7 @@
 > **規程ID:** R05  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-06 JST  
+> **最終改定日:** 2026-09-30 JST  
 > **関連規程:** R01 組織規程 / R02 職務権限規程 / R03 決裁規程 / R04 文書管理規程 / R06 プロジェクト管理規程  
 > **移管元:** `docs/operating-guide.md` §3、§4、§6、§9、§10、§11
 
@@ -40,7 +40,7 @@
 2. **Gate 2: Experimental移行判定** — デモが動作し、主要操作を確認でき、試作コードとして保持する価値があるか。
 3. **Gate 3: Project移行判定** — 正式な開発Projectとして継続する価値があるか。
 4. **Gate 4: Development移行判定** — Product Vision、要求、Acceptance Criteria、依存関係、対象Repository等、開発開始条件が揃っているか。
-5. **Gate 5: Release Candidate移行判定** — Acceptance Criteria、必要なテスト、レビューおよび品質条件を満たし、重大な未解決問題がないか。
+5. **Gate 5: Release Candidate移行判定** — Acceptance Criteria、必要なテスト、レビューおよび品質条件を満たし、重大な未解決問題がないか。Demo対象の変更では、第12条の2のDemo Delivery Completion Gateを満たしていることを含む。
 6. **Gate 6: Product化判定** — 継続提供する価値と品質があり、運用・改善を継続できるか。
 
 Product Planning以降へ進むProductは、当該Productへ関連付いたApproved状態のProduct Visionを持つことを原則とする。
@@ -106,6 +106,7 @@ Release Candidateでは、Productの性質に応じて次を確認する。
 3. 必要な実機・環境固有の検証。
 4. 運用可能性、Monitoring、Recovery、継続提供条件。
 5. PRD / Design Doc等の正本が実装済み仕様と同期していること。
+6. Demo対象のProduct / Taskでは、R04で定義するDemo Entry Pointから現在の実行可能Demoへ到達できること。
 
 Human-onlyの検証が必要な場合はR03に従う。
 
@@ -125,8 +126,24 @@ Product化後も、仕様・品質・運用状態を固定物として扱わず�
 4. unresolved P0/P1がなく、必須CIおよび現在の遷移に必要な検証が完了している。
 5. 必要な仕様・文書同期が完了している。
 6. NotionのResult、Time Event、Completed At、Status等の完了記録がR06 / R04に従って整合している。
+7. Demo対象Taskでは、第12条の2のDemo Delivery Completion Gateを通過している。
 
 詳細なDefinition of Doneは下位基準として管理する。
+
+## 第12条の2 Demo Delivery Completion Gate
+
+Demo Firstで進めるSoftware Productについて、Humanが実行結果を直接確認できる状態をTask完了の管理点とする。
+
+1. 対象TaskがUI、操作体験、実行可能アプリ、配布物その他Humanが触って確認すべき成果を変更する場合、当該Taskを**Demo対象Task**とする。
+2. Demo対象Taskは、実装完了だけではDoneにしない。少なくとも **Build / Test成功 → 必要なReview完了 → PR merge → Demo Entry Point更新 → Humanがアクセス可能であることの確認** を完了する。
+3. Demo Entry PointはR04に従い、ProductごとのGoogle Drive Demo領域の `latest` を共通入口とする。`latest` からGitHub Pages、Cloud Run、APK、Google Play testその他の現在のDemoへ到達できればよい。
+4. Demo配布方式はProduct特性に応じて選択し、GitHub Pages等の既存方式を一律にGoogle Drive内ファイルへ置換しない。
+5. Notionの `Demo URL` またはResultには、現在のDemo Entry Pointもしくは検証可能なDemo参照を記録する。
+6. `latest` が古い成果物を指す、リンク切れ、権限不足、404、インストール不能その他によりHumanが現在の成果へ到達できない場合、Gate未通過とする。
+7. Backend-only、文書、調査、内部Refactor等でHuman向け実行Demoが成果物ではないTaskは `Demo Gate = N/A` として扱い、Demo生成を形式的に要求しない。
+8. DemoへのHumanアクセス確認は「Human承認」を意味しない。AIがリンク到達性や配布状態を検証できる範囲はAIで確認し、実機操作そのものがAcceptance Criteriaである場合だけR03のHuman Gateを適用する。
+
+標準的なDemo対象Taskの完了順序は、**Implementation → Build/Test → Review/PR → Merge → Demo Delivery Gate → Done** とする。
 
 ## 第13条 例外
 
