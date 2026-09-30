@@ -52,7 +52,7 @@ If the Time Event is absent or still open, stop: the Task is not Done.
 
 ## Code Review Rules — Finding Quality Contract
 
-Codex Automatic Reviews / `@codex review` は、一般的な改善提案を列挙する場ではなく、**このPRをmergeすると具体的に壊れるものを検出するGate**として使う。詳細Authorityは [governance/review-loop-control.md](governance/review-loop-control.md)。
+Codex Automatic Reviewsは、一般的な改善提案を列挙する場ではなく、**このPRをmergeすると具体的に壊れるものを検出するGate**として使う。初回reviewはAutomatic Review、Review Fix後はPR head更新を起点にしたevent-driven re-reviewを正常系とする。Humanの`@codex review`手入力はevent trigger未導入・停止・miss時の例外fallbackに限定する。詳細Authorityは [governance/review-loop-control.md](governance/review-loop-control.md) と [governance/codex-review-event-loop.md](governance/codex-review-event-loop.md)。
 
 ### Finding Admission Gate
 

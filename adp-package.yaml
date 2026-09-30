@@ -38,11 +38,12 @@ schema_version: 0.1.0-experimental
 # governance/ai-execution-constraints.md, governance/source-of-truth.md,
 # governance/research-security-policy.md,
 # governance/review-loop-control.md,
+# governance/codex-review-event-loop.md,
 # governance/authority-stop-gate-regression-cases.md,
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md, docs/regulations/README.md and
 # R01-R06).
-rules_version: 3.6.0
+rules_version: 3.7.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -594,3 +595,23 @@ migration_path:
       actionable failure modes. Authors must disposition every applicable
       finding before re-review or Merge Ready. Re-reviews must verify prior
       blockers and the new delta before opening new blocking findings.
+
+  - field: rules_version
+    from: "3.6.0"
+    to: "3.7.0"
+    date: "2026-09-30"
+    change: >-
+      ADP-054-T21 / issue #82: adds governance/codex-review-event-loop.md
+      and makes PR head updates the normal trigger for current-head Codex
+      re-review after Review Fix. Review results route automatically to
+      Review Fix or the PR Flow / Merge Gate, with per-head idempotency and
+      a timed Control Plane fallback. MINOR per docs/versioning-policy.md:
+      this adds an event-driven control and fallback contract without
+      removing the existing review-quality, hard-cap, or authority gates.
+    action_required: >-
+      Where ChatGPT Work GitHub PR event triggers are available, configure
+      the commit-update and review-activity task defined in
+      governance/codex-review-event-loop.md and verify one end-to-end event
+      before marking it Active. Until that rollout evidence exists, keep the
+      existing Control Plane fallback enabled. Manual @codex review is not
+      the normal path once the event task is Active.
