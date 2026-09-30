@@ -92,7 +92,7 @@ routing済みEvidenceをPRに残す場合は次を使う。
 
 Work event taskが未設定・停止・event missした場合でも、PRを無期限にWAITING_REVIEWへ残さない。
 
-Chrisの `pr-flow-gate` はnon-draft PRについて、current head更新から30分以上経過しても次を両方満たす場合を `WAITING_REVIEW(event_trigger_missed)` とする。
+Chrisの `pr-flow-gate` はnon-draft PRについて、`pr-flow-gate` の `head_observed_at`（Gateがそのheadを初めて観測した時刻。PRの`updated_at`は他activityでも進むため使わない）から30分以上経過しても次を両方満たす場合を `WAITING_REVIEW(event_trigger_missed)` とする。
 
 - current-head Codex reviewが無い
 - 同一headの `adp-codex-review-request` markerが無い
@@ -100,6 +100,17 @@ Chrisの `pr-flow-gate` はnon-draft PRについて、current head更新から30
 この場合だけreview-round Gateを再確認し、許可されるならChrisが同一形式のrequestを `source=pr-flow-fallback` として1回投稿する。
 
 request markerが存在するのにreview結果だけが無い場合はtrigger missではない。Reviewer latency / availabilityとして扱い、重複requestを送らない。
+
+### 3.1 Reviewer-latency timeout
+
+request markerを送信済みでも、mentionが無視される・Reviewerが利用不能等の理由でreviewが永久に来ない場合がある。これを無期限のWAITING_REVIEWにしない。
+
+`pr-flow-gate` は、request marker投稿時刻（marker自体をPRへ投稿した時刻。Gateが自分で送信した場合はその実行時刻、`source=work-event`の場合はevent handlerがmarkerと合わせて記録した投稿時刻）から**60分以上経過してもcurrent headに対するCodex reviewが到着していない**場合を `WAITING_REVIEW(reviewer_latency_timeout)` として区別する。この場合、review-round Gate（hard cap / Owner承認）を再確認したうえで次のいずれかを行う。
+
+1. hard capにまだ余地があり、Owner承認が不要な範囲なら、同一headへ新しいround番号で1回だけ再requestする（`source=pr-flow-fallback-retry`）。以後の待機は新しいmarker投稿時刻から再度60分の猶予とする。
+2. 再requestも同様にtimeoutした、またはhard capで新規requestを送れない場合は、`pr-review-convergence` のReviewer unavailable fallback（Claude等の独立Final Reviewerへの切替）へ進める。Codex reviewが到着済みだが処理できていないだけの状態（reviewer_latency、review submission待ち）とは区別し、reviewer_latency_timeoutをEvidenceとしてTask Result/Blockerへ記録する。
+
+`reviewer_latency`（markerはあるがtimeoutにはまだ達していない通常の待機）と`reviewer_latency_timeout`（60分超過し次アクションが必要）は別状態として扱う。timeoutに達するまでは重複requestを送らない。
 
 ## 4. Manual request policy
 
