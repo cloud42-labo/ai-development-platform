@@ -73,11 +73,10 @@ workflow_version: 2.0.0
 # docs/versioning-policy.md ("a new optional section ... is added").
 templates_version: 1.2.0
 
-# Version of the Skills asset class: the executable procedures that install,
-# upgrade, validate and safety-check this package. Currently one Skill,
-# `adp-bootstrap`, which is hosted in cloud42-labo/skills (see
-# package/skills.md for the file-level index and `skills_source` below) and
-# NOT in this repository.
+# Version of the Skills asset class: executable procedures that install,
+# validate, safety-check, or execute governed package workflows. Packaged
+# Skills currently include `adp-bootstrap` and `postmortem-rca`, both
+# hosted in cloud42-labo/skills (see package/skills.md).
 #
 # This is the first version this class has carried. docs/v1-asset-inventory.md
 # (ADP-049-A) classified Skills as "not present in this repo" and deferred it
@@ -86,38 +85,36 @@ templates_version: 1.2.0
 # now exists — ADP-049-D/E/F1/F2 built plan/apply/doctor/scan_secrets — so the
 # field is added here rather than left implicit.
 #
-# Still 0.1.0: ADP-049-G's Clean Install E2E (2026-09-21) has now run this
-# Skill's install/doctor/scan_secrets path against a genuinely fresh, isolated
-# target and it passed — see this file's `version: 1.0.0` migration_path entry
-# for the run's evidence. That validates the Skill's current content; it is
-# not, by itself, a content change to the Skill (plan.py/apply.py/doctor.py/
-# scan_secrets.py were not modified to pass it), so per
-# docs/versioning-policy.md's Skills judgment (version by what changed for an
-# adopter, not by validation milestones) this field does not bump on that
-# basis alone. Two non-blocking gaps the E2E run surfaced — scan_secrets
-# literals missing from SOURCE_VALUES, and apply.py's up_to_date path not
-# repairing doctor-detected missing_files — are follow-up work tracked in
-# that migration_path entry, not yet fixed here.
-skills_version: 0.1.0
+# 0.2.0 (ADP issue #87): adds the `postmortem-rca` executable procedure
+# required by workflow_version 2.0.0. This is a backward-compatible added
+# Skill in the Skills class; the paired Workflow bump is MAJOR because the
+# governed Postmortem process now requires the RCA Quality Gate.
+skills_version: 0.2.0
 
 # Where the Skills asset class physically lives. Unlike the other four
 # classes, this one is not resolvable by a path relative to this repository,
 # so an adopter (or a doctor/plan run) needs the repository named explicitly.
 #
-# `ref` pins skills_version 0.1.0 to the exact commit that content was at
+# `ref` pins the primary Skills repository snapshot for the declared skills_version
 # when this field was added — the last commit under `path` before this
 # manifest change (`git log --oneline -- .claude/skills/adp-bootstrap` in
 # cloud42-labo/skills). `repository` + `path` alone point at a mutable
 # branch: checking out this ADP commit later would silently resolve to
 # whatever `cloud42-labo/skills#main` has become by then, while still
-# reporting `skills_version: 0.1.0`. Bump `ref` in lockstep with every
+# reporting a stale `skills_version`. Bump `ref` in lockstep with every
 # `skills_version` change; never leave it pointing past what that version
 # number claims.
 skills_source:
   repository: cloud42-labo/skills
   path: .claude/skills/adp-bootstrap
-  ref: 9043914 # cloud42-labo/skills@9043914 — content matching skills_version 0.1.0
+  ref: fb418b5fd6ee363f8f691909308cba42ef5b2d41 # paired skills PR #75 head; update if that head changes before merge
   index: package/skills.md
+
+skills_additional_sources:
+  - name: postmortem-rca
+    repository: cloud42-labo/skills
+    path: .claude/skills/postmortem-rca
+    ref: fb418b5fd6ee363f8f691909308cba42ef5b2d41
 
 # What an adopting agent/environment must have to operate this package as
 # intended. Not enforced by tooling here (no custom package manager) —
@@ -656,3 +653,19 @@ migration_path:
       Use the new analysis-quality fields for monthly reviews created on or
       after this version. Do not rewrite historical monthly reviews solely to
       populate the new fields.
+
+  - field: skills_version
+    from: "0.1.0"
+    to: "0.2.0"
+    date: "2026-10-02"
+    change: >-
+      ADP issue #87 adds postmortem-rca as a second packaged Skill. It is
+      the executable procedure behind the workflow_version 2.0.0 RCA Quality
+      Gate and provides evidence-first causal analysis, alternative
+      hypotheses, counterfactual validation, Regression Replay, and
+      independent-review checks.
+    action_required: >-
+      Install .claude/skills/postmortem-rca from the pinned
+      cloud42-labo/skills snapshot before adopting workflow_version 2.0.0.
+      The paired skills PR #75 must land before this package change merges;
+      if its head changes, refresh the pinned ref here before merge.
