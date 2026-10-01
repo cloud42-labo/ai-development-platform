@@ -73,14 +73,11 @@ test('generateMonthlyKpiReportFor renders a full report end-to-end without throw
         return { results: [doneTask({})], has_more: false }; // 1 closed
       }
       if (filter.indexOf('Pull Request') !== -1) {
-        const needle = body.filter.url.contains;
-        if (needle === 'acme/widgets/pull/1') {
-          return {
-            results: [{ properties: { 'Pull Request': { url: 'https://github.com/acme/widgets/pull/1' }, Product: { type: 'relation', relation: [{ id: 'prod-A' }] } } }],
-            has_more: false,
-          };
-        }
-        return { results: [], has_more: false };
+        assert.equal(body.filter.url.contains, 'acme/widgets/pull/');
+        return {
+          results: [{ properties: { 'Pull Request': { url: 'https://github.com/acme/widgets/pull/1' }, Product: { type: 'relation', relation: [{ id: 'prod-A' }] } } }],
+          has_more: false,
+        };
       }
       // Human Queue / WIP snapshot and any other Status-only filter.
       return { results: [{ properties: { Product: { type: 'relation', relation: [{ id: 'prod-A' }] } } }], has_more: false };
