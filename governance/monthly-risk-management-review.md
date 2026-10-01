@@ -127,7 +127,7 @@ At minimum record:
 - recurrence count/rate by rule family and Failure Layer;
 - RCA Quality Gate: Pass / Revise / Not Evaluated;
 - Root Cause Confidence: High / Medium / Low;
-- Preventive Action Effectiveness: Effective / Partial / Ineffective / Not Tested;
+- Preventive Action Effectiveness: Effective / Partial / Ineffective / Not Tested / N/A - Approved No Action;
 - Reanalysis Changed Conclusion count;
 - Regression Replay missing / failed count;
 - preventive tasks Open / Done / Blocked;
