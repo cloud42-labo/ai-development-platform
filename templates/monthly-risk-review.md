@@ -63,7 +63,7 @@ Flag any case where:
 
 ## Postmortem closure candidates
 
-For each candidate, confirm: RCA Quality=Pass; confidence Medium/High; causal model and alternative hypotheses recorded; preventive Task Done or approved no-action decision; action-to-cause counterfactual valid; durable control updated where required; original failure mode Regression Replay passed (or approved substitute evidence exists); effectiveness recorded; recurrence correct; no residual corrective action.
+For each candidate, confirm: RCA Quality=Pass; confidence Medium/High; causal model and alternative hypotheses recorded; preventive Task Done or approved no-action decision; action-to-cause counterfactual valid; durable control updated where required; original failure mode Regression Replay passed (or approved substitute evidence exists); effectiveness is `Effective` or `N/A - Approved No Action`, or a `Partial` / `Ineffective` / `Not Tested` result has an explicitly authorized residual-risk acceptance plus independent approval; recurrence correct; no residual corrective action.
 
 - 
 
