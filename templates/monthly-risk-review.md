@@ -24,7 +24,7 @@
 - Recurrence by rule family / Failure Layer:
 - RCA Quality — Pass / Revise / Not Evaluated:
 - Root Cause Confidence — High / Medium / Low:
-- Preventive Action Effectiveness — Effective / Partial / Ineffective / Not Tested:
+- Preventive Action Effectiveness — Effective / Partial / Ineffective / Not Tested / N/A - Approved No Action:
 - Reanalysis Changed Conclusion:
 - Regression Replay — Missing / Failed:
 - Preventive Tasks — Open / Done / Blocked:
@@ -44,7 +44,7 @@
 
 | Postmortem | RCA Quality | Confidence | Failure Layer | Action effectiveness | Reanalysis changed? | Regression replay | Decision |
 |---|---|---|---|---|---|---|---|
-| | Pass / Revise / Not Evaluated | High / Medium / Low | | Effective / Partial / Ineffective / Not Tested | Yes / No | Pass / Fail / Missing / N/A | Keep / Reanalyze / Strengthen |
+| | Pass / Revise / Not Evaluated | High / Medium / Low | | Effective / Partial / Ineffective / Not Tested / N/A - Approved No Action | Yes / No | Pass / Fail / Missing / N/A | Keep / Reanalyze / Strengthen |
 
 Flag any case where:
 - Low confidence has already moved to Actioning;
