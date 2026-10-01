@@ -79,7 +79,7 @@ The Notion `Root Cause Category` property remains the compatibility category use
 
 A Postmortem starts in `Open`. It MUST NOT move to `Actioning` merely because a plausible cause or action item has been written.
 
-Before `Actioning`, run the durable `postmortem-rca` procedure and confirm all of the following:
+Before `Actioning`, execute the following RCA Quality Gate. In Cloud42 operations, use the companion `postmortem-rca` Skill as the canonical executable procedure; the gate below remains self-contained so absence of that external Skill does not block an ADP adopter:
 
 1. **Evidence-first facts** — the material Timeline facts are backed by primary/secondary evidence; observation and interpretation are separated.
 2. **Expected control confirmed** — the rule/Skill/workflow/implementation that was actually effective at incident time has been checked.
@@ -193,7 +193,7 @@ A Postmortem's first analysis is written by the AI closest to the incident, whic
 A rule violation is not closed by documenting it. Follow this loop:
 
 1. **Record** — keep the Postmortem `Open`; write the standard sections and preserve primary evidence before committing to a cause.
-2. **Analyze with `postmortem-rca`** — build the evidence-backed causal model, test alternative hypotheses, assign Failure Layer and Root Cause Confidence, and decide recurrence by control-failure family.
+2. **Analyze with the RCA Quality procedure** — in Cloud42 use the companion `postmortem-rca` Skill; otherwise execute this document's self-contained steps. Build the evidence-backed causal model, test alternative hypotheses, assign Failure Layer and Root Cause Confidence, and decide recurrence by control-failure family.
 3. **Pass the RCA Quality Gate** — only `RCA Quality = Pass` with Medium/High confidence may move to `Actioning`. Low confidence remains `Open` with Investigate work.
 4. **Correct** — repair current task/evidence/state without erasing the fact that the violation occurred.
 5. **Design preventive work** — map each action to a causal node and run the counterfactual test. Do not accept symptom-only or `No effect` actions.
@@ -266,4 +266,4 @@ The objective is not to hide or minimize incident counts. It is to reduce recurr
 
 - `governance/ai-execution-constraints.md` — task placement and managed-work pre/post-flight gates.
 - `governance/research-security-policy.md` — external data, secrets, billing, and communication gates.
-- `cloud42-labo/skills/.claude/skills/postmortem-rca/SKILL.md` — executable RCA procedure used for analysis, reanalysis, counterfactual testing, regression replay, and monthly quality review.
+- `cloud42-labo/skills/.claude/skills/postmortem-rca/SKILL.md` — Cloud42 companion executable procedure for this self-contained RCA policy; useful operationally but not required for portable ADP package compliance.
