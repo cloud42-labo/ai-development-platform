@@ -58,7 +58,7 @@ rules_version: 3.7.0
 # docs/product-vision-quality-standard.md §11. MINOR per
 # docs/versioning-policy.md (new Gate/closure criterion, additive — an
 # adopter not yet invoking it is unaffected).
-workflow_version: 1.3.0
+workflow_version: 2.0.0
 
 # Version of the Templates asset class (templates/README.md,
 # templates/monthly-risk-review.md, templates/product-vision.md,
@@ -71,7 +71,7 @@ workflow_version: 1.3.0
 # Both are marked not required for Epics predating this change, so no prior
 # Epic Brief instance becomes non-conformant. MINOR per
 # docs/versioning-policy.md ("a new optional section ... is added").
-templates_version: 1.1.0
+templates_version: 1.2.0
 
 # Version of the Skills asset class: the executable procedures that install,
 # upgrade, validate and safety-check this package. Currently one Skill,
@@ -615,3 +615,43 @@ migration_path:
       before marking it Active. Until that rollout evidence exists, keep the
       existing Control Plane fallback enabled. Manual @codex review is not
       the normal path once the event task is Active.
+
+
+  - field: workflow_version
+    from: "1.3.0"
+    to: "2.0.0"
+    date: "2026-10-02"
+    change: >-
+      ADP issue #87 strengthens the Postmortem workflow with an RCA Quality
+      Gate, evidence-backed causal decomposition, alternative hypotheses,
+      Root Cause Confidence, counterfactual testing, and original-failure
+      Regression Replay. It also reconciles the monthly governance cadence
+      from the former first-Monday review to the current two-checkpoint
+      operating model: 25th MTD Risk Management Review and 1st previous-month
+      Final Review. MAJOR under docs/versioning-policy.md because the cadence
+      contract changes what a compliant monthly workflow must run.
+    action_required: >-
+      Replace any first-Monday Risk Review scheduler or checklist with the
+      25th MTD and 1st Final checkpoints. For new or reanalyzed Postmortems,
+      keep Status=Open until the RCA Quality Gate passes, map preventive work
+      to a demonstrated causal node, and use Regression Replay before
+      closure. The Cloud42 postmortem-rca Skill is a companion executable
+      procedure, not a package prerequisite; adopters can execute the
+      self-contained gate in the workflow document directly.
+
+  - field: templates_version
+    from: "1.1.0"
+    to: "1.2.0"
+    date: "2026-10-02"
+    change: >-
+      templates/monthly-risk-review.md adds the Postmortem analysis-quality
+      table and portfolio metrics for RCA Quality, Root Cause Confidence,
+      Failure Layer, preventive-action effectiveness, reanalysis changes,
+      and Regression Replay. Existing historical review records are
+      grandfathered and remain conformant; the added fields apply to reviews
+      created after this version. MINOR because prior instances are not made
+      non-conformant.
+    action_required: >-
+      Use the new analysis-quality fields for monthly reviews created on or
+      after this version. Do not rewrite historical monthly reviews solely to
+      populate the new fields.

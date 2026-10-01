@@ -73,7 +73,24 @@ Distinguish the **trigger** from the **root cause**.
 
 Prefer system/control explanations over actor labels. For example, use "the state-transition pre-check did not distinguish merge acceptance from downstream deployment acceptance" rather than "the reviewer was careless."
 
-The Notion `Root Cause Category` property remains the normalized category used for trend analysis.
+The Notion `Root Cause Category` property remains the compatibility category used for trend analysis. Because one coarse category can hide materially different failure mechanisms, every analysis MUST also record a concrete **Failure Layer** (for example Design Defect, Enforcement Defect, Execution-path Bypass, Verification Boundary Gap, Deployment Drift, Data Residue, Source-of-Truth Conflict, or Authority/Gate Boundary Error).
+
+### 5A. RCA Quality Gate — required before `Actioning`
+
+A Postmortem starts in `Open`. It MUST NOT move to `Actioning` merely because a plausible cause or action item has been written.
+
+Before `Actioning`, execute the following RCA Quality Gate. In Cloud42 operations, use the companion `postmortem-rca` Skill as the canonical executable procedure; the gate below remains self-contained so absence of that external Skill does not block an ADP adopter:
+
+1. **Evidence-first facts** — the material Timeline facts are backed by primary/secondary evidence; observation and interpretation are separated.
+2. **Expected control confirmed** — the rule/Skill/workflow/implementation that was actually effective at incident time has been checked.
+3. **Causal decomposition** — Trigger, Direct Failure, Enabling Condition, Detection Failure, Structural Root Cause, and Contributing Factors are separated.
+4. **Alternative hypotheses** — plausible competing causes are tested against supporting/contradicting evidence. If no credible alternative exists, record why.
+5. **Root Cause Confidence** — High / Medium / Low is explicit. Low confidence stays `Open` and produces Investigate work rather than a committed preventive fix.
+6. **Recurrence family** — recurrence is decided by shared control failure / causal node, not by similar wording or symptom.
+7. **Failure Layer** — the structural failure layer is explicit instead of relying only on a coarse Root Cause Category.
+8. **No premature action** — preventive work has not been selected merely to satisfy a template requirement.
+
+If any item is missing, mark the analysis `RCA Quality = Revise` (or record the same value in the body when the property is not yet available), keep the Postmortem `Open`, and create only the evidence-gathering / Investigate work needed to finish the analysis. When all items pass, record `RCA Quality = Pass` and the Postmortem may move to `Actioning`.
 
 ### 6. Lessons Learned
 
@@ -97,19 +114,23 @@ Do not erase or rewrite evidence of the original incident while correcting state
 
 ### 8. Action Items / Preventive Work
 
-Every material Postmortem must produce at least one concrete preventive action unless the independent reviewer explicitly documents why no preventive action is warranted.
+Every material Postmortem must either produce evidence-backed preventive work or explicitly document, with independent review, why additional preventive work would not reduce the identified risk. Do not create an action merely to satisfy the format.
 
 For each action item record:
 - objective;
 - type: Prevent / Mitigate / Detect / Investigate;
+- **target causal node** — which Trigger / Direct Failure / Enabling Condition / Detection Failure / Structural Root Cause it addresses;
 - owner or assigned agent;
 - linked Notion Task;
 - verifiable completion condition;
-- durable control destination (`Operating Guide`, `AGENTS.md`, Skill, workflow, automated check, etc.).
+- durable control destination (`Operating Guide`, `AGENTS.md`, Skill, workflow, automated check, etc.);
+- **counterfactual result** — if this control had existed at incident time, would the same trigger still have reached the same incident? Record `Prevented`, `Detected earlier`, `Mitigated only`, `No effect`, or `Unknown`.
+
+A proposed Prevent / Detect / Mitigate action with no target causal node, or with a `No effect` / `Unknown` counterfactual, MUST NOT be accepted as preventive work. `Unknown` means the analysis still needs Investigate work; an Investigate action may target an explicit evidence gap or competing hypothesis instead of a confirmed causal node. `Detected earlier` and `Mitigated only` are valid controls, but must be typed accurately rather than mislabeled as prevention.
 
 Action items should improve the system, not instruct an individual to "be more careful."
 
-When the root cause is a missed execution-time control, documentation-only action is insufficient unless the review explains why an executable control is impossible or disproportionate.
+When the root cause is a missed execution-time control, documentation-only action is insufficient unless the review explains why an executable control is impossible or disproportionate. Before adding a new gate, also check for false Human gates, authority drift, duplicated procedure copies, and avoidable operational burden.
 
 ### 9. AI-native Gate Boundary Review
 
@@ -157,25 +178,29 @@ A Postmortem's first analysis is written by the AI closest to the incident, whic
 - **Human review is scoped to Human-only judgment.** Route a Postmortem to a Human reviewer only when the review question is itself Human-only (legal exposure, cost/billing decisions, authority the AI does not hold) — not as a general substitute for the AI pairing above.
 - **Minimum review criteria.** The reviewer MUST check, at minimum:
   1. **Facts** — do the described event and evidence match what actually happened (commits, PRs, Task/Time records, logs)?
-  2. **Cause-and-effect** — does the causal chain from trigger to impact actually hold, or does it skip steps / assume a link that isn't shown?
-  3. **Root Cause classification** — is the Root Cause Category correct, or does the author's framing (e.g. blaming an actor instead of a missing gate) misclassify it?
-  4. **Preventive Action fit** — does the Preventive Action actually address the recorded root cause, or does it treat a symptom / a different cause?
-  5. **No new false gate** — does the Preventive Action introduce a new Human/Stop Gate that isn't actually required, echoing the false-gate failure mode this loop exists to reduce?
-  6. **Format completeness** — are Impact, Timeline, Detection, Root Cause/Trigger, Lessons Learned, Gate Boundary Review, Evidence, and Action Items complete enough to support the conclusion?
+  2. **Cause-and-effect** — does the causal chain from Trigger → Direct Failure → Enabling Condition / Detection Failure → Structural Root Cause actually hold, or does it skip steps / assume a link that isn't shown?
+  3. **Alternative hypotheses / confidence** — were credible alternatives tested, and is the stated Root Cause Confidence justified by the evidence?
+  4. **Root Cause classification** — do Root Cause Category and Failure Layer describe the demonstrated mechanism rather than collapse it into a generic label?
+  5. **Preventive Action fit** — does every action name the causal node it targets, and does its counterfactual show a real Prevent / Detect / Mitigate effect rather than symptom treatment?
+  6. **No new false gate** — does the Preventive Action introduce a new Human/Stop Gate, authority drift, duplicated procedure, or disproportionate burden?
+  7. **Regression replay adequacy** — does the retest exercise the original failure mode rather than only a nearby happy path?
+  8. **Format completeness** — are Impact, Timeline, Detection, Expected Control, Causal Model, Failure Layer, Alternative Hypotheses, Confidence, Counterfactual, Gate Boundary Review, Evidence, and Action Items complete enough to support the conclusion?
+  9. **No-action validity** — if no new preventive action is proposed, is that conclusion evidence-backed rather than a convenience closure?
 - **Record the review**, not just its outcome: which criteria were checked, what (if anything) the reviewer changed, and the reviewer's identity. This is tracked on the Postmortem record (`Author`, `Reviewer`, `Review Status`, `Review Notes`) alongside the existing fields. `Author` is who wrote the first analysis — set it explicitly rather than assuming it equals `Owner` (`Owner` is who is accountable for the incident/Postmortem, which is not always the same actor who drafted the analysis; comparing `Reviewer` against `Owner` instead of `Author` would let the actual drafter review their own text merely because someone else was recorded as `Owner`).
 
 ## Required loop
 
 A rule violation is not closed by documenting it. Follow this loop:
 
-1. **Record** — write the standard Postmortem sections and preserve primary evidence.
-2. **Analyze** — identify trigger, direct cause, structural root cause, contributing factors, and the exact failed state-transition/gate boundary. Prefer causes that explain why the control failed, not labels about the actor.
-3. **Correct** — repair current task/evidence/state without erasing the fact that the violation occurred.
-4. **Create preventive work** — create an explicit preventive Task. New affiliation follows the normal placement pre-flight; if placement is not evidenced, use MISC / Backlog.
-5. **Make the control executable** — update the appropriate Operating Guide, `AGENTS.md`, Skill, workflow, automated check, or pre/post-flight gate. Documentation-only action is insufficient when the cause was a missed execution-time check.
-6. **Retest** — run a representative managed-work scenario after the preventive control is implemented and preserve evidence that the new gate was applied before the risky action.
-7. **Independent review** — a different AI reviews the facts, causal model, preventive-action fit, format completeness, and false-gate risk.
-8. **Close** — close the Postmortem only after preventive work is Done, the retest passes, and independent review is Approved.
+1. **Record** — keep the Postmortem `Open`; write the standard sections and preserve primary evidence before committing to a cause.
+2. **Analyze with the RCA Quality procedure** — in Cloud42 use the companion `postmortem-rca` Skill; otherwise execute this document's self-contained steps. Build the evidence-backed causal model, test alternative hypotheses, assign Failure Layer and Root Cause Confidence, and decide recurrence by control-failure family.
+3. **Pass the RCA Quality Gate** — only `RCA Quality = Pass` with Medium/High confidence may move to `Actioning`. Low confidence remains `Open` with Investigate work.
+4. **Correct** — repair current task/evidence/state without erasing the fact that the violation occurred.
+5. **Design preventive work** — map each action to a causal node and run the counterfactual test. Do not accept symptom-only or `No effect` actions.
+6. **Make the control executable** — update the appropriate Regulation/governance artifact, `AGENTS.md`, Skill, workflow, automated check, or pre/post-flight gate. Documentation-only action is insufficient when the cause was a missed execution-time check.
+7. **Regression replay** — reproduce the original incident scenario as closely as practical after implementation. A generic representative test is insufficient if it does not exercise the original failure mode; if replay is impossible, record why and preserve an approved alternative test plus residual risk.
+8. **Independent review** — a different AI re-checks facts, causal model, alternative hypotheses, confidence, action-to-cause fit, counterfactual validity, false-gate risk, and replay adequacy.
+9. **Close** — close only after preventive/investigative work is Done, replay/alternative evidence passes, effectiveness is established or risk is explicitly accepted within authority, and independent review is Approved.
 
 ## Control destination by cause
 
@@ -198,13 +223,18 @@ From incident detection until the preventive Task is implemented and retested, t
 A Postmortem can be closed only when all are true:
 
 - the standard Postmortem sections are complete enough to reproduce the factual and causal chain;
-- root cause, trigger, and existing rule are recorded;
+- `RCA Quality = Pass`;
+- Root Cause Confidence is Medium or High;
+- Trigger, Direct Failure, Enabling Condition, Detection Failure, Structural Root Cause, Failure Layer, and the incident-time Expected Control are recorded;
+- credible alternative hypotheses were evaluated or their absence justified;
 - Impact, Timeline, Detection, Lessons Learned, Gate Boundary Review, and Evidence are recorded;
-- preventive Task is linked and Done;
+- preventive/investigative Task is linked and Done, or an evidence-backed no-additional-action decision is independently Approved;
+- every Prevent / Detect / Mitigate action names its target causal node and has a resolved counterfactual result of `Prevented`, `Detected earlier`, or `Mitigated only`; `Unknown` remains investigation-only and is not closure-eligible as preventive work;
 - each preventive action has a verifiable completion condition;
-- the durable control destination is updated;
-- a representative retest passed;
-- evidence of the retest is recorded;
+- the durable control destination is updated where required;
+- the original failure mode was exercised by Regression Replay, or replay impossibility + alternative evidence + residual risk was independently Approved, or an evidence-backed no-additional-action decision records `Regression Replay = N/A - Approved No Action` with independent approval;
+- evidence of the replay/alternative test, or the approved no-action rationale, is recorded;
+- if preventive work exists, Preventive Action Effectiveness is `Effective`; `Partial`, `Ineffective`, or `Not Tested` blocks closure unless residual risk is explicitly accepted within authority and independently Approved. If no preventive action is warranted, record `N/A - Approved No Action`;
 - recurrence status is correct;
 - no unresolved corrective action remains;
 - **an AI-caused Postmortem has completed independent review by a different AI** (see "Independent review" above), with `Reviewer` ≠ `Author` (the actor who wrote the first analysis — not necessarily `Owner`) and `Review Status = Approved`.
@@ -218,7 +248,12 @@ If the same rule fails again before these criteria are met, the earlier Postmort
 Portfolio-level governance should periodically review at least:
 
 - violation count;
-- recurrence rate by rule family;
+- recurrence rate by rule family / Failure Layer;
+- RCA Quality Gate: Pass / Revise / Not Evaluated;
+- Root Cause Confidence: High / Medium / Low;
+- reanalysis-changed-conclusion count;
+- Preventive Action Effectiveness: Effective / Partial / Ineffective / Not Tested / N/A - Approved No Action;
+- Regression Replay missing / failed count;
 - time from trigger to detection where timestamps exist;
 - time from detection to preventive-action Done;
 - Human vs AI-self vs other-AI vs automated detection path;
@@ -231,3 +266,4 @@ The objective is not to hide or minimize incident counts. It is to reduce recurr
 
 - `governance/ai-execution-constraints.md` — task placement and managed-work pre/post-flight gates.
 - `governance/research-security-policy.md` — external data, secrets, billing, and communication gates.
+- `cloud42-labo/skills/.claude/skills/postmortem-rca/SKILL.md` — Cloud42 companion executable procedure for this self-contained RCA policy; useful operationally but not required for portable ADP package compliance.
