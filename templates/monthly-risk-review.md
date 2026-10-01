@@ -1,6 +1,7 @@
 # Monthly Risk Management Review — YYYY-MM
 
-- **Review period (JST):** YYYY-MM-01 00:00 — YYYY-MM-DD 23:59
+- **Checkpoint:** 25th MTD Risk Review / 1st Previous-month Final Review
+- **Review period (JST):** for 25th = current month-to-date; for 1st = complete previous calendar month
 - **Review date/time (JST):**
 - **Actors:** Owner / Chris / Claude / others as applicable
 
