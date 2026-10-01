@@ -32,6 +32,7 @@ repository. Fetching this class is a separate step from cloning ADP.
 | [`scripts/doctor.py`](https://github.com/cloud42-labo/skills/blob/main/.claude/skills/adp-bootstrap/scripts/doctor.py) | Checks version consistency, missing/drifted files, required capabilities and unapplied migrations; exits 0/1 (ADP-049-F1) |
 | [`scripts/scan_secrets.py`](https://github.com/cloud42-labo/skills/blob/main/.claude/skills/adp-bootstrap/scripts/scan_secrets.py) | Scans the resolved distribution file set for secrets, personal values and Cloud42-specific IDs/URLs (ADP-049-F2) |
 | [`references/config-mapping.md`](https://github.com/cloud42-labo/skills/blob/main/.claude/skills/adp-bootstrap/references/config-mapping.md) | Which environment-specific values an adopter supplies, and where each is substituted |
+| [`postmortem-rca/SKILL.md`](https://github.com/cloud42-labo/skills/blob/main/.claude/skills/postmortem-rca/SKILL.md) | Evidence-first Postmortem RCA procedure: causal decomposition, alternative hypotheses, counterfactual testing, Regression Replay, and independent review |
 
 ## Known gap: this class is not yet self-checking
 
