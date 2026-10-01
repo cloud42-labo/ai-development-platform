@@ -8,10 +8,11 @@ Once per month, decide which AI operating risks require stronger controls, Owner
 
 ## Cadence and cutoff
 
-- Review period: previous calendar month, JST.
-- Standard meeting point: the first Monday of each month after the normal weekly planning chain; target **12:00 JST** so the 08:00 weekly close, 09:00 AOD publishing, 10:00 Chris autonomous execution, and 11:00 Claude autonomous execution can complete first.
-- Cutoff: 23:59 JST on the final day of the previous month.
-- Material incidents discovered after cutoff remain eligible for immediate escalation and are not delayed merely to fit the calendar.
+- **25th JST — MTD Risk Management Review:** review the current month through the latest evidence on the 25th. Identify recurrence, weak controls, Postmortem RCA-quality problems, KMI deterioration, and corrective work that should still be acted on within the month. Open material risks from earlier periods remain in scope until closed.
+- **1st JST — Previous-month Final Review:** finalize the complete previous calendar month (cutoff 23:59 JST on its final day), including KPI/KMI and risk results, and connect findings through Management Point → KPI → KMI → structural problem → countermeasure → Backlog/Sprint/source-of-truth update.
+- The 1st Final Review consumes the 25th Risk Review decisions plus evidence from the remaining days; it does not repeat the investigation from scratch.
+- No exact clock time is defined here. The active scheduler/Automation is the timing source of truth; Notion Job Schedule is its synchronized human-readable view.
+- Material incidents remain eligible for immediate event-driven escalation and Postmortem handling; neither checkpoint delays action until the calendar date.
 
 ## Roles
 
