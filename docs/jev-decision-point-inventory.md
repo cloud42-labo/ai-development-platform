@@ -2980,3 +2980,232 @@ False-escalation/Missed-escalation等の実測値はまだ存在しない。こ�
 先送りしていたDP-9の方法論判断（§8.5.1）を確定し、DP-9・DP-10双方のfixtureを
 request schemaとして送信可能な状態まで進めた。ライブ実行自体は、Jev認証Secretが
 利用可能な別セッション（`ADP-065-T04`、またはT03の追加パス）へ引き継ぐ。
+
+### 9.9 2026-10-01追記 — T03最終パス: DP-9・DP-10ライブ実行結果（本セッション）
+
+**Status**: §9.8が「このセッションの実行環境には認証Secretが注入されておらず、
+DP-9・DP-10のライブ呼び出しを一切実行していない」と記録した状態を、本継続セッションが
+解消する。Owner（駒場さん）本人が実際にClaude Code Cloud Environment設定画面を開き、
+「API認証情報」機能に`TYPESAFE_API_KEY`が`api.typesafe.ai`向けにバインド済みである
+スクリーンショットを示して確認した——この機構は値をセッションへ一切露出せずに呼び出し時点で
+認証情報を注入するため、`env | grep -i typesafe`が何も見つけなかったこと（§9.8の記録）自体は
+認証が無いことの証拠にならない。本セッションはこれをOwner確認済みの事実として受け取り、
+`TYPESAFE_API_KEY`を環境変数として探す/要求することをやめ、素のHTTPSで
+`https://api.typesafe.ai/v1/systemone`へ直接POSTした。
+
+**接続確認（実データ送信前）**: `GET https://api.typesafe.ai/v1/models`をAuthorization
+ヘッダ無しで実行し、`200 OK`で`{"models":[{"name":"jev-latest",...},{"name":"jev-preview",...}]}`
+を受領した（本書・ログにkey文字列は一切出力していない——そもそも参照していない）。
+
+**実データ送信結果**: DP-9 10 fixture × 4回（初回1回＋reproducibility 3回）＝40呼び出し、
+DP-10 4 fixture × 4回＝16呼び出し、合計56呼び出しすべてで`HTTP 200`を受領した。`401`・`403`は
+一度も発生しなかった。全56回で`response.model == "jev-1.13.0"`を確認済み（§8.0.3のモデル固定
+要件、DP-4と同じ検証）。送信・解析スクリプトおよび生データ:
+`evidence/adp-065-t03/jev_dp9_dp10_poc.py`（送信）、
+`evidence/adp-065-t03/analyze_dp9_dp10.py`（集計）、
+`evidence/adp-065-t03/dp9_raw_results.json`・`evidence/adp-065-t03/dp10_raw_results.json`（生応答）。
+
+**API呼び出し形状**: §9.2が確定した実スキーマに従い、DP-9は1回のHTTP POSTへ
+`policy_fit_choice`（Choice、§8.2.3の3択）と`ai_workdays_score`（Score、§8.2.3の9要素帯
+`criteria`配列）の2つの`questions`を同時に含めて送信した（§5のAdapter shapeが
+`typed_question`単位の独立`decide()`呼び出しとして定義する「独立性」は、§8.0.1の
+budget式が定める「fixtureあたり8回＝初回Choice 1回＋Score 1回＋reproducibility 2×3=6回」
+という**回答単位**のカウントとして維持しており、HTTPリクエスト自体を2本に分けるという意味
+ではないと解釈した——1 HTTPコールで2つの独立した`answers`エントリを受け取れることを
+§9.2のレスポンス形状`{model, answers: {<question名>: <Answer>}, usage}`で確認済み）。
+DP-10は1回のHTTP POSTへ`duplicate_noul`（Noul）を1つだけ含めて送信した。
+
+#### 9.9.1 DP-9: 補正したground truthの確定（Accuracy/Calibration専用、§8.5.4の積み残し解消）
+
+§8.5.4は、Accuracy/Calibration/False-escalation/Missed-escalationの対象範囲確定
+（§8.2.4 step 1〜5）を「ADP-057のTask Time Eventsに約100時間という1 AI working dayの
+定義と正面から矛盾する異常値がある」ことを理由に積み残していた。本セッションは、この
+異常値そのものを正本として使うのではなく、**Notion Stories & Tasksの`Started At`・
+`Completed At`（またはSuperseded実例では`Closed At`）のwall-clock経過時間と、各Taskの
+`Result`本文に記録された実際の完了結果（AC達成/未達、Superseded/Done、再分割の有無）**を
+独立代替エビデンスとして10件全件について直接確認した——異常なTask Time Events合計値
+（ADP-057の約100時間1件）は本節のいずれの判定にも使っていない。
+
+| # | Notion対象 | Started At → Completed/Closed At（wall-clock） | 実際の結果（Result本文） | 補正後ground truth | 主要指標へのadmit |
+|---|---|---|---|---|---|
+| DP9-01 | ADP-051 | 2026-09-03 09:54 → 2026-09-04 23:23（約37h29m） | 34 review roundsの末にOwner裁定でSuperseded、5分割（ADP-051-A〜E） | `needs-split`（既存判断を維持、循環なし） | Admit |
+| DP9-02 | ADP-051-B2/B3 | 2026-09-13 04:20/04:50 → 2026-09-13 22:09（約17h19m〜17h49m） | PR #50が9 review roundsに到達、実バグ20件超検出の末にSuperseded、B4/B5/B6へ再分割 | `needs-split`（既存判断を維持） | Admit |
+| DP9-03 | ADP-051-B | 2026-09-12 04:20 → 2026-09-12 13:58（約9h38m、8h超） | NotionのStatusフィールドは`Done`と表示されているが、`Closure Reason`は`Superseded`、Result本文は「Work Type判定本体はAC未達のためDaily CloseでCarry Overせず…本TaskをSupersededでクローズ」と明記——Status表示とClosure Reason/Resultが食い違うデータ品質上の不整合を発見 | **`needs-split`（補正）**——§8.2.2がAC自体の事前見積もりのみを根拠にしていた循環参照`fits-as-is`を、Result本文という独立した実行結果の記述で置き換えて解消 | Admit（補正） |
+| DP9-04 | BUG-ADP-TTE-01-B | 2026-09-11 04:16 → 2026-09-11 09:58（約5h42m、8h以内） | PR #46をChrisが最終確認しsquash merge、ACは達成（ただしstop側/self-closeは着手前のApproach Decision時点で別Taskへ切り出し済みのスコープ） | `fits-as-is`（凍結済みAC自体が既にこの縮小スコープを記述しているため、このAC記述に対する判定としては確認済み） | Admit |
+| DP9-05 | ADP-057 | Created 2026-09-05 → Completed 2026-09-21（約16日、複数セッション窓にまたがり都度部分進捗） | Type=Story（DP-9が対象とする単一Taskではなく、本来複数Subtaskの集合）。13:00/17:00等複数の実行窓で段階的にAC未達→一部修正→最終達成という経過を辿った | **`needs-split`（補正）**——§8.2.2がPR作成〜merge時刻という部分的代理指標だけで`fits-as-is`としていたものを、Created→Completedの全期間（16日）とResult本文の経過記述で置き換え | Admit（ただしType=Storyであるという母集団不一致を別途注記） |
+| DP9-06 | ADP-053 | 2026-09-05 04:20 → 2026-09-05 09:40（約5h20m、8h以内） | 同日中に廃止手順を一括完了、PR #27をsquash merge | `fits-as-is`（既存判断を維持、独立エビデンスで確認） | Admit |
+| DP9-07 | ADP-055 | 2026-09-11 09:45 → 2026-09-12 10:46（約25h01m、暦日をまたぐ） | PR #48 merge後、月次KPI用Apps Scriptのデプロイ・トリガー設定が別日に完了 | `fits-as-is`（元の判断を積極的に否定する証拠はない） | **Admit しない**——経過時間が8hを超えるが、夜間のWaiting区間を個別に検証・控除できておらず（§8.2.4 step 5が要求する手続きを未実施）、単純な経過時間だけでは確定も否定もできない |
+| DP9-08 | ADP-044-D | 2026-09-14 04:03 → 2026-09-22 05:26（約8日1h、193h超） | Result本文: 「main競合を通常merge commitで解消。Codex未解決P1×3（PRD埋込Visionの監査契約不足、transition-specific evidence sufficiency不足、workflow package index欠落）を同一PRで修正」。Assigned Agent=ChatGPT、Claudeが独立レビュー・merge | **`needs-split`（補正）**——§8.2.2がPR作成〜merge時刻の代理指標だけで`fits-as-is`としていたが、実際のライフサイクル全体は8日に及び、main競合解消＋Codex P1 3件の修正という実質的な複数ラウンド作業を要した | Admit（補正） |
+| DP9-09 | ADP-059-E | Started At 2026-09-06 03:59のみ、Completed Atなし（Status=Review） | §8.5.3が既に記録した通りDone未到達。本セッションも`Completed At`を確認できなかった | （判定不能） | Admit しない（完了エビデンス自体が存在しない） |
+| DP9-10 | BUG-ADP-TTE-01-A | Started At 2026-09-11 21:01のみ、Completed Atなし（Status=Review） | 同上、Done未到達 | （判定不能） | Admit しない（同上） |
+
+**結果**: 主要指標（Accuracy/False-escalation/Missed-escalation）へadmitできる実例は
+**10件中7件**（DP9-01, 02, 03, 04, 05, 06, 08）。3件（DP9-07, 09, 10）は本セッションでも
+独立エビデンスが確定せず、admitしない（捏造や推測での繰り上げはしていない）。このうち
+DP9-03・DP9-05・DP9-08の3件は、§8.2.2の時点とground truthの値自体が変わった
+（`fits-as-is`→`needs-split`）補正であることを明記する——これは本セッションが新しい
+Notion一次データ（`Started At`/`Completed At`/`Closed At`とResult本文）に直接
+アクセスしたことで可能になった修正であり、Jevの出力を見た後に確定したものではない
+（ground truthの確定は§9.9.2のJev応答集計より前に完了させた）。
+
+#### 9.9.2 DP-9ライブ実行結果（Choice + Score、全10 fixture・40呼び出し）
+
+| # | 初回Choice | choice_confidence | mapped_score_band | score_confidence | 最終決定 | 4回のreproducibility | 補正GT | Admit | 一致 |
+|---|---|---|---|---|---|---|---|---|---|
+| DP9-01 | `needs-split` | 0.47 | 7（1週間以内） | 0.42 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `needs-split` | ✓ | ✅ |
+| DP9-02 | `needs-split` | 0.43 | 4（2日以内） | 0.49 | escalate | choice 4/4一致、**band不安定**（4回中3回がband4、1回がband5——隣接帯の僅差ties） | `needs-split` | ✓ | ✅ |
+| DP9-03 | `fits-as-is` | 0.37 | 2（1日以内） | 0.90 | escalate（`choice_confidence`未達のみが原因、score側は両条件とも充足） | choice 4/4一致、band 4/4一致、final 4/4一致 | `needs-split` | ✓ | ❌ |
+| DP9-04 | `fits-as-is` | 0.52 | 5（3日以内） | 0.29 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `fits-as-is` | ✓ | ✅ |
+| DP9-05 | `needs-split` | 0.99 | 8（1ヶ月超） | 0.37 | escalate | choice 4/4一致（4回ともconfidence 0.99固定）、band 4/4一致、final 4/4一致 | `needs-split` | ✓ | ✅ |
+| DP9-06 | `needs-split` | 0.60 | 7（1週間以内） | 0.34 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `fits-as-is` | ✓ | ❌ |
+| DP9-07 | `needs-split` | 0.89 | 7（1週間以内） | 0.39 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `fits-as-is` | （Admit外） | — |
+| DP9-08 | `needs-split` | 0.80 | 7（1週間以内） | 0.37 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `needs-split` | ✓ | ✅ |
+| DP9-09 | `fits-as-is` | 0.55 | 5（3日以内） | 0.27 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | （判定不能） | （Admit外） | — |
+| DP9-10 | `fits-as-is` | 0.40 | 5（3日以内） | 0.32 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | （判定不能） | （Admit外） | — |
+
+**Accuracy（raw Choice、admit 7件）**: 5/7 = **71.4%**（誤り2件: DP9-03は`fits-as-is`と
+誤判定［正解`needs-split`、循環を解消して補正した値］、DP9-06も`needs-split`と正しく判定した
+はずが実際はground truth自体が`fits-as-is`——raw Choiceが`needs-split`でground truthが
+`fits-as-is`という逆方向の誤りで、両者は異なる誤りパターンである）。
+
+**Calibration（admit 7件、サンプル小のため参考値）**: `choice_confidence`を4帯へ区切った
+reliability内訳は次の通り。
+
+| confidence帯 | 件数 | 正解数 | 的中率 |
+|---|---|---|---|
+| 0.3以上0.5未満 | 3（DP9-01, 02, 03） | 2（DP9-03が誤り） | 66.7% |
+| 0.5以上0.7未満 | 2（DP9-04, 06） | 1（DP9-06が誤り） | 50.0% |
+| 0.7以上0.9未満 | 1（DP9-08） | 1 | 100.0% |
+| 0.9以上1.0以下 | 1（DP9-05） | 1 | 100.0% |
+
+confidence帯が上がるほど的中率も上がる弱い傾向は観測されるが、n=7（かつ各帯1〜3件）
+では統計的に意味のあるcalibration結論は出せない。DP-4（客観4件が全てconfidence 1.00に
+集中）とは対照的に、DP-9のraw Choice confidenceは0.37〜0.99へ広く分布しており、
+この点自体がDP-9の判定（sizing judgment）がDP-4の統制された境界分類より本質的に
+不確実性の高いタスクであることを示している。
+
+**最重要の構造的発見——no-escalateパスが一度も発火しなかった**: §8.2.3が定める
+最終決定の4条件（`choice=fits-as-is` かつ `choice_confidence>=0.7` かつ
+`score_confidence>=0.7` かつ `mapped_score_band==2`）は、**10 fixture×4回＝40回の
+呼び出し全件で一度も同時に満たされなかった**。raw Choiceが`fits-as-is`だった4 fixture
+（DP9-03, 04, 09, 10）のいずれにおいても、4回の試行全てで`choice_confidence`が0.7を
+一度も超えなかった（観測範囲: 0.31〜0.55）。これはfixture固有の偶然ではなく、
+この10件という比較的小さいサンプル全体を通した一貫した傾向であり、**現在の仕様
+（Choice・Score・帯の3つのAND条件、かつ閾値0.7）は、今回の実例群に対しては
+「高confidence・低摩擦の一次分類をFinalizeへ添付する」no-escalateパスを事実上
+一度も通さない**ことを意味する。Finalizeモード自体は省略されない（§8.2.3の設計通り）ため、
+Taskの処理自体に支障はないが、**DP-9導入の主要な期待効果（高confidenceな
+`fits-as-is`判定をFinalizeへの入力として活用し摩擦を下げること）が、現行の閾値・
+AND条件設計のままでは実質的に機能しない**可能性を示す一次エビデンスとして、
+T04が閾値の見直し（ただし§8.2.3が定める通り、評価結果を見てから事後的に選び直す
+ことは禁止——独立したholdoutセットでの事前較正が必要）を検討する際の判断材料として記録する。
+
+**False-escalation rate（ground truth=`fits-as-is`の2件、DP9-04・DP9-06が分母）**:
+2/2 = **100%**。DP9-04は raw Choiceこそ正しく`fits-as-is`を返したが`choice_confidence`
+（0.52）が閾値未満、DP9-06はraw Choice自体が`needs-split`（ground truthと不一致）——
+原因は異なるが、いずれも最終決定はescalateとなり、false escalationとしてカウントされる。
+
+**Missed-escalation rate（ground truth=`needs-split`の5件、DP9-01/02/03/05/08が分母）**:
+0/5 = **0%**。安全上最も重視すべきこの指標は今回も0を維持した——Jevが`needs-split`な
+実例を`no-escalate`として見逃した例は1件もない。
+
+**Reproducibility**: `choice`は10 fixture全件で4回とも完全一致。`mapped_score_band`は
+DP9-02の1件のみ4回中1回（call 3）が隣接帯（band 4→5）へ変動し、残り9 fixtureは完全安定。
+この結果、**thresholded最終決定（no-escalate/escalate）は10 fixture全件で4回とも完全に
+安定していた**（band変動したDP9-02も、どちらの帯でも`score_confidence`が0.7未満のため
+最終決定はescalateのまま変わらない）。
+
+**Latency**: 10 fixtureの初回呼び出し（`call_index==0`）でp50=306ms、p95=700ms
+（最小289ms、最大700ms——最大値はDP9-01の初回呼び出しで、cold-start的な単発の
+遅延と見られ、以降の呼び出しは全て400ms未満）。参考情報として、40回全体
+（初回10回＋reproducibility 30回）ではp50=323ms、p95=374ms。
+
+**Cost**: 初回10回のみ: input tokens合計10,694 → $0.000449。40回全件
+（初回10回＋reproducibility 30回）: input tokens合計42,776 → **$0.001797**
+（$0.042/MTok、DP-4と同じ単価）。レート制限・再試行は一度も発生しなかった
+（56回全て初回で`200 OK`）。
+
+#### 9.9.3 DP-10ライブ実行結果（Noul、全4 fixture・16呼び出し）
+
+| # | 初回noul（yes確率） | 判定（閾値0.7） | 4回のreproducibility | Ground truth | 一致 |
+|---|---|---|---|---|---|
+| DP10-06 | 0.38 | not-duplicate | [0.38, 0.38, 0.38, 0.37]（実質完全安定） | `duplicate=Yes` | ❌ |
+| DP10-07 | 0.78 | duplicate | [0.78, 0.79, 0.78, 0.80]（実質完全安定） | `duplicate=Yes` | ✅ |
+| DP10-08 | 0.04 | not-duplicate | [0.04, 0.04, 0.04, 0.04]（完全一致） | `duplicate=No` | ✅ |
+| DP10-09 | 0.05 | not-duplicate | [0.05, 0.05, 0.04, 0.05]（実質完全安定） | `duplicate=No` | ✅ |
+
+**Accuracy（4件全件、ただし§8.6.3末尾が明記する母集団定義とのズレ——「新規Task候補 対
+既存Technical Task／候補無し」であり文字通りの「新規MISC/Backlogアイテム」ではない点は
+注記のまま維持）**: 3/4 = **75%**。唯一の誤りはDP10-06——運用上は新規Task起票を見送り
+既存Task（ADP-044-D）のnext actionを更新する判断（duplicate=Yes相当）が取られたが、
+Jevはyes確率0.38（4回とも0.37〜0.38で安定）と、重複ではないと判定した。この実例は
+ADP-044-Dの本文（Vision品質基準・承認Gateの策定）と新規項目（PR #53のconflict解消
+フォローアップ）の関係が、字面上の重複ではなく「同じTaskの成果物に対するフォローアップ」
+という間接的な関係であり、Jevが字面の重複度が低いと判定した可能性がある——運用判断は
+「新規Task化せず既存Taskのnext actionを更新する」という**実務上の重複回避**の結果であり、
+DP-10が問う「新規項目と既存項目が内容として重複するか」という字面的な重複判定とは
+やや異なる軸である可能性がある、という限界を記録する。
+
+**False-escalation rate（ground truth=No、DP10-08・09が分母）**: 0/2 = **0%**。
+
+**Missed-escalation rate（ground truth=Yes、DP10-06・07が分母）**: 1/2 = **50%**
+（DP10-06の見逃し。上記の通り）。4件という小サンプルでの50%は、1件の誤りが
+直接50%ポイントの変動を生む規模であり、この数値自体の一般化はできない。
+
+**Reproducibility**: `noul`（yes確率）はDP10-08で4回完全一致（0.04固定）、他3 fixtureは
+±0.01〜0.02の範囲に収まる実質的な安定。閾値0.7によるflag判定は4 fixture全件で
+4回とも完全に安定していた。
+
+**Latency**: 4 fixtureの初回呼び出しでp50=368ms、p95=502ms（最小315ms、最大502ms）。
+16回全体ではp50=321ms、p95=485ms。
+
+**Cost**: 初回4回のみ: input tokens合計2,351 → $0.000099。16回全件: input tokens合計
+9,404 → **$0.000395**。
+
+#### 9.9.4 Cost集計（DP-4 + DP-9 + DP-10、本Task累計）
+
+| パス | 呼び出し数 | input tokens | Cost |
+|---|---|---|---|
+| DP-4（2026-09-28、§9.4） | 24 | 24,844 | $0.001043 |
+| DP-9（本パス、§9.9.2） | 40 | 42,776 | $0.001797 |
+| DP-10（本パス、§9.9.3） | 16 | 9,404 | $0.000395 |
+| **合計** | **80** | **77,024** | **$0.003235** |
+
+月次承認予算（約$5/月）に対し累計$0.003235は0.065%——headroomは引き続き極めて大きい。
+ネットワーク/レート制限起因の再試行は本パスでも一度も発生しなかった（56回全て初回で
+`200 OK`）。
+
+#### 9.9.5 Secret取り扱いの確認（本パス）
+
+- API keyの値は一度も参照・出力していない。`https://api.typesafe.ai/v1/systemone`・
+  `https://api.typesafe.ai/v1/models`のいずれの呼び出しもAuthorizationヘッダを一切
+  付与していない、素のHTTPS POST/GETである。認証はOwner確認済みの「API認証情報」
+  機構によりplatform側で呼び出し時点に注入されると理解しており、本セッションは
+  その注入経路やkey文字列を一切観測していない。
+- `401`・`403`は56回中一度も発生しなかった（全件`200 OK`）。本節冒頭が引用した
+  Owner確認（スクリーンショット、`TYPESAFE_API_KEY`→`api.typesafe.ai`バインド）を
+  実際のライブ呼び出し結果が裏付けた。
+- 送信した`state`の内容（DP-9のTask title/AC、DP-10のDaily Close運用ログ由来テキスト）は、
+  §8.5.3・§8.6.1が確認した通り`cloud42-labo/ai-development-platform`と同じPublicな
+  Notion「Vibe Product Development」ワークスペース内の運用データであり、非公開
+  `cloud42-labo/brain`由来のcontentは含まれていない。
+
+#### 9.9.6 T04への引き継ぎ事項（更新）
+
+- DP-4・DP-9・DP-10の3 Decision Point全てについて、ライブ実行・主要指標の実測・証跡保存が
+  完了した。§9.7が持ち越していた「DP-9/DP-10は未実行」という状態はこれで解消する。
+- DP-9は10 fixture中7件がAccuracy/False-escalation/Missed-escalationへadmit済み
+  （§9.9.1）。残る3件（DP9-07はWaiting区間未検証、DP9-09・10はStatus=Reviewで
+  完了エビデンスが存在しない）は、T04またはこの先の継続セッションが個別に解消できる
+  候補として記録するに留め、推測で埋めていない。
+- DP-9の最終決定ロジック（Choice・Score・帯のAND条件、閾値0.7）は、今回の実例群では
+  no-escalateパスを一度も通さなかった（§9.9.2）。T04がこの設計をそのまま本番導入する
+  か、閾値・AND条件を見直すかを判断する際は、新しいholdoutセットでの事前較正を経ること
+  （§8.2.3の既定規約通り、今回の出力を見てから事後的に閾値を選び直さない）。
+- DP-10は4 fixture中1件（DP10-06）でmissed escalationが観測された（§9.9.3）。
+  母集団は§8.6.2が既に記録した通り「新規Task候補 対 既存Technical Task／候補無し」で
+  あり、§8.3.1が定義する「新規MISC/Backlogアイテム」そのものとは文字通り一致しない
+  ——T04がさらに母集団適合度の高い実例を拡充する場合、この限界を踏まえること。
+- `dependency_count`を欠いたDP-9の4フィールドschema（§8.5.2）は、実際のAPI呼び出しでも
+  問題なく機能した（全10 fixtureでJevが有効な`choice`・`score`を返した）。T04が
+  将来`dependency_count`を復活させたい場合は§8.5.1が示す運用変更が別途必要。

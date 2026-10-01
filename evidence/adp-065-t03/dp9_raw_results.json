@@ -1,0 +1,2012 @@
+[
+  {
+    "fixture_id": "DP9-01",
+    "fixture": {
+      "id": "DP9-01",
+      "task_id": "ADP-051",
+      "task_title": "ADP-051｜レビュー修正コストをTask Time Eventsで自動計測する",
+      "task_description": "Task Time EventsはStories & Tasksの更新から自動生成され、Human/AIによる直接編集を必要としない。初回In Progressで生成されるActive EventはInitial Work、Review→In Progressの再着手で生成されるActive EventはReview Fixとして自動分類される。Review FixではPRレビュー履歴等からReview SourceをCodex / Claude / Human / Otherで自動判定する。既存の工数計測・Done gate・polling冪等性を壊さない。Task単位でInitial Work時間とReview Fix時間を集計でき、Codex起因の修正工数比率を算出できる。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From無し（独自起票のオリジナルTask）。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 700.3,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.47,
+            "probabilities": {
+              "needs-split": 0.65,
+              "fits-as-is": 0.1,
+              "needs-more-design": 0.25
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.34,
+            "confidence": 0.54,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.02,
+              "2": 0.05,
+              "3": 0.17,
+              "4": 0.18,
+              "5": 0.42,
+              "6": 0.12,
+              "7": 0.02,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 968,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 360.0,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.46,
+            "probabilities": {
+              "fits-as-is": 0.1,
+              "needs-more-design": 0.26,
+              "needs-split": 0.64
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.29,
+            "confidence": 0.52,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.02,
+              "2": 0.05,
+              "3": 0.19,
+              "4": 0.17,
+              "5": 0.41000000000000003,
+              "6": 0.12,
+              "7": 0.02,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 968,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 311.1,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.46,
+            "probabilities": {
+              "needs-more-design": 0.26,
+              "needs-split": 0.64,
+              "fits-as-is": 0.1
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.32,
+            "confidence": 0.55,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.02,
+              "2": 0.05,
+              "3": 0.18,
+              "4": 0.17,
+              "5": 0.43,
+              "6": 0.11,
+              "7": 0.02,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 968,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 313.9,
+        "answers": {
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.23,
+            "confidence": 0.51,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.02,
+              "2": 0.05,
+              "3": 0.2,
+              "4": 0.18,
+              "5": 0.4,
+              "6": 0.11,
+              "7": 0.02,
+              "8": 0.0
+            }
+          },
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.45,
+            "probabilities": {
+              "fits-as-is": 0.12,
+              "needs-split": 0.63,
+              "needs-more-design": 0.25
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 968,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-02",
+    "fixture": {
+      "id": "DP9-02",
+      "task_id": "ADP-051-B2/B3",
+      "task_title": "ADP-051-B2｜Work Type resolverを実装・回帰テストする／ADP-051-B3｜Work Type resolverをTime Event生成へ配線する",
+      "task_description": "[ADP-051-B2] 1 AI稼働日以内。状態モデルを契約としてInitial Work / Review Fix resolverを孤立実装し、対象ケースを回帰テスト化する。Review Source取得・本番配線は含めない。既存テストgreenを維持する。\n[ADP-051-B3] 1 AI稼働日以内。B2で検証済みresolverをTime Event生成経路へnon-blockingで配線する。判定不能時は未分類として処理を継続し、既存Done gate・polling冪等性・回帰テストgreenを維持する。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From: ADP-051-B（ADP-051-Bはさらに遡るとADP-051（34ラウンド末にSuperseded・5分割）から分割されたTask）。二世代目の分割産物であり、分割系譜を持つ。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 373.7,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.43,
+            "probabilities": {
+              "needs-more-design": 0.01,
+              "needs-split": 0.62,
+              "fits-as-is": 0.37
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.25,
+            "confidence": 0.7,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.09,
+              "1": 0.02,
+              "2": 0.49,
+              "3": 0.37,
+              "4": 0.02,
+              "5": 0.01,
+              "6": 0.0,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1042,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 356.8,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.41,
+            "probabilities": {
+              "needs-more-design": 0.01,
+              "needs-split": 0.6,
+              "fits-as-is": 0.39
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.27,
+            "confidence": 0.7,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.09,
+              "1": 0.02,
+              "2": 0.5,
+              "3": 0.36,
+              "4": 0.02,
+              "5": 0.01,
+              "6": 0.0,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1042,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 355.2,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.34,
+            "probabilities": {
+              "fits-as-is": 0.43,
+              "needs-split": 0.56,
+              "needs-more-design": 0.01
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.3,
+            "confidence": 0.69,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.09,
+              "1": 0.02,
+              "2": 0.46,
+              "3": 0.4,
+              "4": 0.02,
+              "5": 0.01,
+              "6": 0.0,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1042,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 332.5,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.38,
+            "probabilities": {
+              "fits-as-is": 0.4,
+              "needs-split": 0.59,
+              "needs-more-design": 0.01
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.38,
+            "confidence": 0.66,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.08,
+              "1": 0.02,
+              "2": 0.4,
+              "3": 0.47000000000000003,
+              "4": 0.02,
+              "5": 0.01,
+              "6": 0.0,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1042,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-03",
+    "fixture": {
+      "id": "DP9-03",
+      "task_id": "ADP-051-B",
+      "task_title": "ADP-051-B｜Work Type判定を状態モデルに沿って実装する",
+      "task_description": "1 AI稼働日以内。ADP-051-Aで確定した状態モデルだけを根拠にInitial Work / Review Fixを判定する。Review Source取得ロジックは含めない。状態遷移・retry/interruption・reassignment・ambiguous provenanceの代表ケースを独立した回帰テストとして通す。既存Done gate/polling冪等性を変えない。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From: ADP-051（オリジナルTask、34レビューラウンドの末にSupersededとなり5分割されたうちの1つ）。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 327.9,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.37,
+            "probabilities": {
+              "fits-as-is": 0.58,
+              "needs-split": 0.39,
+              "needs-more-design": 0.03
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 0.25,
+            "confidence": 0.89,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.9,
+              "1": 0.03,
+              "2": 0.03,
+              "3": 0.02,
+              "4": 0.01,
+              "5": 0.01,
+              "6": 0.0,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 922,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 332.9,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.36,
+            "probabilities": {
+              "needs-split": 0.4,
+              "fits-as-is": 0.57,
+              "needs-more-design": 0.03
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 0.19,
+            "confidence": 0.91,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.92,
+              "1": 0.02,
+              "2": 0.02,
+              "3": 0.02,
+              "4": 0.01,
+              "5": 0.01,
+              "6": 0.0,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 922,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 337.1,
+        "answers": {
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 0.23,
+            "confidence": 0.89,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.9,
+              "1": 0.03,
+              "2": 0.03,
+              "3": 0.02,
+              "4": 0.01,
+              "5": 0.01,
+              "6": 0.0,
+              "7": 0.0,
+              "8": 0.0
+            }
+          },
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.4,
+            "probabilities": {
+              "needs-split": 0.37,
+              "needs-more-design": 0.03,
+              "fits-as-is": 0.6
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 922,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 322.7,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.37,
+            "probabilities": {
+              "needs-more-design": 0.04,
+              "needs-split": 0.38,
+              "fits-as-is": 0.58
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 0.16,
+            "confidence": 0.93,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.9400000000000001,
+              "1": 0.02,
+              "2": 0.02,
+              "3": 0.01,
+              "4": 0.0,
+              "5": 0.0,
+              "6": 0.0,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 922,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-04",
+    "fixture": {
+      "id": "DP9-04",
+      "task_id": "BUG-ADP-TTE-01-B",
+      "task_title": "BUG-ADP-TTE-01-B｜Actor実行境界でExecution Eventをstart/stopする",
+      "task_description": "Chris/Claude/Codex/Humanの実作業開始境界で明示的Execution Eventをopenできる。Status=In Progress滞留時間からActive の開始境界を推定しない。同一Task/Actorで重複openを発生させず、異常openはreconcileで収束する。回帰テストを追加する。（停止側=self-closeは本Taskの範囲外。Code.gs側にpause-aware close機構がないと安全に実装できないことがCodexレビューで判明したため、別Taskへ切り出す。）",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From: BUG-ADP-TTE-01（親TaskはBlockerに残存課題を記したままSupersededとなり、複数Subtaskへ分割された）。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 364.4,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.52,
+            "probabilities": {
+              "needs-more-design": 0.06,
+              "fits-as-is": 0.68,
+              "needs-split": 0.26
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.42,
+            "confidence": 0.47,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.04,
+              "1": 0.06,
+              "2": 0.14,
+              "3": 0.29,
+              "4": 0.18,
+              "5": 0.24,
+              "6": 0.04,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 972,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 315.6,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.47,
+            "probabilities": {
+              "needs-more-design": 0.07,
+              "needs-split": 0.28,
+              "fits-as-is": 0.65
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.31,
+            "confidence": 0.48,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.05,
+              "1": 0.06,
+              "2": 0.15,
+              "3": 0.33,
+              "4": 0.16,
+              "5": 0.21,
+              "6": 0.03,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 972,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 308.7,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.49,
+            "probabilities": {
+              "needs-more-design": 0.09,
+              "fits-as-is": 0.66,
+              "needs-split": 0.25
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.32,
+            "confidence": 0.48,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.04,
+              "1": 0.07,
+              "2": 0.15,
+              "3": 0.31,
+              "4": 0.17,
+              "5": 0.22,
+              "6": 0.03,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 972,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 297.3,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.49,
+            "probabilities": {
+              "needs-split": 0.26,
+              "needs-more-design": 0.09,
+              "fits-as-is": 0.65
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.33,
+            "confidence": 0.48,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.05,
+              "1": 0.06,
+              "2": 0.14,
+              "3": 0.32,
+              "4": 0.17,
+              "5": 0.22,
+              "6": 0.03,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 972,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-05",
+    "fixture": {
+      "id": "DP9-05",
+      "task_id": "ADP-057",
+      "task_title": "ADP-057｜Instruction / Skill Debtを削減し公式変更監視を標準化する",
+      "task_description": "1) ADPが参照するAGENTS.md、CLAUDE.md、Skills、Routine/Scheduler、永続Prompt・運用ルールを棚卸しする。2) 各指示をKeep / Project-local / Skill Procedure / Duplicate / Conflict / Obsoleteへ分類する。3) グローバル指示は最小・一貫したSource of Truthへ統合し、同一Policy本文の重複を除去する。4) CLAUDE.md等の互換入口は本文複製を避け、必要な参照だけにする。5) 代表Taskで簡素化前後の自律実行、不要確認、停止、レビュー反復、品質を検証する。6) OpenAI・Anthropic・Googleの公式Release Notes / Changelog / Deprecation / model migration情報を週1回確認するUpstream Change Watchを実装する。7) X等のSNSはDiscovery Source、公式一次情報をSource of Truthとし、公式確認前にADPルール変更を確定しない。8) 公式変更をModel / Agent / Skill / Prompt-Instruction / API / Deprecation / Cost-Safetyへ分類し、ADPへの影響があるものだけTask化する。9) Weekly RefinementにInstruction / Skill DebtレビューとUpstream Change Watch結果の影響判定を組み込む。10) 公式更新がない週は新規Taskを作らず、監視自体がルール肥大化を生まない構造にする。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From無し、Superseded By無し（標準的な独立Task）。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 297.1,
+        "answers": {
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 5.64,
+            "confidence": 0.63,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.0,
+              "1": 0.0,
+              "2": 0.01,
+              "3": 0.03,
+              "4": 0.05,
+              "5": 0.34,
+              "6": 0.37,
+              "7": 0.16,
+              "8": 0.04
+            }
+          },
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.99,
+            "probabilities": {
+              "fits-as-is": 0.0,
+              "needs-split": 1.0,
+              "needs-more-design": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1205,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 308.1,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.99,
+            "probabilities": {
+              "needs-more-design": 0.0,
+              "needs-split": 1.0,
+              "fits-as-is": 0.0
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 5.56,
+            "confidence": 0.63,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.0,
+              "1": 0.0,
+              "2": 0.01,
+              "3": 0.04,
+              "4": 0.05,
+              "5": 0.36,
+              "6": 0.37,
+              "7": 0.15,
+              "8": 0.02
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1205,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 365.5,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.99,
+            "probabilities": {
+              "needs-split": 1.0,
+              "fits-as-is": 0.0,
+              "needs-more-design": 0.0
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 5.69,
+            "confidence": 0.62,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.0,
+              "1": 0.0,
+              "2": 0.01,
+              "3": 0.03,
+              "4": 0.05,
+              "5": 0.33,
+              "6": 0.35,
+              "7": 0.19,
+              "8": 0.04
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1205,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 308.2,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.99,
+            "probabilities": {
+              "needs-split": 1.0,
+              "needs-more-design": 0.0,
+              "fits-as-is": 0.0
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 5.69,
+            "confidence": 0.64,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.0,
+              "1": 0.0,
+              "2": 0.01,
+              "3": 0.03,
+              "4": 0.04,
+              "5": 0.33,
+              "6": 0.38,
+              "7": 0.18,
+              "8": 0.03
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1205,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-06",
+    "fixture": {
+      "id": "DP9-06",
+      "task_id": "ADP-053",
+      "task_title": "ADP-053｜AI Work Sessionsを廃止しTask Time Eventsへ運用を一本化する",
+      "task_description": "1) ai-development-platformのgovernance/ai-execution-constraints.mdからAI Work Sessions open/close必須ゲート、recording節、degradation/検査view依存を除去し、Task Time Events・Task Result・PR/Commitを既存の実行証跡として扱う。2) Notion Operating Guide、Architecture Stack、Mission Control/日報など現行運用でAI Work Sessionsを必須または集計元としている参照を洗い出し、現行運用から除去する。3) Claude/Chris日次自律実行がAI Work Sessionsへ新規rowを作成・更新しないことを確認する。4) Task Time Eventsの既存運用は壊さず、新規DB/専用ジョブ/代替セッションログを追加しない。5) AI Work Sessions DBは履歴保持のため即削除せず、書き込み・必須参照がゼロになった後に名称または説明でDEPRECATED/READ ONLYを明示する。6) 既存AI Work Sessionsデータの移行は行わない。7) GitHubの変更は通常のレビュー/マージフローでmainへ反映し、Notion Resultに変更箇所と廃止完了証跡を記録する。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From無し、Superseded By無し（標準的な独立Task）。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 302.0,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.6,
+            "probabilities": {
+              "fits-as-is": 0.26,
+              "needs-more-design": 0.01,
+              "needs-split": 0.73
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.96,
+            "confidence": 0.43,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.03,
+              "2": 0.08,
+              "3": 0.25,
+              "4": 0.2,
+              "5": 0.34,
+              "6": 0.07,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1138,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 344.3,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.57,
+            "probabilities": {
+              "needs-more-design": 0.01,
+              "fits-as-is": 0.27,
+              "needs-split": 0.72
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.94,
+            "confidence": 0.45,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.03,
+              "2": 0.08,
+              "3": 0.26,
+              "4": 0.21,
+              "5": 0.34,
+              "6": 0.06,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1138,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 323.1,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.58,
+            "probabilities": {
+              "needs-more-design": 0.01,
+              "needs-split": 0.72,
+              "fits-as-is": 0.27
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.93,
+            "confidence": 0.44,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.02,
+              "1": 0.03,
+              "2": 0.08,
+              "3": 0.26,
+              "4": 0.2,
+              "5": 0.34,
+              "6": 0.06,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1138,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 347.2,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.67,
+            "probabilities": {
+              "needs-more-design": 0.01,
+              "fits-as-is": 0.21,
+              "needs-split": 0.78
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.03,
+            "confidence": 0.47,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.02,
+              "2": 0.08,
+              "3": 0.24,
+              "4": 0.2,
+              "5": 0.36,
+              "6": 0.07,
+              "7": 0.02,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1138,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-07",
+    "fixture": {
+      "id": "DP9-07",
+      "task_id": "ADP-055",
+      "task_title": "ADP-055｜月初に前月AI Organization KPIレポートを自動生成する",
+      "task_description": "毎月1日に前月のJST 00:00〜月末24:00を対象として自動集計が起動する。Task Time EventsからActive/Waiting、Actor別、Work Type別、Review Fix Ratioを集計する。Stories & TasksからProduct別の完了Task数、Lead Time、Blocked/Human Gate関連指標を集計する。GitHubから前月のPR作成数・Merge数を取得し、可能な限りNotion TaskのProduct relationへ帰属させる。レポートはProduct別を主軸、Repository別を補助軸とし、PR数やTask数を目標KPIとして扱わない。出力先はAI Organization KPI Framework配下、タイトルは `AI Organization KPI｜YYYY-MM` とする。同月を再実行した場合は既存ページを更新し重複作成しない。データ欠損やProduct帰属不能はUnknown/未分類として明示し推測補完しない。Job Schedule / Routineに月初トリガーを反映し、2026-10-01に2026-09分が自動生成できる状態にする。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From無し、Superseded By無し。ただしADP-055-FU／ADP-055-VT／ADP-055-KMIという命名上の後続Taskが存在する——いずれもSplit From relationでは本Taskに接続されておらず、命名規約が示唆する系譜と実際のrelationデータが一致しない既知のギャップ。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 306.1,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.89,
+            "probabilities": {
+              "needs-split": 0.93,
+              "fits-as-is": 0.04,
+              "needs-more-design": 0.03
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.78,
+            "confidence": 0.56,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.02,
+              "2": 0.03,
+              "3": 0.12,
+              "4": 0.13,
+              "5": 0.39,
+              "6": 0.22,
+              "7": 0.07,
+              "8": 0.01
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1208,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 298.1,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.86,
+            "probabilities": {
+              "needs-more-design": 0.05,
+              "fits-as-is": 0.05,
+              "needs-split": 0.9
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.93,
+            "confidence": 0.59,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.01,
+              "2": 0.02,
+              "3": 0.11,
+              "4": 0.14,
+              "5": 0.38,
+              "6": 0.23,
+              "7": 0.09,
+              "8": 0.01
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1208,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 304.1,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.87,
+            "probabilities": {
+              "fits-as-is": 0.04,
+              "needs-more-design": 0.05,
+              "needs-split": 0.91
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.85,
+            "confidence": 0.57,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.02,
+              "2": 0.03,
+              "3": 0.11,
+              "4": 0.13,
+              "5": 0.39,
+              "6": 0.22,
+              "7": 0.08,
+              "8": 0.01
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1208,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 300.3,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.88,
+            "probabilities": {
+              "needs-split": 0.92,
+              "needs-more-design": 0.04,
+              "fits-as-is": 0.04
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.69,
+            "confidence": 0.54,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.02,
+              "2": 0.04,
+              "3": 0.14,
+              "4": 0.14,
+              "5": 0.37,
+              "6": 0.2,
+              "7": 0.07,
+              "8": 0.01
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1208,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-08",
+    "fixture": {
+      "id": "DP9-08",
+      "task_id": "ADP-044-D",
+      "task_title": "ADP-044-D｜Product Vision Quality Standardと承認Gateを定義する",
+      "task_description": "Product Visionの品質標準と策定プロセスを定義し、Vision策定・Owner承認・hierarchical-refinementで共通利用できるGateにする。最低限①Vision種別（Company/Business/Product）と抽象度が適切、②Purpose/Problem/Opportunity/Evidenceが分離されている、③成功した未来状態がユーザー/事業のOutcomeとして記述されている、④Solution-neutralで商品形態・UI・技術方式・実装方式・価格/GTM等のHowを混ぜない、⑤Success Measuresが観測可能で成果物完成を成功としない、⑥Assumption/Unknown/Non-goalを明示する、⑦Ownerの意思とAI推論を区別しAIが意思を補完しない、⑧戦略・Product Concept・PRD・Epicへ落とす情報との境界を定義する、⑨Approved条件とRevise条件を明文化する、⑩Cloud42-labo事業化v0.1と人財ポートフォリオVision v0.1をRegression Caseとして現行の問題を検出できる、⑪Lifecycle Gateを定義し、Idea/ExperimentalではHuman Raw Ideaと暫定Visionを許容する一方、Experimentalで得た一次情報を使ってHuman×AI対話でVisionを再言語化し、Products Registry登録／Product Planning移行前にはQuality Gateを通過したApproved Visionを必須とする、を満たす。Operating Guide/Product Visionテンプレート/関連Skillへ反映可能な成果物にする。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From無し、Superseded By無し（標準的な独立Task）。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 288.8,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.8,
+            "probabilities": {
+              "fits-as-is": 0.12,
+              "needs-more-design": 0.01,
+              "needs-split": 0.87
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.08,
+            "confidence": 0.49,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.02,
+              "2": 0.07,
+              "3": 0.22,
+              "4": 0.22,
+              "5": 0.37,
+              "6": 0.08,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1242,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 293.6,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.76,
+            "probabilities": {
+              "needs-split": 0.84,
+              "fits-as-is": 0.14,
+              "needs-more-design": 0.02
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.11,
+            "confidence": 0.49,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.02,
+              "2": 0.07,
+              "3": 0.23,
+              "4": 0.2,
+              "5": 0.38,
+              "6": 0.08,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1242,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 391.5,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.72,
+            "probabilities": {
+              "fits-as-is": 0.17,
+              "needs-more-design": 0.02,
+              "needs-split": 0.81
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.13,
+            "confidence": 0.5,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.02,
+              "2": 0.06,
+              "3": 0.21,
+              "4": 0.23,
+              "5": 0.37,
+              "6": 0.09,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1242,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 349.8,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "needs-split",
+            "confidence": 0.79,
+            "probabilities": {
+              "fits-as-is": 0.12,
+              "needs-more-design": 0.02,
+              "needs-split": 0.86
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 4.23,
+            "confidence": 0.55,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.01,
+              "1": 0.02,
+              "2": 0.06,
+              "3": 0.2,
+              "4": 0.22,
+              "5": 0.39,
+              "6": 0.09,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1242,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-09",
+    "fixture": {
+      "id": "DP9-09",
+      "task_id": "ADP-059-E",
+      "task_title": "ADP-059-E｜Operating Guideを規程体系入口へ縮退しSkills・基準・記録への参照を正規化する",
+      "task_description": "個別規程への移管完了後、Operating Guide本文の重複ルールを除去して規程体系への入口/互換リンクに縮退する。Skills=手順、governance配下のCriteria=基準、Notion/GitHub/brain=記録の参照関係を明示し、古いPolicy参照を残さない。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From無し、Superseded By無し——ただしADP-059自体が最初からA〜Eの独立Subtaskとして設計されたという経緯があり、これは事後的なSplit Fromではなく着手前のApproach Decision時点での意図的な事前分割というもう一つの正当な値。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 291.2,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.55,
+            "probabilities": {
+              "needs-split": 0.13,
+              "fits-as-is": 0.7,
+              "needs-more-design": 0.17
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.62,
+            "confidence": 0.44,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.11,
+              "1": 0.13,
+              "2": 0.23,
+              "3": 0.27,
+              "4": 0.12,
+              "5": 0.13,
+              "6": 0.01,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 970,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 330.7,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.52,
+            "probabilities": {
+              "needs-split": 0.15,
+              "fits-as-is": 0.67,
+              "needs-more-design": 0.18
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.81,
+            "confidence": 0.45,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.09,
+              "1": 0.11,
+              "2": 0.22,
+              "3": 0.28,
+              "4": 0.13,
+              "5": 0.15,
+              "6": 0.02,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 970,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 348.9,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.47,
+            "probabilities": {
+              "fits-as-is": 0.65,
+              "needs-more-design": 0.18,
+              "needs-split": 0.17
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.87,
+            "confidence": 0.44,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.09,
+              "1": 0.11,
+              "2": 0.21,
+              "3": 0.27,
+              "4": 0.13,
+              "5": 0.16,
+              "6": 0.02,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 970,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 338.3,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.52,
+            "probabilities": {
+              "needs-split": 0.18,
+              "needs-more-design": 0.14,
+              "fits-as-is": 0.68
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.82,
+            "confidence": 0.43,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.09,
+              "1": 0.12,
+              "2": 0.21,
+              "3": 0.27,
+              "4": 0.12,
+              "5": 0.16,
+              "6": 0.02,
+              "7": 0.01,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 970,
+        "output_tokens": 66
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP9-10",
+    "fixture": {
+      "id": "DP9-10",
+      "task_id": "BUG-ADP-TTE-01-A",
+      "task_title": "BUG-ADP-TTE-01-A｜日報Active集計からProcess Occupancyを分離する",
+      "task_description": "日報/KPIのActive集計はSourceだけで判定しない。①明示的Execution Eventは計上する。②Source=notion_reconcileでも、Actor=Human、State=Active、Started At/Ended Atが観測可能で、End Status=DoneかつReason=completion_evidenceとして現行Taskの完了証跡と一致するClosed EventはHuman実働として計上する。③それ以外のStatus滞留由来notion_reconcile EventはProcess Occupancyとして除外する。④Open Eventは合計をN/A化せずClosed Eventのみ合算し品質警告を別表示する。⑤9/11 AOD第9号note公開（18:12–18:45 JST）を回帰例としてHuman Active=0.55hになることを確認する。",
+      "prior_review_rounds_if_reattempt": 0,
+      "similar_task_split_history": "Split From: BUG-ADP-TTE-01（DP9-04と同じ親からの分割）。"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 317.5,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.4,
+            "probabilities": {
+              "needs-split": 0.28,
+              "fits-as-is": 0.61,
+              "needs-more-design": 0.11
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.01,
+            "confidence": 0.49,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.07,
+              "1": 0.08,
+              "2": 0.18,
+              "3": 0.32,
+              "4": 0.16,
+              "5": 0.17,
+              "6": 0.02,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1027,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 314.0,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.33,
+            "probabilities": {
+              "needs-more-design": 0.11,
+              "fits-as-is": 0.55,
+              "needs-split": 0.34
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.08,
+            "confidence": 0.49,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.06,
+              "1": 0.08,
+              "2": 0.17,
+              "3": 0.34,
+              "4": 0.15,
+              "5": 0.18,
+              "6": 0.02,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1027,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 319.9,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.31,
+            "probabilities": {
+              "needs-split": 0.31,
+              "needs-more-design": 0.15,
+              "fits-as-is": 0.54
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 3.13,
+            "confidence": 0.5,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.06,
+              "1": 0.07,
+              "2": 0.16,
+              "3": 0.34,
+              "4": 0.17,
+              "5": 0.18,
+              "6": 0.02,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1027,
+        "output_tokens": 66
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 354.0,
+        "answers": {
+          "policy_fit_choice": {
+            "type": "choice",
+            "choice": "fits-as-is",
+            "confidence": 0.41,
+            "probabilities": {
+              "needs-split": 0.28,
+              "fits-as-is": 0.6,
+              "needs-more-design": 0.12
+            }
+          },
+          "ai_workdays_score": {
+            "type": "score",
+            "score": 2.97,
+            "confidence": 0.49,
+            "legend": {
+              "0": "1日以内（ちょうど1日を含む）",
+              "1": "1日超〜1.5日以内",
+              "2": "1.5日超〜2日以内",
+              "3": "2日超〜3日以内",
+              "4": "3日超〜4日以内",
+              "5": "4日超〜1週間（5 AI稼働日）以内",
+              "6": "1週間超〜2週間以内",
+              "7": "2週間超〜1ヶ月以内",
+              "8": "1ヶ月超（上限なし）"
+            },
+            "probabilities": {
+              "0": 0.08,
+              "1": 0.09,
+              "2": 0.18,
+              "3": 0.33,
+              "4": 0.15,
+              "5": 0.15,
+              "6": 0.02,
+              "7": 0.0,
+              "8": 0.0
+            }
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 1027,
+        "output_tokens": 66
+      }
+    ]
+  }
+]
