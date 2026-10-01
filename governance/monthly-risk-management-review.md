@@ -55,7 +55,7 @@ For each Postmortem opened, actioned, reanalyzed, or closed during the period, c
 - Failure Layer is concrete enough to explain the mechanism rather than only a generic category;
 - alternative hypotheses were considered;
 - every preventive action names the causal node it targets;
-- counterfactual result is not `No effect`;
+- Prevent / Detect / Mitigate actions have a resolved counterfactual (`Prevented`, `Detected earlier`, or `Mitigated only`); `Unknown` remains investigation-only;
 - Regression Replay exercises the original failure mode, or replay impossibility and substitute evidence are approved;
 - independent review changed the cause or action (`Reanalysis Changed Conclusion`);
 - Preventive Action Effectiveness: Effective / Partial / Ineffective / Not Tested.
@@ -68,7 +68,7 @@ Treat the following as material control-quality signals:
 - recurrence after documentation-only remediation;
 - a Postmortem whose coarse Root Cause Category hides distinct failure mechanisms needed for portfolio learning.
 
-If the analysis itself is not reliable, do not aggregate its conclusion as if it were established fact. Return it to `Open` / reanalysis using the `postmortem-rca` Skill.
+If the analysis itself is not reliable, do not aggregate its conclusion as if it were established fact. Return it to `Open` / reanalysis. In Cloud42 operations use the companion `postmortem-rca` Skill; portable ADP adopters may execute the self-contained RCA Quality Gate in `postmortem-improvement-loop.md` directly.
 
 ### 3. Recurrence and common-mode review
 
@@ -158,6 +158,6 @@ The Operating Guide should point to this durable policy for the detailed monthly
 ## Related controls
 
 - `governance/postmortem-improvement-loop.md`
-- `cloud42-labo/skills/.claude/skills/postmortem-rca/SKILL.md`
+- `cloud42-labo/skills/.claude/skills/postmortem-rca/SKILL.md` — Cloud42 companion procedure; not a portable-package prerequisite.
 - `governance/ai-execution-constraints.md`
 - `governance/research-security-policy.md`
