@@ -232,9 +232,9 @@ A Postmortem can be closed only when all are true:
 - every Prevent / Detect / Mitigate action names its target causal node and has a resolved counterfactual result of `Prevented`, `Detected earlier`, or `Mitigated only`; `Unknown` remains investigation-only and is not closure-eligible as preventive work;
 - each preventive action has a verifiable completion condition;
 - the durable control destination is updated where required;
-- the original failure mode was exercised by Regression Replay, or replay impossibility + alternative evidence + residual risk was independently Approved;
-- evidence of the replay/alternative test is recorded;
-- Preventive Action Effectiveness is recorded;
+- the original failure mode was exercised by Regression Replay, or replay impossibility + alternative evidence + residual risk was independently Approved, or an evidence-backed no-additional-action decision records `Regression Replay = N/A - Approved No Action` with independent approval;
+- evidence of the replay/alternative test, or the approved no-action rationale, is recorded;
+- if preventive work exists, Preventive Action Effectiveness is `Effective`; `Partial`, `Ineffective`, or `Not Tested` blocks closure unless residual risk is explicitly accepted within authority and independently Approved. If no preventive action is warranted, record `N/A - Approved No Action`;
 - recurrence status is correct;
 - no unresolved corrective action remains;
 - **an AI-caused Postmortem has completed independent review by a different AI** (see "Independent review" above), with `Reviewer` ≠ `Author` (the actor who wrote the first analysis — not necessarily `Owner`) and `Review Status = Approved`.
@@ -252,7 +252,7 @@ Portfolio-level governance should periodically review at least:
 - RCA Quality Gate: Pass / Revise / Not Evaluated;
 - Root Cause Confidence: High / Medium / Low;
 - reanalysis-changed-conclusion count;
-- Preventive Action Effectiveness: Effective / Partial / Ineffective / Not Tested;
+- Preventive Action Effectiveness: Effective / Partial / Ineffective / Not Tested / N/A - Approved No Action;
 - Regression Replay missing / failed count;
 - time from trigger to detection where timestamps exist;
 - time from detection to preventive-action Done;
