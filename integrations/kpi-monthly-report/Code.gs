@@ -972,31 +972,81 @@ function aggregateOpenPrs_(repos, nowMs) {
 // & Tasks' `Pull Request` property. Returns null (caller maps to
 // UNKNOWN_LABEL) if no Task references this PR, or the matching Task has no
 // Product set, or more than one Task references it ambiguously.
+//
+// BUG-ADP-055-KMI-TIMEOUT: this used to issue one paginated Notion query per
+// PR (200+ per month across created/merged/open), which is what drove the
+// 6-minute Apps Script execution timeout (see notionRequest_'s 429 handling
+// below — at this volume Notion's ~3req/s limit was being hit repeatedly,
+// each 429 costing seconds of backoff). Replaced with one paginated query
+// per repo (buildPrProductMap_ below), fully resolving every PR's Product
+// for that repo in a single pass, then an O(1) in-memory lookup per PR.
 function lookupProductForPr_(repo, number) {
+  const map = buildPrProductMap_(repo);
   const needle = repo + '/pull/' + number;
-  // `contains` is a coarse pre-filter only (e.g. PR #4 also matches a URL
-  // containing /pull/42) — pullRequestUrlMatches_ below re-checks with a
-  // path boundary so a numeric prefix never misattributes the Product. Must
-  // paginate the candidate set (not just take a first small page): with a
-  // short-numbered PR, the exact match can sort past the first few
-  // coarse-matched Tasks (e.g. #4 alongside Tasks for #40-#49), which would
-  // otherwise drop a real match — or hide a real ambiguity — off-page.
+  return Object.prototype.hasOwnProperty.call(map, needle) ? map[needle] : null;
+}
+
+// Builds (and caches for the life of this script execution) a map of every
+// PR needle (`owner/repo/pull/NUMBER`) in `repo` that Stories & Tasks'
+// `Pull Request` property references, to its resolved Product name (or null
+// if zero or more-than-one Task references that exact PR — same "never
+// guess" contract lookupProductForPr_ always had).
+//
+// One paginated query per repo replaces what used to be one paginated query
+// per PR. `contains: repo + '/pull/'` is a coarse pre-filter (it matches
+// every PR under this repo, which is the point); prNeedleFromUrl_ below
+// re-derives the exact needle from each match's own URL with the same path
+// boundary pullRequestUrlMatches_ enforces, so a numeric prefix (e.g. PR #4
+// matching a stored URL for #42) still cannot misattribute a PR's Product.
+const PR_PRODUCT_MAP_CACHE_ = {};
+function buildPrProductMap_(repo) {
+  if (PR_PRODUCT_MAP_CACHE_[repo] !== undefined) return PR_PRODUCT_MAP_CACHE_[repo];
+
   const result = paginateNotionQuery_('/v1/data_sources/' + encodeURIComponent(tasksDataSourceId_()) + '/query', {
     page_size: MAX_PAGE_SIZE,
-    filter: { property: 'Pull Request', url: { contains: needle } },
+    filter: { property: 'Pull Request', url: { contains: repo + '/pull/' } },
   });
-  const matches = (result.results || []).filter(function (task) {
+
+  const tasksByNeedle = {};
+  (result.results || []).forEach(function (task) {
     const url = task.properties['Pull Request'] && task.properties['Pull Request'].url;
-    return pullRequestUrlMatches_(url, needle);
+    const needle = prNeedleFromUrl_(url, repo);
+    if (!needle) return;
+    if (!tasksByNeedle[needle]) tasksByNeedle[needle] = [];
+    tasksByNeedle[needle].push(task);
   });
-  if (matches.length !== 1) return null;
-  const ids = relationIds_(matches[0].properties.Product);
-  if (ids.length !== 1) return null;
-  // Product name resolution here is a single extra page fetch per matched
-  // PR; acceptable at monthly-batch volume. Cached at the process level via
-  // a plain object keyed by product id to avoid re-fetching the same
-  // Product repeatedly within one run.
-  return resolveProductNameCached_(ids[0]);
+
+  const map = {};
+  Object.keys(tasksByNeedle).forEach(function (needle) {
+    const matches = tasksByNeedle[needle];
+    if (matches.length !== 1) { map[needle] = null; return; }
+    const ids = relationIds_(matches[0].properties.Product);
+    // Product name resolution here is a single extra page fetch per unique
+    // Product, cached process-wide (resolveProductNameCached_) — Products
+    // repeat heavily across PRs, so this stays small regardless of PR count.
+    map[needle] = ids.length === 1 ? resolveProductNameCached_(ids[0]) : null;
+  });
+
+  PR_PRODUCT_MAP_CACHE_[repo] = map;
+  return map;
+}
+
+// Derives the exact `owner/repo/pull/NUMBER` needle from a Task's stored
+// Pull Request URL, requiring the same path boundary right after the number
+// that pullRequestUrlMatches_ checks (so a URL for #42 never yields a #4
+// needle or vice versa). Returns null if `url` does not reference `repo`.
+function prNeedleFromUrl_(url, repo) {
+  if (typeof url !== 'string') return null;
+  const prefix = repo + '/pull/';
+  const idx = url.indexOf(prefix);
+  if (idx === -1) return null;
+  const afterPrefix = url.slice(idx + prefix.length);
+  const numberMatch = afterPrefix.match(/^\d+/);
+  if (!numberMatch) return null;
+  const needle = prefix + numberMatch[0];
+  // Defensive re-check with the original boundary validator: guards against
+  // prefix/number extraction and pullRequestUrlMatches_ ever drifting apart.
+  return pullRequestUrlMatches_(url, needle) ? needle : null;
 }
 
 // Requires `needle` (owner/repo/pull/NUMBER) to end at a path boundary in
