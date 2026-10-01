@@ -33,6 +33,14 @@ parameters exist), and the still-open DP-9/DP-10 fixture gaps. The
 original `T02` deliverable only and no longer describes the document
 as a whole.
 
+**2026-10-01 update**: a `T03` continuation session resolved the DP-9
+`dependency_count` methodology question (previously deferred twice) and
+built real, Notion-sourced fixtures for all 10 DP-9 tasks and 4 new
+DP-10 duplicate-detection examples (2 Yes / 2 No) — see §8.5 and §8.6.
+No live Jev calls were made in this pass: `TYPESAFE_API_KEY` was not set
+in this session's environment (§9.8). Fixtures are now ready to send
+once a session with that Secret available picks this up.
+
 ## Executive summary
 
 ADP already runs a fairly large number of recurring, *typed* judgment calls —
@@ -2469,6 +2477,241 @@ TypeSafe/Jevアカウント登録完了の報告を受け、下記§9でaccess�
 fixture不足がライブ実行時点でも未解消のままであり、§9.3の通り今回も
 主要指標側のJev呼び出しは実行していない（詳細は§9.3）。
 
+### 8.5 2026-10-01追記 — DP-9 `dependency_count`方針決定と削減schemaフィクスチャ（`ADP-065-T03`継続セッション）
+
+**Status**: §8.2.4 step 1〜9・§8.4・§9.7が持ち越した「DP-9は10件のfixtureを保持するが
+`dependency_count`・`similar_task_split_history`が全件未凍結でChoice/Score出力の
+収集自体ができない」というgapに対し、本節が実際の方針決定とフィクスチャ構築を行う。
+前回までの2セッションが「T04の判断に委ねる」と先送りしていた論点（Issue #75最新
+コメント・PR #86参照）を、本セッションがNotion Stories & Tasksへ実アクセスして
+確定させる。
+
+#### 8.5.1 方針決定: `dependency_count`を本PoCのrequest schemaから除外する
+
+**決定**: DP-9のrequest schema（§8.2.3）から`dependency_count`フィールドを本PoC
+パスに限り除外し、残る4フィールド（`task_title`・`task_description`・
+`prior_review_rounds_if_reattempt`・`similar_task_split_history`）だけで
+Choice/Score呼び出しを構成する。§8.2.3自体は変更せず、本節は「このPoCパスでは
+5フィールドではなく4フィールドで実行する」という上書きを宣言する形を取る。
+
+**根拠（Notion Stories & Tasksのスキーマを本セッションが直接確認した結果）**:
+
+1. `collection://fc5e770f-c68e-4799-afe7-ec4bff0dab59`（Stories & Tasks）の
+   データソーススキーマには、依存Task数・Blocked By・Depends On等、構造化された
+   依存関係フィールドが**一つも存在しない**。存在する関連フィールドは自由記述の
+   `Blocker`（text型）のみであり、数値でも他Taskへのrelationでもない。したがって
+   `dependency_count`は、Doneになったあとだけでなく**着手前の時点であっても最初から
+   構造化データとして存在したことがない**——「Doneで消える」以前に、そもそも記録する
+   場所が無い。
+2. 本Taskが対象とする10件のうち、Done/Review/Superseded状態の9件（ADP-051,
+   ADP-051-B, ADP-051-B2, ADP-051-B3, ADP-053, ADP-055, ADP-057, ADP-044-D,
+   BUG-ADP-TTE-01-B）の`Blocker`を直接確認したところ、Doneへ遷移した7件はすべて
+   `Blocker`が空（null）であり、brainの運用規約通りDoneでBlockerがクリアされる
+   ことを確認した。Superseded状態の2件（ADP-051, ADP-051-B2/B3）は`Blocker`に
+   終了時点の説明文（例:「Superseded: PR #50を継続しない。後続ADP-051-B4/B5/B6へ
+   移管。」）が残っていたが、これも「着手前にいくつ依存Taskがあったか」の数値では
+   なく、終了時点の自由記述でありパース可能な値ではない。
+3. 以上より、`dependency_count`は (a) 構造化フィールドとして存在したことが一度も
+   なく、(b) 唯一近い情報源である`Blocker`はDoneで消え、Superseded/Blockedでも
+   自由記述でしかなく、(c) 着手前時点の値を遡って再構成する手段がNotion側にも
+   GitHub側にも存在しない——という3重の意味で構造的に回収不能である。これは
+   背景調査が示した「Doneで消える」という理由よりも強い結論であり、過去2セッション
+   の判断を裏付けると同時に補強する。
+
+**今後ADPが`dependency_count`を使いたい場合に必要な変更**: `cloud42-labo/skills`の
+`task-approach-review`（Finalizeモード）が、Taskを`In Progress`にする直前
+（着手時のApproach Decision記録時点）に、その時点でブロックしている依存Task数を
+明示的な数値として`Approach Decision`本文へ記録する運用を追加するか、Stories &
+Tasksスキーマへ`Depends On`（relation）または`Dependency Count (Frozen)`
+（number）のような構造化フィールドを新設し、着手時に一度だけ書き込む（Doneで
+クリアしない）ことが必要。いずれも本Taskのスコープ外であり、実施するならADPの
+Task運用Rule変更として別Task化する。
+
+#### 8.5.2 削減後のrequest schema（DP-9、本PoCパス限定）
+
+```json
+{
+  "task_title": "<着手前のタイトル>",
+  "task_description": "<着手前のTask本文・AC>",
+  "prior_review_rounds_if_reattempt": <整数、初回試行なら0>,
+  "similar_task_split_history": "<過去の類似Taskの分割履歴要約（当該Task自身の結果は含めない）>"
+}
+```
+
+`dependency_count`を欠いたことで、§8.2.3の最終決定・false/missed-escalation定義・
+Score算出方法自体は変更しない——これらは`choice`・`choice_confidence`・
+`score_confidence`・Scoreの4つに依存し、`dependency_count`はどの計算式にも
+直接使われていなかった。影響は「Jevへ渡す`state`の情報量が1フィールド分減る」
+ことに限られる。
+
+#### 8.5.3 10件のフィクスチャ（`task_title`・`task_description`をNotionから直接取得・凍結）
+
+§9.3が「10件全件で`dependency_count`・`similar_task_split_history`が未凍結」と
+記録した状態を解消する。`task_title`・`task_description`はNotion
+`collection://fc5e770f-c68e-4799-afe7-ec4bff0dab59`の`Title`・
+`Acceptance Criteria`プロパティを本セッションが直接取得した値（2026-10-01時点）。
+`prior_review_rounds_if_reattempt`は全件とも初回試行のため`0`固定。
+`similar_task_split_history`は`Split From`/`Superseded By`relationを本セッション
+が直接クエリして導出した。
+
+| # | Task (Notion) | `task_title` | `prior_review_rounds_if_reattempt` | `similar_task_split_history` |
+|---|---|---|---|---|
+| DP9-01 | ADP-051 | 「レビュー修正コストをTask Time Eventsで自動計測する」 | 0 | Split From無し（独自起票のオリジナルTask）。本Task自身が後にSupersededとなり5分割（ADP-051-A〜E）されたことは本Taskの結果情報のため着手前入力には使わない。 |
+| DP9-02 | ADP-051-B2 / ADP-051-B3 | 「Work Type resolverを実装・回帰テストする」／「Work Type resolverをTime Event生成へ配線する」 | 0 | Split From: ADP-051-B（ADP-051-Bはさらに遡るとADP-051（34ラウンド末にSuperseded・5分割）から分割されたTask）。二世代目の分割産物であり、分割系譜を持つ。 |
+| DP9-03 | ADP-051-B | 「Work Type判定を状態モデルに沿って実装する」 | 0 | Split From: ADP-051（オリジナルTask、34レビューラウンドの末にSupersededとなり5分割されたうちの1つ）。 |
+| DP9-04 | BUG-ADP-TTE-01-B | 「Actor実行境界でExecution Eventをstart/stopする」 | 0 | Split From: BUG-ADP-TTE-01（親TaskはBlockerに残存課題を記したままSupersededとなり、複数Subtaskへ分割された）。 |
+| DP9-05 | ADP-057 | 「Instruction / Skill Debtを削減し公式変更監視を標準化する」 | 0 | Split From無し、Superseded By無し（標準的な独立Task）。 |
+| DP9-06 | ADP-053 | 「AI Work Sessionsを廃止しTask Time Eventsへ運用を一本化する」 | 0 | Split From無し、Superseded By無し（標準的な独立Task）。 |
+| DP9-07 | ADP-055 | 「月初に前月AI Organization KPIレポートを自動生成する」 | 0 | Split From無し、Superseded By無し。ただし`ADP-055-FU`／`ADP-055-VT`／`ADP-055-KMI`という命名上の後続Taskが存在する——いずれも`Split From`relationでは本Taskに接続されておらず（個別確認済み、全件`Split From`=null）、命名規約が示唆する系譜と実際のrelationデータが一致しない既知のギャップとして記録する。 |
+| DP9-08 | ADP-044-D | 「Product Vision Quality Standardと承認Gateを定義する」 | 0 | Split From無し、Superseded By無し（標準的な独立Task）。 |
+| DP9-09 | ADP-059-E | 「Operating Guideを規程体系入口へ縮退しSkills・基準・記録への参照を正規化する」 | 0 | Split From無し、Superseded By無し——ただしADP-059自体が最初からA〜Eの独立Subtaskとして設計されたという経緯（§8.2.2のDP9-09注記）があり、これは事後的な`Split From`relationではなく**着手前のApproach Decision時点での意図的な事前分割**という、標準的な「分割履歴」とは異なるもう一つの正当な値である。本Task自身はStatus=Review（2026-10-01時点、Done未到達）であり、§8.2.2が前提としていた「Done」という状態も現時点のNotionでは確認できなかった——pre-execution inputの収集自体には影響しないが、§8.2.2のground truth前提を再確認する必要がある旨を付記する。 |
+| DP9-10 | BUG-ADP-TTE-01-A | 「日報Active集計からProcess Occupancyを分離する」 | 0 | Split From: BUG-ADP-TTE-01（DP9-04と同じ親からの分割）。本Task自身はStatus=Review（2026-10-01時点、Done未到達）——§8.2.2のground truth前提の再確認が必要。 |
+
+`task_description`（Acceptance Criteria逐語）は本書に全文転記すると表が著しく
+肥大化するため、各TaskのNotion URLへのリンクで代替する——本セッションが実際に
+取得・確認した原文の所在は以下の通り（2026-10-01取得）。
+
+- ADP-051: https://app.notion.com/3cdfbd826f3b81e2bba2c8f023766a3e
+- ADP-051-B: https://app.notion.com/3d1fbd826f3b81a1a550c4192fc822ea
+- ADP-051-B2: https://app.notion.com/3d9fbd826f3b8141a556c714576009fe
+- ADP-051-B3: https://app.notion.com/3d9fbd826f3b814fbaa1d666e9222d2c
+- BUG-ADP-TTE-01-B: https://app.notion.com/3d5fbd826f3b81ae8745ff114bc5a025
+- ADP-057: https://app.notion.com/3d2fbd826f3b8192950af4e31aa07b59
+- ADP-053: https://app.notion.com/3cefbd826f3b81e3b35dc99f632eda25
+- ADP-055: https://app.notion.com/3d0fbd826f3b81b68ab8d0c4b7b14a61
+- ADP-044-D: https://app.notion.com/3dafbd826f3b81358a0bed4bc8bd937f
+- ADP-059-E: https://app.notion.com/3d2fbd826f3b816fa9bdfa919e3c7d2c
+- BUG-ADP-TTE-01-A: https://app.notion.com/3d5fbd826f3b8103950fd4f31ae844e6
+
+（Notionのこの内容を外部送信前提の非公開情報として扱う必要はない——本PoCのために
+本Taskが読み取り許可済みのADP運用データであり、brainのような別組織の非公開content
+ではない。ただし§8.0.1のデータ転送ゲート再確認は、T04が実際にJevへ送信する直前に
+別途実施すること。本節はfixtureの凍結のみを行い、送信は行っていない。）
+
+#### 8.5.4 この節が解決するもの・解決しないもの
+
+**解決した**: 10件全件について、削減後の4フィールドschema（§8.5.2）が
+`task_title`・`task_description`・`prior_review_rounds_if_reattempt`・
+`similar_task_split_history`のすべてで凍結・直列化可能になった。§8.2.4 step 1・
+step 8・step 9が「request schemaを満たす実例が0件」としていた状態は解消され、
+Choice/Score出力の収集自体（Latency/Cost/Reproducibility計測を含む）は10件全件で
+実行可能になった。
+
+**解決していない**: Accuracy/Calibration/False-escalation rate/
+Missed-escalation rateという「ground truthとの照合」を要する主要指標の対象範囲
+確定（§8.2.4 step 1〜5）は、本節の対象外のまま維持する。理由は2つ。
+
+1. DP9-03の循環参照ground truth問題（§8.2.2のDP9-03注記）は、`task_description`の
+   凍結だけでは解消しない——独立した実行完了エビデンス（duration）が別途必要。
+2. DP9-05〜10の`fits-as-is`admissionに必要な「`Σ Active Duration` ≤ 8時間」
+   「`Started At`→`Completed At`のelapsed ≤ 8時間」という2つの独立エビデンス
+   （§8.2.4 step 5）について、本セッションはNotion Task Time Events
+   （`collection://544b9a17-2653-47aa-b62c-bb52425b3bf2`）を実際に参照したが、
+   **データ品質上の理由でこの数値を正本として使うことを見送った**。具体的には、
+   ADP-057に紐づくActive Time Eventの1件が`Started At`=2026-09-05 09:48、
+   `Ended At`=2026-09-09 13:57（約4日間、100時間超）という、1 AI working dayの
+   定義と正面から矛盾する値を記録していた。これはBUG-ADP-TTE-01が報告した
+   「Active/Waiting計測とOpen残留」の既知の問題（本書DP-9節の情報源でもある）と
+   整合する種類のデータ品質欠陥であり、§8.2.4 step 5が要求する「Waiting区間を
+   個別に検証してから控除する」という慎重な手順を経ずに生のTime Events合計を
+   admission根拠として使うことは、既存ドキュメントの慎重さをかえって裏切る。
+   したがって、Accuracy/Calibration/False-escalation/Missed-escalationの各指標の
+   admission状態は、§8.2.4・§8.4が記録した「検証待ちのため計測不能」のまま維持し、
+   この観察（ADP-057の異常値）を新たな既知の制約として追記するに留める。Sync Log
+   突合によるWaiting区間控除の検証は、request schema fixtureの凍結とは別の専用
+   パスとして、T04またはこの先の継続セッションへ持ち越す。
+
+**§8.0.1 Budget式の再計算（DP-9分のみ、T04が実際に送信する直前に再確認すること）**:
+DP-9は4フィールドschemaで10件とも送信可能になったため、§8.0.1の式
+（`DP-4件数×4 + DP-9件数×8 + DP-10件数×4`）のDP-9項は`10×8=80`回
+（初回Choice 1回＋Score 1回＋Reproducibility 2×3=6回、fixtureあたり8回、
+§8.0.1参照）で計算する。これは送信してよいという許可ではなく、§8.0.1の6問ゲートを
+T04が実行直前に満たした上で適用する見積もりである。
+
+### 8.6 2026-10-01追記 — DP-10 運用ログ由来フィクスチャ（`ADP-065-T03`継続セッション）
+
+**Status**: §8.3.1・§8.4・§9.7が持ち越した「DP-10は本書収録2件（DP10-01・
+DP10-05）がいずれもDP-10本来の母集団（新規MISC/Backlogアイテム 対 既存Open
+Task）に属さず、主要指標側フィクスチャが実質0件」というgapに対し、本節が追加探索と
+新規フィクスチャの確保を行う。
+
+#### 8.6.1 探索の経緯（Postmortemsでは見つからず、運用ログで見つかった）
+
+オーナー指示（本セッション冒頭の背景）はPostmortems
+（`collection://4452f173-83bf-41a7-a0e1-3aa32cd302d5`）を主な探索先として示唆して
+いたため、まずそちらを検索した。「新規Task」「MISC」「Backlog」「重複」「既存
+Task」等のキーワードでPostmortems内を検索した結果、ヒットしたのは全て**DP-3**
+（Backlog→Epic/Story placement routing、本書DP-3節）の母集団——「新規TaskをMISC/
+Backlogで受付せず内容推定でADPへ直接所属させた」という**配置**の誤りに関する
+Postmortem（PM-1、PM-3）——であり、DP-10が対象とする「新規MISC/Backlogアイテムが
+既存のOpen Taskと重複しているか」という**重複検知**の判断記録はPostmortems内には
+見つからなかった。Postmortemsが「ルール違反・インシデント」を記録する設計であるのに
+対し、DP-10の重複判定は（うまく機能している限り）インシデント化されず、日々の
+Backlog Refinement・PR Flow Gate運用ログの中に埋め込まれたまま明示的なPostmortem
+を生成しないため、と考えられる。
+
+探索範囲をNotion全体（Stories & Tasks、および運用手順ページ「Job Schedule｜AI自動
+実行スケジュール」）へ広げたところ、同ページのDaily Close実行記録、および
+Stories & Tasks内の`PR-RECON-*`命名Task群に、DP-10が対象とする母集団と構造的に
+一致する実例が複数見つかった——「新しく独立Taskを起票すべきか、それとも既存の
+Open Taskが既にカバーしているか」という判断が、Daily Close／PR Flow Gateの実行の
+たびに明示的に行われ、その場で記録されていた。
+
+**これらはいずれも`cloud42-labo/ai-development-platform`と同じPublicな
+Notion「Vibe Product Development」ワークスペース内の運用データであり、DP-4/DP-10の
+既存fixtureが複数回のCodexレビューで削除を余儀なくされた「非公開`cloud42-labo/
+brain`content由来」という制約（§8.1.1・§8.3.1の削除注記）には該当しない。**
+したがって本節のfixtureは、DP10-01・DP10-05とは異なり、内容を転記した上でこの
+Publicリポジトリ（`cloud42-labo/ai-development-platform`）へ収録してよい。
+
+#### 8.6.2 評価データセット（実例4件、duplicate=Yes 2件・duplicate=No 2件）
+
+| # | `new_item_text`（新規に起票を検討した項目） | `candidate_existing_task_text`（比較対象） | `candidate_existing_task_status`（判定時点） | 出典 |
+|---|---|---|---|---|
+| DP10-06 | 2026-09-20 Daily Close時点で検討された、`ai-development-platform` PR #53（`ADP-044-D`のペアPR、`skills#26`は既にmerge済みだがPR #53自身はmain conflictで未完了）の**conflict解消フォローアップ用の新規Task**。 | `ADP-044-D｜Product Vision Quality Standardと承認Gateを定義する`——Acceptance Criteriaに定義されたVision品質基準・承認Gateの策定が目的で、PR #53はこのTaskの成果物。 | Review相当（2026-09-20時点。ADP-044-DはStarted At 2026-09-14、Completed At 2026-09-22のため、判定時点ではまだ未完了） | Job Schedule｜AI自動実行スケジュール（Daily Close — 2026-09-20 JST節）:「ADP-044-D paired ADP PR #53はskills#26 merge済みだが自身はconflictのため未完了。既存Taskを重複作成せずcurrent taskのnext actionをconflict resolutionへ同期する。」 |
+| DP10-07 | 2026-09-22 Daily Close時点で検討された、ADP-065 Jev PoC（T03）の**採否・本番導入検討用の新規Task**起票案。 | `ADP-065-T04｜Decision Canonical接続方式とJev採否を確定する`——T03のPoC結果を受けてDecision Adapterの接続方式・Jev採否を確定するためのTask。T03への依存（`Dependency: ADP-065-T03`）を明示して既に存在していた。 | Backlog/Ready相当（2026-09-22時点でT03から見た既存の後続依存Task） | Job Schedule｜AI自動実行スケジュール（Daily Close 実行記録｜2026-09-22 JST節）:「T03 PoC/採否は既存依存Taskを継続し、重複Taskは作成していない。」 |
+| DP10-08 | 2026-09-25 Daily Close PR Flow Gateで検出された、`cloud42-labo/skills` PR #51（head `230aa011fb`、Codex P1指摘1件未解決）を紐づける**新規Task**起票案。 | （無し——判定時点でPR #51を参照する既存のOpen Task/Bug/Technical Taskは1件も見つからなかった。） | N/A（候補となる既存Open Taskが存在しない） | Daily Close｜2026-09-25 JST節:「ORPHAN: skills #51…既存の非terminal Notion execution unitを解決できなかったため`PR-RECON-20260925-SKILLS51`をReady起票。」→実際に新規Task`PR-RECON-20260925-SKILLS51｜skills PR #51を正規Taskへ紐付ける`が起票された。 |
+| DP10-09 | 2026-09-26 Daily Close PR Flow Gateで検出された、`cloud42-labo/skills` PR #52（生成元変更要求/Taskとの対応未確定）を紐づける**新規Task**起票案。 | （無し——同上、判定時点で該当する既存Open Taskが見つからなかった。） | N/A（候補となる既存Open Taskが存在しない） | 実際に新規Task`PR-RECON-20260926-SKILLS52｜skills PR #52を正規Taskへ紐付ける`（AC:「PR #52の生成元変更要求/Taskとの対応が確定し…」）が起票された。 |
+
+#### 8.6.3 期待出力（ground truth）
+
+| # | Ground truth（Noul: duplicate確率） | 根拠 |
+|---|---|---|
+| DP10-06 | duplicate = Yes（高確率） | 実際の運用判断として、新規Task起票を見送り既存Task（ADP-044-D）のnext actionを更新する方を選んだ（上記出典）。 |
+| DP10-07 | duplicate = Yes（高確率） | 実際の運用判断として、新規Task起票を見送り既存の依存Task（ADP-065-T04）を継続する方を選んだ。 |
+| DP10-08 | duplicate = No | 候補となる既存Open Taskが見つからず、実際に新規Task（`PR-RECON-20260925-SKILLS51`）が起票された。 |
+| DP10-09 | duplicate = No | 同上（`PR-RECON-20260926-SKILLS52`）。 |
+
+DP10-06〜09の4件はいずれも§8.3.3のrequest schema（`new_item_text`・
+`candidate_existing_task_text`・`candidate_existing_task_status`）を完全に
+満たし、§8.3.1が要求する「判定前に存在したテキストのみ・結果情報を混入させない」
+という分離も満たす——各出典は判定が行われたまさにそのDaily Close記録そのものであり、
+後から要約・言い換えたものではない。DP10-08・DP10-09は候補Taskが存在しない
+（`candidate_existing_task_text`が空）という構成だが、これはDP-10の実運用（新規
+候補をまず類似度等で絞り込み、候補が0件ならそのままduplicate=Noとして通常の新規
+起票フローへ進む、§8.3.4 step 2参照）とも整合する正当な値であり、欠損データでは
+ない。
+
+**§8.3.4 step 1の再評価**: 主要指標（Accuracy／Agreement／Calibration／
+False-escalation rate／Missed-escalation rate）に無条件で使える実例は、本節の
+4件（DP10-06〜09）によって**0件から4件**へ増えた。DP10-01・DP10-05は引き続き
+population mismatchのため参考実例のまま据え置く。
+
+**§8.0.1 Budget式の再計算（DP-10分）**: DP-10は`4×4=16回`（fixtureあたり初回
+1回＋Reproducibility 3回）として計算する。T04が実際に送信する直前に、§8.0.1の
+6問ゲートをあらためて満たした上で適用すること。
+
+**残る既知のギャップ**: duplicate=Yes・No各2件を確保できたが、§8.3.1が示す
+「本来の母集団（新規MISC/Backlogアイテム 対 既存Open Task）」という定義のうち、
+DP10-06・07は「新規Task候補 対 既存Technical Task」、DP10-08・09は「新規Task候補
+対 候補無し」であり、どれも「MISC/Backlog」という起票前段階のアイテムではなく
+「PR/Issue起点のフォローアップ候補」である点は、§8.3.1が定義する母集団の文字通りの
+意味とはなお少しズレがある（MISCというラベルの付いたBacklogアイテム自体の重複検知
+ではない）。この違いをそれらしく隠さず明記する——必要であれば、Backlog Refinement
+のMISC intake時点で実際に「この新規MISCは既存Taskと重複か」を判定したログが別途
+Notion内に存在する可能性があり、将来のセッションがBacklog Refinement実行記録
+（週次スプリント締めのログ）を専用に探索することを推奨する。
+
 ## 9. ライブ実行結果（`ADP-065-T03`, 2026-09-28 JST）
 
 **Status**: 本節が実際のJevライブ呼び出し結果を記録する初回の追記。
@@ -2708,3 +2951,261 @@ escalation・missed escalationいずれの定義上の指標（客観4件のみ�
   APIコールは§9.2が記す`questions`辞書＋discriminated union形式へ
   変換して送信すること（DP-4での変換例は本セッションのPRコミット
   履歴を参照）。
+
+### 9.8 2026-10-01追記 — T03継続セッション: フィクスチャ解消とライブ実行ブロッカー
+
+**実行環境の確認**: 本継続セッションの環境変数を確認したところ、
+`TYPESAFE_API_KEY`は**設定されていない**（シェルで`${TYPESAFE_API_KEY:+yes}`を
+展開した結果が空だった）。§9.1が記録した2026-09-28のDP-4ライブ実行は
+「Claude Code on the web Default環境」でSecret injectionが有効な状態で行われたが、
+本継続セッションの実行環境にはそのSecretが注入されていない。
+
+**本セッションでのライブ呼び出し**: 上記の理由により、本セッションはDP-9・DP-10の
+いずれについてもJevへのライブ呼び出しを**一切実行していない**。§8.5・§8.6で
+解消したのはrequest schemaの凍結・直列化可能性（fixtureの「送信可能性」）のみで
+あり、実際のAccuracy/Agreement/Calibration/Latency/Cost/Reproducibility/
+False-escalation/Missed-escalation等の実測値はまだ存在しない。これらの数値を
+本節または他のいずれの節にも**捏造していない**。
+
+**次の実行に必要な条件**: 次にこのPoCを実行するセッションは、(a)
+`TYPESAFE_API_KEY`（またはJev認証に必要な同等のSecret）が注入された実行環境で
+動作していること、(b) §8.0.1の6問ゲートをその実行の直前に個別に満たし記録する
+こと、(c) §8.5.4が指摘する「Score calibration admissionに必要な独立duration
+エビデンス」をADP-057の異常値のようなデータ品質問題を踏まえて個別に検証すること、
+を満たした上で、DP-9（10件、§8.5.3）・DP-10（4件、§8.6.2）のrequest body
+（§9.2が確定した実際のAPIスキーマ、`state`＋`questions`辞書形式へ変換したもの）を
+送信すること。
+
+**本パスの位置づけ**: 本セッションはADP-065-T03の範囲内で、過去2セッションが
+先送りしていたDP-9の方法論判断（§8.5.1）を確定し、DP-9・DP-10双方のfixtureを
+request schemaとして送信可能な状態まで進めた。ライブ実行自体は、Jev認証Secretが
+利用可能な別セッション（`ADP-065-T04`、またはT03の追加パス）へ引き継ぐ。
+
+### 9.9 2026-10-01追記 — T03最終パス: DP-9・DP-10ライブ実行結果（本セッション）
+
+**Status**: §9.8が「このセッションの実行環境には認証Secretが注入されておらず、
+DP-9・DP-10のライブ呼び出しを一切実行していない」と記録した状態を、本継続セッションが
+解消する。Owner（駒場さん）本人が実際にClaude Code Cloud Environment設定画面を開き、
+「API認証情報」機能に`TYPESAFE_API_KEY`が`api.typesafe.ai`向けにバインド済みである
+スクリーンショットを示して確認した——この機構は値をセッションへ一切露出せずに呼び出し時点で
+認証情報を注入するため、`env | grep -i typesafe`が何も見つけなかったこと（§9.8の記録）自体は
+認証が無いことの証拠にならない。本セッションはこれをOwner確認済みの事実として受け取り、
+`TYPESAFE_API_KEY`を環境変数として探す/要求することをやめ、素のHTTPSで
+`https://api.typesafe.ai/v1/systemone`へ直接POSTした。
+
+**接続確認（実データ送信前）**: `GET https://api.typesafe.ai/v1/models`をAuthorization
+ヘッダ無しで実行し、`200 OK`で`{"models":[{"name":"jev-latest",...},{"name":"jev-preview",...}]}`
+を受領した（本書・ログにkey文字列は一切出力していない——そもそも参照していない）。
+
+**実データ送信結果**: DP-9 10 fixture × 4回（初回1回＋reproducibility 3回）＝40呼び出し、
+DP-10 4 fixture × 4回＝16呼び出し、合計56呼び出しすべてで`HTTP 200`を受領した。`401`・`403`は
+一度も発生しなかった。全56回で`response.model == "jev-1.13.0"`を確認済み（§8.0.3のモデル固定
+要件、DP-4と同じ検証）。送信・解析スクリプトおよび生データ:
+`evidence/adp-065-t03/jev_dp9_dp10_poc.py`（送信）、
+`evidence/adp-065-t03/analyze_dp9_dp10.py`（集計）、
+`evidence/adp-065-t03/dp9_raw_results.json`・`evidence/adp-065-t03/dp10_raw_results.json`（生応答）。
+
+**API呼び出し形状**: §9.2が確定した実スキーマに従い、DP-9は1回のHTTP POSTへ
+`policy_fit_choice`（Choice、§8.2.3の3択）と`ai_workdays_score`（Score、§8.2.3の9要素帯
+`criteria`配列）の2つの`questions`を同時に含めて送信した（§5のAdapter shapeが
+`typed_question`単位の独立`decide()`呼び出しとして定義する「独立性」は、§8.0.1の
+budget式が定める「fixtureあたり8回＝初回Choice 1回＋Score 1回＋reproducibility 2×3=6回」
+という**回答単位**のカウントとして維持しており、HTTPリクエスト自体を2本に分けるという意味
+ではないと解釈した——1 HTTPコールで2つの独立した`answers`エントリを受け取れることを
+§9.2のレスポンス形状`{model, answers: {<question名>: <Answer>}, usage}`で確認済み）。
+DP-10は1回のHTTP POSTへ`duplicate_noul`（Noul）を1つだけ含めて送信した。
+
+#### 9.9.1 DP-9: 補正したground truthの確定（Accuracy/Calibration専用、§8.5.4の積み残し解消）
+
+§8.5.4は、Accuracy/Calibration/False-escalation/Missed-escalationの対象範囲確定
+（§8.2.4 step 1〜5）を「ADP-057のTask Time Eventsに約100時間という1 AI working dayの
+定義と正面から矛盾する異常値がある」ことを理由に積み残していた。本セッションは、この
+異常値そのものを正本として使うのではなく、**Notion Stories & Tasksの`Started At`・
+`Completed At`（またはSuperseded実例では`Closed At`）のwall-clock経過時間と、各Taskの
+`Result`本文に記録された実際の完了結果（AC達成/未達、Superseded/Done、再分割の有無）**を
+独立代替エビデンスとして10件全件について直接確認した——異常なTask Time Events合計値
+（ADP-057の約100時間1件）は本節のいずれの判定にも使っていない。
+
+| # | Notion対象 | Started At → Completed/Closed At（wall-clock） | 実際の結果（Result本文） | 補正後ground truth | 主要指標へのadmit |
+|---|---|---|---|---|---|
+| DP9-01 | ADP-051 | 2026-09-03 09:54 → 2026-09-04 23:23（約37h29m） | 34 review roundsの末にOwner裁定でSuperseded、5分割（ADP-051-A〜E） | `needs-split`（既存判断を維持、循環なし） | Admit |
+| DP9-02 | ADP-051-B2/B3 | 2026-09-13 04:20/04:50 → 2026-09-13 22:09（約17h19m〜17h49m） | PR #50が9 review roundsに到達、実バグ20件超検出の末にSuperseded、B4/B5/B6へ再分割 | `needs-split`（既存判断を維持） | Admit |
+| DP9-03 | ADP-051-B | 2026-09-12 04:20 → 2026-09-12 13:58（約9h38m、8h超） | NotionのStatusフィールドは`Done`と表示されているが、`Closure Reason`は`Superseded`、Result本文は「Work Type判定本体はAC未達のためDaily CloseでCarry Overせず…本TaskをSupersededでクローズ」と明記——Status表示とClosure Reason/Resultが食い違うデータ品質上の不整合を発見 | **`needs-split`（補正）**——§8.2.2がAC自体の事前見積もりのみを根拠にしていた循環参照`fits-as-is`を、Result本文という独立した実行結果の記述で置き換えて解消 | Admit（補正） |
+| DP9-04 | BUG-ADP-TTE-01-B | 2026-09-11 04:16 → 2026-09-11 09:58（約5h42m、8h以内） | PR #46をChrisが最終確認しsquash merge、ACは達成（ただしstop側/self-closeは着手前のApproach Decision時点で別Taskへ切り出し済みのスコープ） | `fits-as-is`（凍結済みAC自体が既にこの縮小スコープを記述しているため、このAC記述に対する判定としては確認済み） | Admit |
+| DP9-05 | ADP-057 | Created 2026-09-05 → Completed 2026-09-21（約16日、複数セッション窓にまたがり都度部分進捗） | Type=Story（DP-9が対象とする単一Taskではなく、本来複数Subtaskの集合）。13:00/17:00等複数の実行窓で段階的にAC未達→一部修正→最終達成という経過を辿った | **`needs-split`（補正）**——§8.2.2がPR作成〜merge時刻という部分的代理指標だけで`fits-as-is`としていたものを、Created→Completedの全期間（16日）とResult本文の経過記述で置き換え | Admit（ただしType=Storyであるという母集団不一致を別途注記） |
+| DP9-06 | ADP-053 | 2026-09-05 04:20 → 2026-09-05 09:40（約5h20m、8h以内） | 同日中に廃止手順を一括完了、PR #27をsquash merge | `fits-as-is`（既存判断を維持、独立エビデンスで確認） | Admit |
+| DP9-07 | ADP-055 | 2026-09-11 09:45 → 2026-09-12 10:46（約25h01m、暦日をまたぐ） | PR #48 merge後、月次KPI用Apps Scriptのデプロイ・トリガー設定が別日に完了 | `fits-as-is`（元の判断を積極的に否定する証拠はない） | **Admit しない**——経過時間が8hを超えるが、夜間のWaiting区間を個別に検証・控除できておらず（§8.2.4 step 5が要求する手続きを未実施）、単純な経過時間だけでは確定も否定もできない |
+| DP9-08 | ADP-044-D | 2026-09-14 04:03 → 2026-09-22 05:26（約8日1h、193h超） | Result本文: 「main競合を通常merge commitで解消。Codex未解決P1×3（PRD埋込Visionの監査契約不足、transition-specific evidence sufficiency不足、workflow package index欠落）を同一PRで修正」。Assigned Agent=ChatGPT、Claudeが独立レビュー・merge | **`needs-split`（補正）**——§8.2.2がPR作成〜merge時刻の代理指標だけで`fits-as-is`としていたが、実際のライフサイクル全体は8日に及び、main競合解消＋Codex P1 3件の修正という実質的な複数ラウンド作業を要した | Admit（補正） |
+| DP9-09 | ADP-059-E | Started At 2026-09-06 03:59のみ、Completed Atなし（Status=Review） | §8.5.3が既に記録した通りDone未到達。本セッションも`Completed At`を確認できなかった | （判定不能） | Admit しない（完了エビデンス自体が存在しない） |
+| DP9-10 | BUG-ADP-TTE-01-A | Started At 2026-09-11 21:01のみ、Completed Atなし（Status=Review） | 同上、Done未到達 | （判定不能） | Admit しない（同上） |
+
+**結果**: 主要指標（Accuracy/False-escalation/Missed-escalation）へadmitできる実例は
+**10件中7件**（DP9-01, 02, 03, 04, 05, 06, 08）。3件（DP9-07, 09, 10）は本セッションでも
+独立エビデンスが確定せず、admitしない（捏造や推測での繰り上げはしていない）。このうち
+DP9-03・DP9-05・DP9-08の3件は、§8.2.2の時点とground truthの値自体が変わった
+（`fits-as-is`→`needs-split`）補正であることを明記する——これは本セッションが新しい
+Notion一次データ（`Started At`/`Completed At`/`Closed At`とResult本文）に直接
+アクセスしたことで可能になった修正であり、Jevの出力を見た後に確定したものではない
+（ground truthの確定は§9.9.2のJev応答集計より前に完了させた）。
+
+#### 9.9.2 DP-9ライブ実行結果（Choice + Score、全10 fixture・40呼び出し）
+
+| # | 初回Choice | choice_confidence | mapped_score_band | score_confidence | 最終決定 | 4回のreproducibility | 補正GT | Admit | 一致 |
+|---|---|---|---|---|---|---|---|---|---|
+| DP9-01 | `needs-split` | 0.47 | 7（1週間以内） | 0.42 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `needs-split` | ✓ | ✅ |
+| DP9-02 | `needs-split` | 0.43 | 4（2日以内） | 0.49 | escalate | choice 4/4一致、**band不安定**（4回中3回がband4、1回がband5——隣接帯の僅差ties） | `needs-split` | ✓ | ✅ |
+| DP9-03 | `fits-as-is` | 0.37 | 2（1日以内） | 0.90 | escalate（`choice_confidence`未達のみが原因、score側は両条件とも充足） | choice 4/4一致、band 4/4一致、final 4/4一致 | `needs-split` | ✓ | ❌ |
+| DP9-04 | `fits-as-is` | 0.52 | 5（3日以内） | 0.29 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `fits-as-is` | ✓ | ✅ |
+| DP9-05 | `needs-split` | 0.99 | 8（1ヶ月超） | 0.37 | escalate | choice 4/4一致（4回ともconfidence 0.99固定）、band 4/4一致、final 4/4一致 | `needs-split` | ✓ | ✅ |
+| DP9-06 | `needs-split` | 0.60 | 7（1週間以内） | 0.34 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `fits-as-is` | ✓ | ❌ |
+| DP9-07 | `needs-split` | 0.89 | 7（1週間以内） | 0.39 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `fits-as-is` | （Admit外） | — |
+| DP9-08 | `needs-split` | 0.80 | 7（1週間以内） | 0.37 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | `needs-split` | ✓ | ✅ |
+| DP9-09 | `fits-as-is` | 0.55 | 5（3日以内） | 0.27 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | （判定不能） | （Admit外） | — |
+| DP9-10 | `fits-as-is` | 0.40 | 5（3日以内） | 0.32 | escalate | choice 4/4一致、band 4/4一致、final 4/4一致 | （判定不能） | （Admit外） | — |
+
+**Accuracy（raw Choice、admit 7件）**: 5/7 = **71.4%**（誤り2件: DP9-03は`fits-as-is`と
+誤判定［正解`needs-split`、循環を解消して補正した値］、DP9-06も`needs-split`と正しく判定した
+はずが実際はground truth自体が`fits-as-is`——raw Choiceが`needs-split`でground truthが
+`fits-as-is`という逆方向の誤りで、両者は異なる誤りパターンである）。
+
+**Calibration（admit 7件、サンプル小のため参考値）**: `choice_confidence`を4帯へ区切った
+reliability内訳は次の通り。
+
+| confidence帯 | 件数 | 正解数 | 的中率 |
+|---|---|---|---|
+| 0.3以上0.5未満 | 3（DP9-01, 02, 03） | 2（DP9-03が誤り） | 66.7% |
+| 0.5以上0.7未満 | 2（DP9-04, 06） | 1（DP9-06が誤り） | 50.0% |
+| 0.7以上0.9未満 | 1（DP9-08） | 1 | 100.0% |
+| 0.9以上1.0以下 | 1（DP9-05） | 1 | 100.0% |
+
+confidence帯が上がるほど的中率も上がる弱い傾向は観測されるが、n=7（かつ各帯1〜3件）
+では統計的に意味のあるcalibration結論は出せない。DP-4（客観4件が全てconfidence 1.00に
+集中）とは対照的に、DP-9のraw Choice confidenceは0.37〜0.99へ広く分布しており、
+この点自体がDP-9の判定（sizing judgment）がDP-4の統制された境界分類より本質的に
+不確実性の高いタスクであることを示している。
+
+**最重要の構造的発見——no-escalateパスが一度も発火しなかった**: §8.2.3が定める
+最終決定の4条件（`choice=fits-as-is` かつ `choice_confidence>=0.7` かつ
+`score_confidence>=0.7` かつ `mapped_score_band==2`）は、**10 fixture×4回＝40回の
+呼び出し全件で一度も同時に満たされなかった**。raw Choiceが`fits-as-is`だった4 fixture
+（DP9-03, 04, 09, 10）のいずれにおいても、4回の試行全てで`choice_confidence`が0.7を
+一度も超えなかった（観測範囲: 0.31〜0.55）。これはfixture固有の偶然ではなく、
+この10件という比較的小さいサンプル全体を通した一貫した傾向であり、**現在の仕様
+（Choice・Score・帯の3つのAND条件、かつ閾値0.7）は、今回の実例群に対しては
+「高confidence・低摩擦の一次分類をFinalizeへ添付する」no-escalateパスを事実上
+一度も通さない**ことを意味する。Finalizeモード自体は省略されない（§8.2.3の設計通り）ため、
+Taskの処理自体に支障はないが、**DP-9導入の主要な期待効果（高confidenceな
+`fits-as-is`判定をFinalizeへの入力として活用し摩擦を下げること）が、現行の閾値・
+AND条件設計のままでは実質的に機能しない**可能性を示す一次エビデンスとして、
+T04が閾値の見直し（ただし§8.2.3が定める通り、評価結果を見てから事後的に選び直す
+ことは禁止——独立したholdoutセットでの事前較正が必要）を検討する際の判断材料として記録する。
+
+**False-escalation rate（ground truth=`fits-as-is`の2件、DP9-04・DP9-06が分母）**:
+2/2 = **100%**。DP9-04は raw Choiceこそ正しく`fits-as-is`を返したが`choice_confidence`
+（0.52）が閾値未満、DP9-06はraw Choice自体が`needs-split`（ground truthと不一致）——
+原因は異なるが、いずれも最終決定はescalateとなり、false escalationとしてカウントされる。
+
+**Missed-escalation rate（ground truth=`needs-split`の5件、DP9-01/02/03/05/08が分母）**:
+0/5 = **0%**。安全上最も重視すべきこの指標は今回も0を維持した——Jevが`needs-split`な
+実例を`no-escalate`として見逃した例は1件もない。
+
+**Reproducibility**: `choice`は10 fixture全件で4回とも完全一致。`mapped_score_band`は
+DP9-02の1件のみ4回中1回（call 3）が隣接帯（band 4→5）へ変動し、残り9 fixtureは完全安定。
+この結果、**thresholded最終決定（no-escalate/escalate）は10 fixture全件で4回とも完全に
+安定していた**（band変動したDP9-02も、どちらの帯でも`score_confidence`が0.7未満のため
+最終決定はescalateのまま変わらない）。
+
+**Latency**: 10 fixtureの初回呼び出し（`call_index==0`）でp50=306ms、p95=700ms
+（最小289ms、最大700ms——最大値はDP9-01の初回呼び出しで、cold-start的な単発の
+遅延と見られ、以降の呼び出しは全て400ms未満）。参考情報として、40回全体
+（初回10回＋reproducibility 30回）ではp50=323ms、p95=374ms。
+
+**Cost**: 初回10回のみ: input tokens合計10,694 → $0.000449。40回全件
+（初回10回＋reproducibility 30回）: input tokens合計42,776 → **$0.001797**
+（$0.042/MTok、DP-4と同じ単価）。レート制限・再試行は一度も発生しなかった
+（56回全て初回で`200 OK`）。
+
+#### 9.9.3 DP-10ライブ実行結果（Noul、全4 fixture・16呼び出し）
+
+| # | 初回noul（yes確率） | 判定（閾値0.7） | 4回のreproducibility | Ground truth | 一致 |
+|---|---|---|---|---|---|
+| DP10-06 | 0.38 | not-duplicate | [0.38, 0.38, 0.38, 0.37]（実質完全安定） | `duplicate=Yes` | ❌ |
+| DP10-07 | 0.78 | duplicate | [0.78, 0.79, 0.78, 0.80]（実質完全安定） | `duplicate=Yes` | ✅ |
+| DP10-08 | 0.04 | not-duplicate | [0.04, 0.04, 0.04, 0.04]（完全一致） | `duplicate=No` | ✅ |
+| DP10-09 | 0.05 | not-duplicate | [0.05, 0.05, 0.04, 0.05]（実質完全安定） | `duplicate=No` | ✅ |
+
+**Accuracy（4件全件、ただし§8.6.3末尾が明記する母集団定義とのズレ——「新規Task候補 対
+既存Technical Task／候補無し」であり文字通りの「新規MISC/Backlogアイテム」ではない点は
+注記のまま維持）**: 3/4 = **75%**。唯一の誤りはDP10-06——運用上は新規Task起票を見送り
+既存Task（ADP-044-D）のnext actionを更新する判断（duplicate=Yes相当）が取られたが、
+Jevはyes確率0.38（4回とも0.37〜0.38で安定）と、重複ではないと判定した。この実例は
+ADP-044-Dの本文（Vision品質基準・承認Gateの策定）と新規項目（PR #53のconflict解消
+フォローアップ）の関係が、字面上の重複ではなく「同じTaskの成果物に対するフォローアップ」
+という間接的な関係であり、Jevが字面の重複度が低いと判定した可能性がある——運用判断は
+「新規Task化せず既存Taskのnext actionを更新する」という**実務上の重複回避**の結果であり、
+DP-10が問う「新規項目と既存項目が内容として重複するか」という字面的な重複判定とは
+やや異なる軸である可能性がある、という限界を記録する。
+
+**False-escalation rate（ground truth=No、DP10-08・09が分母）**: 0/2 = **0%**。
+
+**Missed-escalation rate（ground truth=Yes、DP10-06・07が分母）**: 1/2 = **50%**
+（DP10-06の見逃し。上記の通り）。4件という小サンプルでの50%は、1件の誤りが
+直接50%ポイントの変動を生む規模であり、この数値自体の一般化はできない。
+
+**Reproducibility**: `noul`（yes確率）はDP10-08で4回完全一致（0.04固定）、他3 fixtureは
+±0.01〜0.02の範囲に収まる実質的な安定。閾値0.7によるflag判定は4 fixture全件で
+4回とも完全に安定していた。
+
+**Latency**: 4 fixtureの初回呼び出しでp50=368ms、p95=502ms（最小315ms、最大502ms）。
+16回全体ではp50=321ms、p95=485ms。
+
+**Cost**: 初回4回のみ: input tokens合計2,351 → $0.000099。16回全件: input tokens合計
+9,404 → **$0.000395**。
+
+#### 9.9.4 Cost集計（DP-4 + DP-9 + DP-10、本Task累計）
+
+| パス | 呼び出し数 | input tokens | Cost |
+|---|---|---|---|
+| DP-4（2026-09-28、§9.4） | 24 | 24,844 | $0.001043 |
+| DP-9（本パス、§9.9.2） | 40 | 42,776 | $0.001797 |
+| DP-10（本パス、§9.9.3） | 16 | 9,404 | $0.000395 |
+| **合計** | **80** | **77,024** | **$0.003235** |
+
+月次承認予算（約$5/月）に対し累計$0.003235は0.065%——headroomは引き続き極めて大きい。
+ネットワーク/レート制限起因の再試行は本パスでも一度も発生しなかった（56回全て初回で
+`200 OK`）。
+
+#### 9.9.5 Secret取り扱いの確認（本パス）
+
+- API keyの値は一度も参照・出力していない。`https://api.typesafe.ai/v1/systemone`・
+  `https://api.typesafe.ai/v1/models`のいずれの呼び出しもAuthorizationヘッダを一切
+  付与していない、素のHTTPS POST/GETである。認証はOwner確認済みの「API認証情報」
+  機構によりplatform側で呼び出し時点に注入されると理解しており、本セッションは
+  その注入経路やkey文字列を一切観測していない。
+- `401`・`403`は56回中一度も発生しなかった（全件`200 OK`）。本節冒頭が引用した
+  Owner確認（スクリーンショット、`TYPESAFE_API_KEY`→`api.typesafe.ai`バインド）を
+  実際のライブ呼び出し結果が裏付けた。
+- 送信した`state`の内容（DP-9のTask title/AC、DP-10のDaily Close運用ログ由来テキスト）は、
+  §8.5.3・§8.6.1が確認した通り`cloud42-labo/ai-development-platform`と同じPublicな
+  Notion「Vibe Product Development」ワークスペース内の運用データであり、非公開
+  `cloud42-labo/brain`由来のcontentは含まれていない。
+
+#### 9.9.6 T04への引き継ぎ事項（更新）
+
+- DP-4・DP-9・DP-10の3 Decision Point全てについて、ライブ実行・主要指標の実測・証跡保存が
+  完了した。§9.7が持ち越していた「DP-9/DP-10は未実行」という状態はこれで解消する。
+- DP-9は10 fixture中7件がAccuracy/False-escalation/Missed-escalationへadmit済み
+  （§9.9.1）。残る3件（DP9-07はWaiting区間未検証、DP9-09・10はStatus=Reviewで
+  完了エビデンスが存在しない）は、T04またはこの先の継続セッションが個別に解消できる
+  候補として記録するに留め、推測で埋めていない。
+- DP-9の最終決定ロジック（Choice・Score・帯のAND条件、閾値0.7）は、今回の実例群では
+  no-escalateパスを一度も通さなかった（§9.9.2）。T04がこの設計をそのまま本番導入する
+  か、閾値・AND条件を見直すかを判断する際は、新しいholdoutセットでの事前較正を経ること
+  （§8.2.3の既定規約通り、今回の出力を見てから事後的に閾値を選び直さない）。
+- DP-10は4 fixture中1件（DP10-06）でmissed escalationが観測された（§9.9.3）。
+  母集団は§8.6.2が既に記録した通り「新規Task候補 対 既存Technical Task／候補無し」で
+  あり、§8.3.1が定義する「新規MISC/Backlogアイテム」そのものとは文字通り一致しない
+  ——T04がさらに母集団適合度の高い実例を拡充する場合、この限界を踏まえること。
+- `dependency_count`を欠いたDP-9の4フィールドschema（§8.5.2）は、実際のAPI呼び出しでも
+  問題なく機能した（全10 fixtureでJevが有効な`choice`・`score`を返した）。T04が
+  将来`dependency_count`を復活させたい場合は§8.5.1が示す運用変更が別途必要。
