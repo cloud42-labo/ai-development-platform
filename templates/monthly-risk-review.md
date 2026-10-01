@@ -30,6 +30,7 @@
 - Preventive Tasks — Open / Done / Blocked:
 - Unresolved preventive-work age:
 - Detection path — Human / AI self / other AI / automated:
+- Documentation-only remediation / subsequent recurrence:
 - Owner/Human escalations:
 - Controls upgraded to executable gates/automation:
 
