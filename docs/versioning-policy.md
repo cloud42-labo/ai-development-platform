@@ -49,10 +49,10 @@ Multi-step processes (`docs/operating-guide.md`, `governance/postmortem-improvem
 
 ### Skills (`skills_version`)
 
-Executable procedures that install, upgrade, validate, safety-check, or execute governed package workflows. The packaged set currently includes `adp-bootstrap` and `postmortem-rca` in `cloud42-labo/skills`. Judge a change by what it does to an adopter who already installed this package using the previous version, not by how much code moved.
+Executable procedures that install, upgrade, validate or safety-check this package (currently the `adp-bootstrap` Skill only: `SKILL.md` plus `plan.py`, `apply.py`, `doctor.py`, `scan_secrets.py`). Judge a change by what it does to an adopter who already installed this package using the previous version, not by how much code moved.
 
 - **MAJOR** — an install/upgrade run that previously succeeded would now fail or produce a different result: a CLI flag or its meaning changes, the config keys in `references/config-mapping.md` are renamed or removed, the manifest fields the Skill requires change, or a check that previously passed now fails (a stricter `doctor`/`scan_secrets` is MAJOR for this class, even though a stricter Rule would also be MAJOR for a different reason — here the breakage is that an adopter's working pipeline stops).
-- **MINOR** — a backward-compatible added capability or additional packaged Skill. A paired Workflow/Rule change may separately be MAJOR if that new Skill becomes mandatory for a previously-compliant workflow.
+- **MINOR** — a new capability an existing adopter can ignore: a new subcommand, a new optional flag, an additional check that only reports and does not change an existing exit code, support for a new asset class.
 - **PATCH** — a bug fix that makes the Skill do what it already claimed, a message/wording change, or a refactor with no observable difference in plan output or exit codes.
 
 Because this class is versioned here but edited in `cloud42-labo/skills`, a change there is not reflected until `skills_version` is bumped in this manifest. Treat that bump as part of the change, not as bookkeeping to do later — an unbumped `skills_version` is indistinguishable from "no change" to an adopter, and (until the tooling gap in `package/skills.md` is closed) `doctor` will not catch the discrepancy either.
