@@ -126,7 +126,7 @@ For each action item record:
 - durable control destination (`Operating Guide`, `AGENTS.md`, Skill, workflow, automated check, etc.);
 - **counterfactual result** — if this control had existed at incident time, would the same trigger still have reached the same incident? Record `Prevented`, `Detected earlier`, `Mitigated only`, `No effect`, or `Unknown`.
 
-A proposed action with no target causal node or `No effect` counterfactual MUST NOT be accepted as preventive work. `Detected earlier` and `Mitigated only` are valid controls, but must be typed accurately rather than mislabeled as prevention.
+A proposed Prevent / Detect / Mitigate action with no target causal node, or with a `No effect` / `Unknown` counterfactual, MUST NOT be accepted as preventive work. `Unknown` means the analysis still needs Investigate work; an Investigate action may target an explicit evidence gap or competing hypothesis instead of a confirmed causal node. `Detected earlier` and `Mitigated only` are valid controls, but must be typed accurately rather than mislabeled as prevention.
 
 Action items should improve the system, not instruct an individual to "be more careful."
 
@@ -229,7 +229,7 @@ A Postmortem can be closed only when all are true:
 - credible alternative hypotheses were evaluated or their absence justified;
 - Impact, Timeline, Detection, Lessons Learned, Gate Boundary Review, and Evidence are recorded;
 - preventive/investigative Task is linked and Done, or an evidence-backed no-additional-action decision is independently Approved;
-- every preventive action names its target causal node and has a non-`No effect` counterfactual result;
+- every Prevent / Detect / Mitigate action names its target causal node and has a resolved counterfactual result of `Prevented`, `Detected earlier`, or `Mitigated only`; `Unknown` remains investigation-only and is not closure-eligible as preventive work;
 - each preventive action has a verifiable completion condition;
 - the durable control destination is updated where required;
 - the original failure mode was exercised by Regression Replay, or replay impossibility + alternative evidence + residual risk was independently Approved;
