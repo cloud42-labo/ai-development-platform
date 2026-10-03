@@ -31,7 +31,8 @@ Read the operational systems of record, not copied snapshots:
 4. Postmortem analysis-quality fields/evidence: RCA Quality, Root Cause Confidence, Failure Layer, Preventive Action Effectiveness, Reanalysis Changed Conclusion, and Regression Replay evidence when available.
 5. Stories & Tasks with material Blockers, repeated reopening, overdue Human Requests, or governance/security-related risk.
 6. Relevant Decisions and Operating Guide / governance-control changes made in the month.
-7. GitHub evidence for automated gates, PR controls, CI failures, security/governance changes, and unresolved review findings where material.
+7. Scheduler continuity evidence: expected recurring windows, actual scheduler enabled state, run-level Scheduled/Started/Completed/Failed/Blocked/Missed evidence, retry counts, Owner-authorized stop evidence, and carryover state.
+8. GitHub evidence for automated gates, PR controls, CI failures, security/governance changes, and unresolved review findings where material.
 
 ## Review sequence
 
@@ -70,7 +71,34 @@ Treat the following as material control-quality signals:
 
 If the analysis itself is not reliable, do not aggregate its conclusion as if it were established fact. Return it to `Open` / reanalysis. In Cloud42 operations use the companion `postmortem-rca` Skill; portable ADP adopters may execute the self-contained RCA Quality Gate in `postmortem-improvement-loop.md` directly.
 
-### 3. Recurrence and common-mode review
+### 3. Scheduler continuity review
+
+Treat the scheduler itself as a control whose availability must be evidenced, not assumed.
+
+For each recurring job that was expected to be Active during the review period, evaluate:
+
+- expected scheduled run count;
+- Started count;
+- Completed count;
+- Failed / Blocked count;
+- Missed count (expected window passed without Started evidence);
+- transient failures and how many recovered within the permitted retry budget;
+- retry-required failures where retry was missing;
+- scheduler disable/stop events and whether explicit Owner authorization exists;
+- unfinished-run carryovers and whether the next applicable window reconsidered them.
+
+Escalation signals include:
+
+- any unauthorized recurring scheduler stop/disable;
+- any Missed run not detected by the daily liveness control;
+- a transient failure that killed future schedule execution;
+- retry-required failures without the required retries;
+- repeated carryover that the next run does not reconsider;
+- Human discovery remaining the only detector of scheduler inactivity.
+
+A failed run is not itself a failed scheduler. Keep the two metrics distinct: run reliability measures completion of an individual execution; scheduler continuity measures whether future scheduled opportunities remain available and observable.
+
+### 4. Recurrence and common-mode review
 
 Group incidents by **rule family / control failure**, not only by ticket title. Treat the following as escalation signals:
 - same rule family fails again after documentation or preventive action;
@@ -78,7 +106,7 @@ Group incidents by **rule family / control failure**, not only by ticket title. 
 - controls exist only as reference text and continue to be skipped;
 - Human detection remains the only effective detection path for a material risk.
 
-### 4. Severity and priority review
+### 5. Severity and priority review
 
 Reassess priority when any of the following changes:
 - impact becomes external, financial, security/privacy-related, irreversible, or reputation-sensitive;
@@ -89,7 +117,7 @@ Reassess priority when any of the following changes:
 
 Use the existing task/Postmortem severity model where available; do not create a competing scoring system merely for this review.
 
-### 5. Decision per risk
+### 6. Decision per risk
 
 Every material risk must end in one of these decisions:
 - **Accept / monitor** — current residual risk is acceptable; define the next observation signal.
@@ -135,7 +163,13 @@ At minimum record:
 - detection-path distribution: Human / AI self / other AI / automated;
 - documentation-only remediation count and subsequent recurrence;
 - material risks escalated to Owner/Human;
-- controls upgraded from documentation-only to executable gate/automation.
+- controls upgraded from documentation-only to executable gate/automation;
+- scheduler expected runs / Started / Completed / Failed-Blocked / Missed;
+- transient retry recovery count/rate;
+- retry-required-but-missing count;
+- unauthorized scheduler stop count;
+- Owner-authorized scheduler stop count;
+- open/incomplete carryover count.
 
 Metrics are diagnostic. Do not optimize them by suppressing incident reporting or closing items without evidence.
 
@@ -149,7 +183,8 @@ For the first review:
 4. Recheck whether Regression Replay / approved alternative tests have passed and whether the Postmortem closure criteria are actually satisfied.
 5. Include the AOD rule-compliance baseline as the initial control-effectiveness signal.
 6. Record gaps in detection-path automation as a portfolio risk if Human remains the dominant detector.
-7. Create only evidence-backed follow-up work; do not invent remediation to make the review appear complete.
+7. Include Scheduler Continuity as a standing KMI family using run-level evidence; never infer health only from a scheduler definition that still says Active.
+8. Create only evidence-backed follow-up work; do not invent remediation to make the review appear complete.
 
 ## Operating Guide integration
 
