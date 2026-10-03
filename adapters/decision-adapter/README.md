@@ -27,7 +27,8 @@ else later) can plug into **without any call site depending on
 
 A Decision Point's call site (a Skill, a gate procedure, a Notion
 pre-flight) calls `decide(decision_point_id, state, question,
-confidence_threshold, ..., provider, fallback_route)`. It never imports
+confidence_threshold, ..., provider, fallback_route, decision_point_label,
+evidence_path=...)`. It never imports
 `providers/jev_provider.py` itself, and it never hardcodes a TypeSafe API
 URL. Swapping Jev for a different provider later — or temporarily routing
 one Decision Point to a different backend — means changing which
@@ -124,6 +125,29 @@ Criteria 4–6:
   `"allow"`/`"proceed"` value). See
   `tests/test_decision_adapter.py::test_below_threshold_routes_to_configured_fallback`
   and `::test_provider_error_routes_to_fallback_and_never_raises`.
+- **A successful-but-invalid provider response can never pass the
+  threshold check.** `decide()` validates the response against
+  `question` before it is allowed to route to `"jev_shadow"`: a Choice
+  value absent from `question.criteria`, a Score outside the API's 2-10
+  scale, a Noul outside `[0, 1]`, or a non-numeric/out-of-range
+  confidence are all forced to `route="fallback"` with
+  `fallback_reason="out_of_bounds:<detail>"`, regardless of how high the
+  reported confidence is — see `tests/test_decision_adapter.py::
+  test_choice_value_outside_criteria_is_out_of_bounds_not_jev_shadow` and
+  the three sibling `test_*_is_out_of_bounds`/`test_malformed_confidence_
+  is_out_of_bounds` tests.
+- **Every call that produces a `DecisionResult` also produces exactly one
+  evidence record, structurally.** `decide()` is the single public
+  execution path in this package (`run_shadow_call()` in `run_shadow.py`
+  is a thin convenience wrapper over it, not a second place that logs);
+  it requires at least one of `evidence_path`/`evidence_sink` and raises
+  `ValueError` before ever calling the provider if neither is given, so a
+  caller cannot obtain a result that was never logged. See
+  `tests/test_decision_adapter.py::
+  test_missing_evidence_sink_and_path_rejected_before_calling_provider`
+  and the evidence-sink assertions in the other `DecideTests` cases
+  (success, below-threshold, provider-error, and out-of-bounds paths all
+  log).
 - **No data leakage beyond what the inventory already established as
   sendable.** `decide()` hashes `state` for evidence (`input_hash`) and
   never writes the raw `state` payload to the evidence file — see
@@ -153,12 +177,23 @@ decide(
     threshold_version: str,
     provider: DecisionProvider,       # e.g. JevProvider()
     fallback_route: str,              # "claude" | "chris" | "human"
+    decision_point_label: str,        # descriptive tag for this call, for evidence/KPI
+    *,
+    evidence_path: str | None = None,     # at least one of these two is required --
+    evidence_sink: Callable[[dict], None] | None = None,  # decide() raises ValueError otherwise
+    ground_truth: str | None = None,  # optional, for accuracy bookkeeping only
+    objective: bool | None = None,
 ) -> DecisionResult
 ```
 
-`DecisionResult` always carries `mode="shadow"`, `auto_actionable=False`,
-`route` (`"jev_shadow"` or `"fallback"`), `fallback_route`/
-`fallback_reason` (populated only when `route == "fallback"`), the typed
+`decide()` is the only function in this package that produces a
+`DecisionResult`, and it always writes exactly one evidence record (via
+`evidence_path` and/or `evidence_sink`) before returning one — see "Hard
+constraints" above. `DecisionResult` always carries `mode="shadow"`,
+`auto_actionable=False`, `route` (`"jev_shadow"` or `"fallback"`),
+`fallback_route`/`fallback_reason` (populated only when
+`route == "fallback"`; a `"fallback_reason"` of `"below_threshold"`,
+`"provider_error:<reason>"`, or `"out_of_bounds:<detail>"`), the typed
 `value`/`confidence`, and the audit fields Acceptance Criterion 8 requires
 (`input_hash`, `model`/`model_version`, `threshold`/`threshold_version`,
 `latency_ms`, `cost_usd`, `timestamp_utc`). See `decision_adapter.py`'s

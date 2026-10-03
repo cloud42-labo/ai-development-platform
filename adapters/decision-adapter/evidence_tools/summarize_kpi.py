@@ -22,7 +22,14 @@ from evidence import read_evidence  # noqa: E402
 
 def summarize(records: list[dict]) -> dict:
     total = len(records)
-    by_dp = Counter(r["decision_point_label"] for r in records)
+    # Group by the authoritative decision_point_id, not the descriptive
+    # decision_point_label -- multiple fixtures/labels for the same
+    # Decision Point must still roll up into one call-volume count per
+    # Decision Point, not fragment into one entry per label.
+    by_dp = Counter(r["decision_point_id"] for r in records)
+    labels_by_dp: dict[str, set] = {}
+    for r in records:
+        labels_by_dp.setdefault(r["decision_point_id"], set()).add(r.get("decision_point_label"))
     fallback = [r for r in records if r["route"] == "fallback"]
     jev_only = [r for r in records if r["route"] == "jev_shadow"]
     objective = [r for r in records if r.get("objective") is True]
@@ -34,6 +41,7 @@ def summarize(records: list[dict]) -> dict:
     return {
         "total_calls": total,
         "calls_by_decision_point": dict(by_dp),
+        "labels_by_decision_point": {dp: sorted(labels) for dp, labels in labels_by_dp.items()},
         # "Jev-only decision candidates": calls that cleared threshold and
         # did not need a Claude/Chris/Human fallback.
         "jev_only_decision_candidates": len(jev_only),

@@ -1,4 +1,8 @@
-"""Run one shadow Decision Adapter call and append it to an evidence file.
+"""Run one shadow Decision Adapter call via `decide()`.
+
+`decide()` (in `decision_adapter.py`) is the single public execution path
+and always writes its own evidence record -- this module is now a thin
+CLI/library convenience over it, not a second place that logs evidence.
 
 Usage as a library (preferred -- this is how the live fixtures for
 `evidence/adp-065-t05/` were produced):
@@ -30,7 +34,6 @@ from typing import Optional
 
 from decision_adapter import DecisionResult, DecisionProvider, decide
 from decision_points import DecisionPointSpec, STATIC_DECISION_POINTS
-from evidence import append_evidence
 
 
 def run_shadow_call(
@@ -42,7 +45,7 @@ def run_shadow_call(
     ground_truth: Optional[str] = None,
     objective: Optional[bool] = None,
 ) -> DecisionResult:
-    result = decide(
+    return decide(
         decision_point_id=spec.decision_point_id,
         decision_point_version=spec.version,
         state=state,
@@ -51,19 +54,11 @@ def run_shadow_call(
         threshold_version=spec.threshold_version,
         provider=provider,
         fallback_route=spec.fallback_route,
-    )
-    agrees = None
-    if ground_truth is not None and result.value is not None:
-        agrees = result.value == ground_truth
-    append_evidence(
-        evidence_path,
-        result,
         decision_point_label=decision_point_label,
-        objective=objective,
+        evidence_path=evidence_path,
         ground_truth=ground_truth,
-        agrees_with_ground_truth=agrees,
+        objective=objective,
     )
-    return result
 
 
 def main(argv=None) -> int:

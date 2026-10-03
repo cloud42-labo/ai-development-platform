@@ -27,21 +27,34 @@ Hard constraints this module enforces structurally, not just by convention
   `fallback_route` (`claude`, `chris`, or `human`) -- never to a default
   "allow"/"proceed" value. See `decision_points.py`'s `fallback_route` field
   per Decision Point.
-- Every call is logged as one evidence record (`evidence.append_evidence`)
-  with the fields `docs/jev-decision-point-inventory.md` section 5 and this
+- Every call is logged as one evidence record. `decide()` itself is the
+  single public execution path that guarantees this: it requires at least
+  one of `evidence_path` / `evidence_sink` and writes the record itself on
+  every return path (success, below-threshold, provider error, and
+  out-of-bounds alike) before returning -- a caller cannot obtain a
+  `DecisionResult` without that record also existing. The record carries
+  the fields `docs/jev-decision-point-inventory.md` section 5 and this
   Task's Acceptance Criterion 8 require: decision_type/version, input hash,
   typed output/confidence, model/version, threshold/version, route/fallback,
   latency, and cost. The record never includes the raw `state` payload
   verbatim (only its hash) so evidence files do not become a second copy of
   potentially sensitive Task/Postmortem text.
+- A provider response is validated before it can ever route to
+  `"jev_shadow"`: a Choice value not present in `question.criteria`, a
+  Score outside the API's 2-10 scale, a Noul outside [0, 1], or a
+  malformed/out-of-range confidence are all treated as `"out_of_bounds"`
+  and forced to `route="fallback"` regardless of the reported confidence
+  value -- a provider cannot talk its way past the threshold check with an
+  invalid answer.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import time
-from dataclasses import dataclass, field, asdict
-from typing import Any, Optional, Protocol
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, Optional, Protocol
+
+from evidence import append_evidence_record, build_evidence_record
 
 
 DECISION_ADAPTER_VERSION = "0.1.0"
@@ -158,18 +171,40 @@ def decide(
     threshold_version: str,
     provider: DecisionProvider,
     fallback_route: str,
+    decision_point_label: str,
+    *,
+    evidence_path: "str | None" = None,
+    evidence_sink: "Callable[[dict], None] | None" = None,
+    ground_truth: Optional[str] = None,
+    objective: Optional[bool] = None,
     provider_name: str = "jev",
 ) -> DecisionResult:
     """Run one shadow decision call. Never raises on provider failure.
 
+    This is the single public execution path: it is the only function in
+    this package that produces a `DecisionResult`, and it always writes
+    exactly one evidence record before returning one -- a caller cannot
+    get a result without that record also existing (see module docstring
+    "Hard constraints"). Pass `evidence_path` (append a JSONL line via
+    `evidence.append_evidence_record`) and/or `evidence_sink` (a callback
+    receiving the record dict, e.g. for in-memory test collection); at
+    least one is required, or this raises `ValueError` before calling the
+    provider at all.
+
     `fallback_route` must be one of "claude" / "chris" / "human" -- the
     Decision Point's own documented fallback actor
     (`docs/jev-decision-point-inventory.md`'s per-DP "Fallback" field), not
-    a free-text value. A below-threshold or provider-error result always
-    carries this same `fallback_route`; `decide()` never invents its own.
+    a free-text value. A below-threshold, provider-error, or out-of-bounds
+    result always carries this same `fallback_route`; `decide()` never
+    invents its own.
     """
     if fallback_route not in ("claude", "chris", "human"):
         raise ValueError(f"fallback_route must be claude/chris/human, got {fallback_route!r}")
+    if evidence_path is None and evidence_sink is None:
+        raise ValueError(
+            "decide() requires evidence_path and/or evidence_sink -- every call must be "
+            "logged (see module docstring 'Hard constraints')"
+        )
 
     input_hash = _hash_state(state)
     timestamp = _utc_now_iso()
@@ -177,7 +212,7 @@ def decide(
     try:
         resp = provider.call(decision_point_id, state, question)
     except ProviderError as exc:
-        return DecisionResult(
+        result = DecisionResult(
             decision_point_id=decision_point_id,
             decision_point_version=decision_point_version,
             output_kind=question.output_kind,
@@ -199,12 +234,41 @@ def decide(
             cost_usd=None,
             timestamp_utc=timestamp,
         )
+        _log_evidence(result, decision_point_label, evidence_path, evidence_sink, ground_truth, objective)
+        return result
+
+    invalid_reason = _validate_response(question, resp)
+    if invalid_reason is not None:
+        result = DecisionResult(
+            decision_point_id=decision_point_id,
+            decision_point_version=decision_point_version,
+            output_kind=resp.output_kind,
+            value=resp.value,
+            confidence=resp.confidence,
+            below_threshold=True,
+            route="fallback",
+            fallback_route=fallback_route,
+            fallback_reason=f"out_of_bounds:{invalid_reason}",
+            mode="shadow",
+            auto_actionable=False,
+            provider_name=provider_name,
+            model=resp.model,
+            model_version=resp.model_version,
+            threshold=confidence_threshold,
+            threshold_version=threshold_version,
+            input_hash=input_hash,
+            latency_ms=resp.latency_ms,
+            cost_usd=resp.cost_usd,
+            timestamp_utc=timestamp,
+        )
+        _log_evidence(result, decision_point_label, evidence_path, evidence_sink, ground_truth, objective)
+        return result
 
     below_threshold = _is_below_threshold(resp, confidence_threshold)
     route = "fallback" if below_threshold else "jev_shadow"
     fallback_reason = "below_threshold" if below_threshold else None
 
-    return DecisionResult(
+    result = DecisionResult(
         decision_point_id=decision_point_id,
         decision_point_version=decision_point_version,
         output_kind=resp.output_kind,
@@ -226,6 +290,71 @@ def decide(
         cost_usd=resp.cost_usd,
         timestamp_utc=timestamp,
     )
+    _log_evidence(result, decision_point_label, evidence_path, evidence_sink, ground_truth, objective)
+    return result
+
+
+def _log_evidence(
+    result: DecisionResult,
+    decision_point_label: str,
+    evidence_path: "str | None",
+    evidence_sink: "Callable[[dict], None] | None",
+    ground_truth: Optional[str],
+    objective: Optional[bool],
+) -> None:
+    agrees = None
+    if ground_truth is not None and result.value is not None:
+        agrees = result.value == ground_truth
+    record = build_evidence_record(
+        result.to_evidence_dict(),
+        decision_point_label=decision_point_label,
+        objective=objective,
+        ground_truth=ground_truth,
+        agrees_with_ground_truth=agrees,
+    )
+    if evidence_path is not None:
+        append_evidence_record(evidence_path, record)
+    if evidence_sink is not None:
+        evidence_sink(record)
+
+
+def _validate_response(question: TypedQuestion, resp: ProviderResponse) -> Optional[str]:
+    """Return a short reason string if `resp` is invalid for `question`, else None.
+
+    A provider returning HTTP 200 with a semantically invalid answer (an
+    option Jev invented that isn't in `question.criteria`, a Score outside
+    the API's declared 2-10 scale, a Noul outside [0, 1], or a
+    non-numeric/out-of-range confidence) is not a `ProviderError` -- the
+    call succeeded -- but it must never be allowed to pass the confidence
+    threshold check and route to `"jev_shadow"` on the strength of a
+    confidence value attached to an answer that cannot be trusted at all.
+    """
+    if resp.output_kind != question.output_kind:
+        return f"output_kind mismatch: question={question.output_kind!r} response={resp.output_kind!r}"
+
+    if question.output_kind == "choice":
+        if not isinstance(question.criteria, dict) or resp.value not in question.criteria:
+            return f"choice value {resp.value!r} is not a member of question.criteria"
+        if not _is_valid_unit_confidence(resp.confidence):
+            return f"invalid confidence for choice: {resp.confidence!r}"
+    elif question.output_kind == "score":
+        if not isinstance(resp.value, (int, float)) or isinstance(resp.value, bool) or not (2 <= resp.value <= 10):
+            return f"score value {resp.value!r} is outside the API's 2-10 scale"
+        if not _is_valid_unit_confidence(resp.confidence):
+            return f"invalid confidence for score: {resp.confidence!r}"
+    elif question.output_kind == "noul":
+        if not isinstance(resp.value, (int, float)) or isinstance(resp.value, bool) or not (0 <= resp.value <= 1):
+            return f"noul value {resp.value!r} is outside [0, 1]"
+        # Noul has no confidence field at all (module docstring / section 9.2);
+        # resp.confidence must stay None for it, never a stray value.
+        if resp.confidence is not None:
+            return f"noul response unexpectedly carried a confidence value: {resp.confidence!r}"
+
+    return None
+
+
+def _is_valid_unit_confidence(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0.0 <= value <= 1.0
 
 
 def _is_below_threshold(resp: ProviderResponse, threshold: float) -> bool:
