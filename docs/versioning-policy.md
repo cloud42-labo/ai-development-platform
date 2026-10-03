@@ -8,7 +8,7 @@
 
 `adp-package.yaml` therefore carries six version fields: an overall `version` for the package as a whole, plus `schema_version`, `rules_version`, `workflow_version`, `templates_version`, and `skills_version` for each asset class. All follow SemVer (`MAJOR.MINOR.PATCH`).
 
-`skills_version` was added later than the other four, under the rule stated here originally: add a field for an asset class when content first exists, not preemptively. When `ADP-049-B` wrote this file, Skills and Adapters both had no content. Skills now does — `ADP-049-D/E/F1/F2` built the `adp-bootstrap` Skill — so the field exists. Adapters still has none and still has no field; leave it that way until one exists.
+`skills_version` was added later than the other four, under the rule stated here originally: add a field for an asset class when content first exists, not preemptively. When `ADP-049-B` wrote this file, Skills and Adapters both had no content. Skills gained content first — `ADP-049-D/E/F1/F2` built the `adp-bootstrap` Skill — so `skills_version` was added then. Adapters gained its first content later still (`ADP-065-T05`'s `adapters/decision-adapter/`), so `adapters_version` follows the same rule — see that section below.
 
 Note the asymmetry `skills_version` introduces: it is the only class whose content lives outside this repository (`cloud42-labo/skills`, named by `skills_source`). This file governs *how that version number moves*; it does not make this repository the place those files are edited. See `package/skills.md`.
 
@@ -56,6 +56,18 @@ Executable procedures that install, upgrade, validate or safety-check this packa
 - **PATCH** — a bug fix that makes the Skill do what it already claimed, a message/wording change, or a refactor with no observable difference in plan output or exit codes.
 
 Because this class is versioned here but edited in `cloud42-labo/skills`, a change there is not reflected until `skills_version` is bumped in this manifest. Treat that bump as part of the change, not as bookkeeping to do later — an unbumped `skills_version` is indistinguishable from "no change" to an adopter, and (until the tooling gap in `package/skills.md` is closed) `doctor` will not catch the discrepancy either.
+
+### Adapters (`adapters_version`)
+
+Reusable integration adapters this package ships (currently `adapters/decision-adapter/` only: a vendor-neutral `decide()` interface, a Jev provider, and shadow-only classifiers — `ADP-065-T05`). This class was reserved by this file from the start ("Adapters still has none and still has no field; leave it that way until one exists" — see the opening section above) and gains its first version field only now that content exists, per this document's own rule.
+
+Judge a change the same way as Skills: by what it does to an adopter who already integrated a call site against the previous version, not by how much code moved. An adopter here means a Decision Point call site (a Skill, a gate procedure) that already calls `decide()` against a specific Decision Point id — not merely "this repository exists," since Phase 1 ships with zero required call sites (every Decision Point is optional and shadow-only, `optional_adapters` in `adp-package.yaml`).
+
+- **MAJOR** — `decide()`'s function signature or `DecisionResult` field set changes in a way that breaks an existing caller; a Decision Point id is removed or its `output_kind` changes; a Decision Point's `auto_actionable` default changes to `True` for any caller without an explicit opt-in (this must never happen silently regardless of SemVer — see `adapters/decision-adapter/README.md` "Hard constraints" — but if it ever did, it would be MAJOR, not MINOR); a provider's fallback behavior changes from "route to the configured `fallback_route`" to anything else.
+- **MINOR** — a new Decision Point is added to the registry; a new optional field is added to `DecisionResult` or `TypedQuestion`; a new provider is added alongside Jev; threshold/criteria tuning for a Decision Point that stays in shadow mode (shadow-mode output changing is not a breaking change for a caller, since no caller may treat shadow output as authoritative by definition).
+- **PATCH** — evidence/logging format changes that do not change `DecisionResult`'s public fields, a KPI summarizer fix, a docstring/comment fix, or a fixture/evidence-collection change that does not touch `decision_adapter.py`'s or a provider's behavior.
+
+Promoting a specific Decision Point out of shadow mode (Acceptance Criterion 11's independent-holdout Gate) is a distinct, per-Decision-Point event this field does not track by itself — see `adapters/decision-adapter/decision_points.py`'s own per-Decision-Point `version`/`threshold_version` fields for that finer granularity, analogous to how `agent-policy.yaml` rule ids version independently of `schema_version` as a whole.
 
 ### Overall `version`
 

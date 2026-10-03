@@ -119,6 +119,22 @@ skills_source:
   ref: 9043914 # cloud42-labo/skills@9043914 — content matching skills_version 0.1.0
   index: package/skills.md
 
+# Version of the Adapters asset class: reusable integration adapters this
+# package ships (currently: adapters/decision-adapter/, a vendor-neutral
+# Decision Adapter interface plus a Jev provider and shadow classifiers).
+#
+# docs/versioning-policy.md originally reserved this class but left it
+# unversioned ("Adapters still has none and still has no field; leave it
+# that way until one exists") because no content existed at the time that
+# file was written. ADP-065-T05 is the first content, so per that same
+# file's own rule ("add a field for an asset class when content first
+# exists, not preemptively") this field is added now rather than
+# preemptively. See docs/versioning-policy.md's new "Adapters" section for
+# the SemVer judgment this field moves under, and
+# adapters/decision-adapter/README.md for what 0.1.0 actually contains
+# (shadow-only; no Decision Point is auto-actionable at this version).
+adapters_version: 0.1.0
+
 # What an adopting agent/environment must have to operate this package as
 # intended. Not enforced by tooling here (no custom package manager) —
 # documentary, for an adopter or a future Bootstrap Skill (ADP-049-D) to
@@ -129,10 +145,25 @@ required_capabilities:
   - github_pr_workflow               # branch, commit, push, create/update PR on allowed repositories
   - jst_time_source                  # governance timestamps are recorded in JST
 
-# Adapters this package can optionally integrate with. None exist yet.
-# docs/cloudflare-os-evaluation.md places a policy-enforcement adapter at
-# Phase 2/3 — intentionally out of v1.0.0 scope, not a gap in this manifest.
-optional_adapters: []
+# Adapters this package can optionally integrate with. `decision-adapter`
+# (ADP-065-T05, adapters_version 0.1.0 above) is the first entry — optional
+# because Phase 1 is shadow-only (see adapters/decision-adapter/README.md
+# "Explicitly NOT in this package"): no existing call site is required to
+# adopt it, and none currently does. docs/cloudflare-os-evaluation.md's
+# separate policy-enforcement adapter remains at Phase 2/3, still not
+# listed here.
+optional_adapters:
+  - name: decision-adapter
+    path: adapters/decision-adapter
+    description: >-
+      Vendor-neutral Decision Adapter interface (decide()) plus a Jev
+      provider and shadow-only classifiers for DP-1/DP-3/DP-4/DP-6, PR
+      Review Necessity, PR Flow classification, and Task Value Type
+      classification. No Decision Point is auto-actionable at this
+      version; promoting one out of shadow mode requires a separate,
+      later independent-holdout Gate this package does not implement.
+    status: shadow-only
+    introduced_in: adapters_version 0.1.0
 
 # Where an adopting agent/script finds the four asset classes above, and
 # where this deployment's own environment-specific values (Notion workspace,
@@ -615,3 +646,28 @@ migration_path:
       before marking it Active. Until that rollout evidence exists, keep the
       existing Control Plane fallback enabled. Manual @codex review is not
       the normal path once the event task is Active.
+
+  - field: adapters_version
+    from: null
+    to: "0.1.0"
+    date: "2026-10-03"
+    change: >-
+      ADP-065-T05 / issue #94: adds the Adapters asset class's first
+      content, adapters/decision-adapter/ — a vendor-neutral Decision
+      Adapter interface (decide()), a Jev provider built against the real
+      API schema confirmed under ADP-065-T03, and shadow-only classifiers
+      for DP-1/DP-3/DP-4/DP-6, PR Review Necessity, PR Flow
+      classification, and Task Value Type classification, plus evidence/
+      KPI logging. Also adds the first optional_adapters entry. No
+      Decision Point is auto-actionable at this version (mode is always
+      "shadow"); no existing deterministic hard gate, merge authority, or
+      Human Gate is weakened or bypassed by this change.
+    action_required: >-
+      None for existing adopters — this is new, optional content with no
+      existing call site depending on it. An adopter who wants to use it
+      needs network access to api.typesafe.ai and prior Owner approval for
+      that metered path (governance/research-security-policy.md section
+      5), and must keep every Decision Point in shadow mode
+      (auto_actionable=False) until that Decision Point passes its own
+      independent-holdout promotion Gate (this Task's Acceptance Criterion
+      11; not yet defined as of this entry).
