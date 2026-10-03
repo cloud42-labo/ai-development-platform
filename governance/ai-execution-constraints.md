@@ -15,6 +15,30 @@ Before creating any new record in Notion Stories & Tasks, the acting AI MUST app
 
 Creating first in a formal hierarchy and correcting placement afterward does not satisfy this check. The MISC intake is the required precondition to every new Task write.
 
+## AI-authored operating-constraint prohibition
+
+AI actors may propose operating constraints, but may not make them effective unless an authoritative higher-level source already grants that constraint or the Owner explicitly approves it.
+
+This prohibition includes, at minimum:
+
+- task-count or heavy-work caps;
+- WIP limits;
+- scheduler stop/disable conditions;
+- approval, re-review, or Human gates;
+- priority-override rules;
+- concurrency or serialization limits that defer otherwise executable work;
+- retry ceilings or failure policies;
+- any other rule that changes whether, when, or how an otherwise-authorized Task may execute.
+
+Before adding or changing any such constraint in a Skill, registry, automation prompt, config, Notion operating view, or repository-local procedure, the acting AI MUST:
+
+1. identify the exact authoritative ADP regulation, governance criterion, repository-local rule, or latest explicit Owner instruction that grants the constraint;
+2. record that authority in the change evidence;
+3. treat the change as non-operative if no such authority exists;
+4. never promote an AI-authored design suggestion or historical Notion task text into a binding operating rule by implementation alone.
+
+If an unapproved constraint is discovered, stop enforcing that constraint, preserve unrelated safety/authority gates, record the incident through the Postmortem Improvement Loop, and correct the ADP canonical source before synchronizing Skills and Notion controlled views.
+
 ## Managed-work execution pre-flight
 
 Before performing any managed work that writes to Notion, GitHub, another connected system, or creates a durable project artifact, the acting AI MUST verify **all** of the following before the first work action:
