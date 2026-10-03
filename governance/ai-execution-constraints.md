@@ -39,6 +39,86 @@ Before adding or changing any such constraint in a Skill, registry, automation p
 
 If an unapproved constraint is discovered, stop enforcing that constraint, preserve unrelated safety/authority gates, record the incident through the Postmortem Improvement Loop, and correct the ADP canonical source before synchronizing Skills and Notion controlled views.
 
+## Scheduler Continuity and lifecycle authority
+
+A failure of one scheduled run does not grant authority to terminate future scheduled runs. **Run outcome authority and recurring-scheduler lifecycle authority are separate.**
+
+### Owner-only recurring scheduler stop gate
+
+An AI MUST NOT disable, stop, suspend, delete, or otherwise deactivate a recurring scheduler unless the latest explicit Owner instruction authorizes that lifecycle change for the exact scheduler.
+
+The following are **not** authority to stop a recurring scheduler:
+
+- Completion Contract failure;
+- a safety-check rejection;
+- a transient connector/service failure;
+- a Task or run becoming `Blocked` / `Failed`;
+- an inability to persist one run's artifact;
+- an AI inference that stopping is safer;
+- an AI-authored Task, Skill, prompt, or controlled view that is not backed by higher authority.
+
+A platform-enforced hard shutdown that the AI cannot override is not an AI lifecycle decision. Record it as an external/hard-safety condition; do not attempt to bypass it.
+
+Before any AI-originated `disable / stop / suspend / delete` mutation against a recurring scheduler, the acting AI MUST verify and record:
+
+1. the exact scheduler;
+2. the latest explicit Owner instruction authorizing the lifecycle change;
+3. whether the change is temporary or permanent;
+4. the intended restart condition where applicable.
+
+Without that evidence, the lifecycle mutation is prohibited.
+
+### Failure and recovery contract
+
+When a scheduled run cannot complete:
+
+1. classify the failure before deciding recovery:
+   - `hard_safety_guard`;
+   - `transient_connector_failure`;
+   - `capability_permission_failure`;
+   - `ordinary_failure`;
+2. for `transient_connector_failure` only, re-read the target state before every mutation retry and retry the same intent/target up to **3 times after the initial failure**;
+3. never duplicate a write that already succeeded or partially succeeded;
+4. never bypass or rephrase around a `hard_safety_guard`;
+5. do not perform useless retries for a demonstrated capability/permission failure;
+6. after retries are exhausted, record the run as `Failed` or `Blocked`, preserve the recurring scheduler as enabled, and record the unfinished work / unblock condition;
+7. at the next applicable scheduled window, re-evaluate unfinished prior-run work before treating the new window as healthy/no-op.
+
+Failing closed for the **run** means not reporting Success without evidence. It does **not** mean killing the **recurring scheduler**.
+
+### Run-level liveness evidence
+
+A governed recurring scheduler MUST have run-level evidence sufficient to distinguish:
+
+- `Scheduled`;
+- `Started`;
+- `Completed`;
+- `Failed` / `Blocked`;
+- `Missed`.
+
+The evidence model MUST also preserve, where applicable:
+
+- scheduled window/time;
+- actual start/completion time;
+- retry count;
+- failure class/reason;
+- whether the scheduler was enabled;
+- whether a stop was explicitly Owner-authorized and the evidence for that authorization;
+- whether unfinished work requires carryover and whether the next applicable run resolved it.
+
+Cloud42's operational implementation uses the Notion `Scheduler Run Events` ledger for this run evidence. That ledger is evidence/telemetry, **not** the scheduler-definition source of truth.
+
+### Daily liveness reconciliation
+
+The daily close/control process MUST compare the expected active recurring schedule against run evidence and identify at least:
+
+- scheduled time passed with no `Started` evidence;
+- transient failure with required retry not attempted;
+- recurring scheduler disabled without explicit Owner-stop evidence;
+- previous incomplete run not reconsidered at the next applicable window.
+
+Where the current authoritative schedule and Owner instruction both establish that a ChatGPT recurring automation should be Active, and it is found disabled without Owner authorization, the control process may restore it to Active and must record the repair. It MUST NOT reactivate an intentionally stopped scheduler with valid Owner-stop evidence.
+
 ## Managed-work execution pre-flight
 
 Before performing any managed work that writes to Notion, GitHub, another connected system, or creates a durable project artifact, the acting AI MUST verify **all** of the following before the first work action:
