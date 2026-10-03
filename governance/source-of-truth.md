@@ -15,6 +15,8 @@ ADP separates **operational state**, **durable artifacts**, and **organizational
 
 ## Rules
 
+6. **Procedures do not create policy.** A Skill, scheduler registry, automation prompt, Notion task, or controlled view may implement or display an operating constraint only when that constraint is grounded in an authoritative regulation/governance source, repository-local authority, or explicit Owner instruction. AI-authored suggestions do not become binding rules merely because they are copied into code, configuration, or Notion.
+7. **Constraint changes flow downward.** Normative operating-rule changes are established in the ADP regulation/governance layer first, then implemented in Skills/configuration, then reflected in Notion operational views. Notion is not the origin of a new binding operating rule.
 1. **Link, do not duplicate by default.** When a GitHub artifact is authoritative, Notion should hold status, decision context, and a link to the artifact rather than an uncontrolled copy.
 2. **Operational status lives in Notion.** Do not infer current task or sprint status from Git history.
 3. **Artifacts live in GitHub.** Durable documents must be versionable and diffable.
