@@ -43,7 +43,7 @@ schema_version: 0.1.0-experimental
 # governance/state-transition-pre-check-regression-cases.md,
 # docs/human-gate-pre-check-examples.md, docs/regulations/README.md and
 # R01-R06).
-rules_version: 3.7.0
+rules_version: 4.0.0
 
 # Version of the Workflows asset class (docs/operating-guide.md,
 # governance/postmortem-improvement-loop.md,
@@ -615,3 +615,25 @@ migration_path:
       before marking it Active. Until that rollout evidence exists, keep the
       existing Control Plane fallback enabled. Manual @codex review is not
       the normal path once the event task is Active.
+
+
+  - field: rules_version
+    from: "3.7.0"
+    to: "4.0.0"
+    date: "2026-10-03"
+    change: >-
+      Issues #90/#91 establish explicit scheduler lifecycle authority and
+      prohibit AI-authored operating constraints from becoming effective
+      without higher authority. Recurring scheduler disable/stop/suspend/delete
+      is now Owner-authorized only; run failure is separated from scheduler
+      lifecycle, transient failures use state-aware retry, and daily liveness
+      reconciliation is mandatory. MAJOR per docs/versioning-policy.md because
+      this changes an authority boundary and makes previously-unconstrained
+      AI scheduler lifecycle actions non-compliant.
+    action_required: >-
+      Remove any AI-authored scheduler stop condition or execution constraint
+      that lacks authoritative backing. Require explicit Owner evidence before
+      recurring scheduler lifecycle shutdown, preserve recurring schedules
+      after Failed/Blocked runs, apply the classified recovery contract, and
+      add run-level liveness evidence plus daily reconciliation before claiming
+      scheduler continuity compliance.
