@@ -4,8 +4,9 @@
 > **規程ID:** R06  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-22 JST  
+> **最終改定日:** 2026-10-05 JST  
 > **関連規程:** R01 組織規程 / R02 職務権限規程 / R03 決裁規程 / R04 文書管理規程 / R05 システム開発管理規程  
+> **関連基準:** `governance/postmortem-improvement-loop.md`（Postmortem、Preventive Task、Review状態、Close条件）  
 > **移管元:** `docs/operating-guide.md` §1、§7、§8、§9、§10、§11、§13、§14
 
 ## 第1条 目的
