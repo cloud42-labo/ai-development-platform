@@ -423,6 +423,20 @@ way).**
 
 ## 5. Decision Adapter shape (not implemented by this task)
 
+> **2026-10-03 update (`ADP-065-T05`)**: this section's shape IS now
+> implemented, at `adapters/decision-adapter/` (package `adapters_version`
+> 0.1.0). The rest of this section is kept as-written below as the
+> original design note it was under `ADP-065-T02` -- see
+> `adapters/decision-adapter/README.md` for the actual interface as built
+> (same `decide()` shape, same fail-open-to-fallback and no-hardcoded-
+> dependency principles) and `evidence/adp-065-t05/README.md` for live
+> shadow-mode evidence across 6 of the 10 Decision Points above (DP-1,
+> DP-3, DP-4, and DP-6 from this inventory, plus two new issue-#94 Decision
+> Points -- PR Review Necessity and PR Flow classification -- not
+> originally enumerated as DP-1..DP-10 above). DP-9/DP-10 remain excluded,
+> exactly as section 9.7 below already said they would need to be until
+> their fixture gaps close.
+
 Consistent with `docs/claude-projects-evaluation.md` §5's Execution Adapter
 pattern, any future Jev usage should sit behind one interface, e.g.:
 
