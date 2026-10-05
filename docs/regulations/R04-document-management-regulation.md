@@ -4,8 +4,8 @@
 > **規程ID:** R04  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-30 JST  
-> **関連基準:** `governance/source-of-truth.md`  
+> **最終改定日:** 2026-10-05 JST  
+> **関連基準:** `governance/source-of-truth.md` / `governance/postmortem-improvement-loop.md`  
 > **関連手順:** `cloud42-labo/skills`  
 > **移管元:** `docs/operating-guide.md` §1、§5、§13 / `governance/source-of-truth.md`
 
