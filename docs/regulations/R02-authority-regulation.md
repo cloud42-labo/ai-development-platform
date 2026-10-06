@@ -4,8 +4,9 @@
 > **規程ID:** R02  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-09-19 JST  
+> **最終改定日:** 2026-10-05 JST  
 > **関連規程:** R01 組織規程 / R03 決裁規程  
+> **関連基準:** `governance/postmortem-improvement-loop.md`（Postmortem独立Review、Author ≠ Reviewer、Reviewer権限）  
 > **移管元:** `docs/operating-guide.md` §6、§11、§12 / Owner方針 ADP-058 / Owner方針 2026-09-12（`cloud42-labo/skills`のself-merge、ADP-057で規程へ同期）
 
 ## 第1条 目的

@@ -8,6 +8,31 @@ References:
 - https://sre.google/workbook/postmortem-culture/
 - https://sre.google/sre-book/postmortem-culture/
 
+## Document hierarchy and traceability
+
+This standard is a **基準** under the document hierarchy defined by R04. It does not create authority independently; it operationalizes the following regulations and delegates executable How to Skills.
+
+| Layer | Canonical document / system | Postmortem responsibility |
+|---|---|---|
+| 規程 | `docs/regulations/R02-authority-regulation.md` | Independent review authority, Author ≠ Reviewer, reviewer separation and failover |
+| 規程 | `docs/regulations/R04-document-management-regulation.md` | 規程→基準→手順→記録 hierarchy, canonical source, Skill synchronization and traceability |
+| 規程 | `docs/regulations/R06-project-management-regulation.md` | Preventive Task / Review state / Definition of Done / execution evidence management |
+| 規程（conditional） | `docs/regulations/R05-system-development-management-regulation.md` | Additional quality / review / merge / release controls when the incident is a system-development incident |
+| 基準 | `governance/postmortem-improvement-loop.md` | Postmortem trigger, RCA quality, preventive-action loop, independent review and closure criteria |
+| 手順 | `cloud42-labo/skills/.claude/skills/postmortem-rca/SKILL.md` | Author-side Postmortem creation, evidence-first RCA and preventive-action design |
+| 手順 | `cloud42-labo/skills/.claude/skills/postmortem-review/SKILL.md` | Reviewer-side independent re-analysis and Approved / Revise Requested decision. This Skill is introduced by ADP-043-K-RV. |
+| 記録 | Notion `Postmortems` | Incident, RCA, review result, recurrence, effectiveness and closure evidence |
+| 記録 / 実行状態 | Notion `Stories & Tasks` | Preventive Task and independent Review Task execution state |
+| 技術証跡 | GitHub Issue / PR / CI / commit | Durable implementation and review evidence |
+
+### Traceability invariant
+
+1. A Postmortem procedure MUST identify this standard as its direct governing standard and MUST NOT introduce authority or closure rules that are absent from the governing regulations / this standard.
+2. A Postmortem record MUST link to its preventive Task and independent Review Task when those are required.
+3. The independent Review procedure MUST derive reviewer independence from R02 and record the review result in Notion Postmortems under R04/R06 record rules.
+4. When this standard changes in a way that affects execution How, the related Postmortem Skills MUST be synchronized; when a Skill reveals a missing policy/judgment rule, the change MUST be made here or in the governing regulation rather than being invented only inside the Skill.
+5. Notion is the operational record / controlled view, while GitHub remains the durable canonical source for regulations, this standard, executable Skills, and technical evidence according to R04.
+
 ## When to create a Postmortem
 
 Create or update a Postmortem when a managed AI workflow materially violates an already-active operating rule, authority boundary, execution gate, source-of-truth rule, or required evidence/time-control rule.
