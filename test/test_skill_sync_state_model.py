@@ -34,4 +34,14 @@ class SkillSyncStateModelTest(unittest.TestCase):
     def test_stale_open_pr_is_detected_before_content_state(self):
         self.assertEqual(self.state(M_hash="a",L_hash="a",N_hash="c",open_sync_pr=True,open_pr_hash="b")[2], "replace_or_close_stale_pr")
 
+    def test_baseline_divergence_beats_matching_open_proposal(self):
+        state = self.state(M_hash="b", L_hash="a", N_hash="c", open_sync_pr=True, open_pr_hash="c")
+        self.assertEqual(state[1], "conflict")
+        self.assertEqual(state[2], "close_or_rebase_open_pr")
+
+    def test_github_ahead_beats_open_proposal(self):
+        state = self.state(M_hash="b", L_hash="a", N_hash="a", open_sync_pr=True, open_pr_hash="a")
+        self.assertEqual(state[1], "github_ahead")
+        self.assertEqual(state[2], "close_stale_pr")
+
 if __name__ == "__main__": unittest.main()
