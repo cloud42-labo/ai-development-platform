@@ -1,0 +1,270 @@
+[
+  {
+    "fixture_id": "DP10-06",
+    "fixture": {
+      "id": "DP10-06",
+      "new_item_text": "2026-09-20 Daily Close時点で検討された、ai-development-platform PR #53（ADP-044-DのペアPR、skills#26は既にmerge済みだがPR #53自身はmain conflictで未完了）の conflict解消フォローアップ用の新規Task。",
+      "candidate_existing_task_text": "ADP-044-D｜Product Vision Quality Standardと承認Gateを定義する——Acceptance Criteriaに定義されたVision品質基準・承認Gateの策定が目的で、PR #53はこのTaskの成果物。",
+      "candidate_existing_task_status": "Review相当（2026-09-20時点。ADP-044-DはStarted At 2026-09-14、Completed At 2026-09-22のため、判定時点ではまだ未完了）"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 315.0,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.38
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 676,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 284.6,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.38
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 676,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 316.2,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.38
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 676,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 349.4,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.37
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 676,
+        "output_tokens": 22
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP10-07",
+    "fixture": {
+      "id": "DP10-07",
+      "new_item_text": "2026-09-22 Daily Close時点で検討された、ADP-065 Jev PoC（T03）の採否・本番導入検討用の新規Task起票案。",
+      "candidate_existing_task_text": "ADP-065-T04｜Decision Canonical接続方式とJev採否を確定する——T03のPoC結果を受けてDecision Adapterの接続方式・Jev採否を確定するためのTask。T03への依存（Dependency: ADP-065-T03）を明示して既に存在していた。",
+      "candidate_existing_task_status": "Backlog/Ready相当（2026-09-22時点でT03から見た既存の後続依存Task）"
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 323.7,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.78
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 645,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 328.0,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.79
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 645,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 485.0,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.78
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 645,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 321.2,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.8
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 645,
+        "output_tokens": 22
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP10-08",
+    "fixture": {
+      "id": "DP10-08",
+      "new_item_text": "2026-09-25 Daily Close PR Flow Gateで検出された、cloud42-labo/skills PR #51（head 230aa011fb、Codex P1指摘1件未解決）を紐づける新規Task起票案。",
+      "candidate_existing_task_text": "",
+      "candidate_existing_task_status": ""
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 367.6,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.04
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 518,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 288.7,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.04
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 518,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 294.1,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.04
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 518,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 296.7,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.04
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 518,
+        "output_tokens": 22
+      }
+    ]
+  },
+  {
+    "fixture_id": "DP10-09",
+    "fixture": {
+      "id": "DP10-09",
+      "new_item_text": "2026-09-26 Daily Close PR Flow Gateで検出された、cloud42-labo/skills PR #52（生成元変更要求/Taskとの対応未確定）を紐づける新規Task起票案。",
+      "candidate_existing_task_text": "",
+      "candidate_existing_task_status": ""
+    },
+    "calls": [
+      {
+        "call_index": 0,
+        "status": 200,
+        "latency_ms": 502.3,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.05
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 512,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 1,
+        "status": 200,
+        "latency_ms": 351.6,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.05
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 512,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 2,
+        "status": 200,
+        "latency_ms": 288.5,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.04
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 512,
+        "output_tokens": 22
+      },
+      {
+        "call_index": 3,
+        "status": 200,
+        "latency_ms": 275.1,
+        "answers": {
+          "duplicate_noul": {
+            "type": "noul",
+            "noul": 0.05
+          }
+        },
+        "model_used": "jev-1.13.0",
+        "input_tokens": 512,
+        "output_tokens": 22
+      }
+    ]
+  }
+]
