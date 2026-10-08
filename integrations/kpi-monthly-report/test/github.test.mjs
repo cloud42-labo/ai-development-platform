@@ -65,34 +65,58 @@ test('githubSearchPRs_ builds the merged-PR query with is:merged and the JST mon
 test('lookupProductForPr_ attributes a PR to its matching Task\'s single Product, and null (never guessed) otherwise', () => {
   const routes = {
     'POST /v1/data_sources/tasks-ds/query': (body) => {
-      const needle = body.filter.property === 'Pull Request' ? body.filter.url.contains : null;
-      if (needle === 'acme/widgets/pull/42') {
-        return {
-          results: [{
-            properties: {
-              'Pull Request': { url: 'https://github.com/acme/widgets/pull/42' },
-              Product: { type: 'relation', relation: [{ id: 'prod-A' }] },
-            },
-          }],
-          has_more: false,
-        };
-      }
-      return { results: [], has_more: false }; // e.g. pull/99 has no matching Task
+      assert.equal(body.filter.property, 'Pull Request');
+      assert.equal(body.filter.url.contains, 'acme/widgets/pull/');
+      return {
+        results: [{
+          properties: {
+            'Pull Request': { url: 'https://github.com/acme/widgets/pull/42' },
+            Product: { type: 'relation', relation: [{ id: 'prod-A' }] },
+          },
+        }],
+        has_more: false,
+      };
     },
     'GET /v1/pages/prod-A': () => ({ properties: { Name: { type: 'title', title: [{ plain_text: 'ADP' }] } } }),
   };
   const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub(routes) });
 
   assert.equal(sandbox.lookupProductForPr_('acme/widgets', 42), 'ADP');
-  assert.equal(sandbox.lookupProductForPr_('acme/widgets', 99), null);
+  assert.equal(sandbox.lookupProductForPr_('acme/widgets', 99), null); // not in the map at all
+});
+
+test('lookupProductForPr_ only queries Notion once per repo no matter how many PRs in that repo are looked up (BUG-ADP-055-KMI-TIMEOUT)', () => {
+  let queryCount = 0;
+  const routes = {
+    'POST /v1/data_sources/tasks-ds/query': () => {
+      queryCount += 1;
+      return {
+        results: [1, 2, 3].map((n) => ({
+          properties: {
+            'Pull Request': { url: 'https://github.com/acme/widgets/pull/' + n },
+            Product: { type: 'relation', relation: [{ id: 'prod-A' }] },
+          },
+        })),
+        has_more: false,
+      };
+    },
+    'GET /v1/pages/prod-A': () => ({ properties: { Name: { type: 'title', title: [{ plain_text: 'ADP' }] } } }),
+  };
+  const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub(routes) });
+
+  sandbox.lookupProductForPr_('acme/widgets', 1);
+  sandbox.lookupProductForPr_('acme/widgets', 2);
+  sandbox.lookupProductForPr_('acme/widgets', 3);
+
+  assert.equal(queryCount, 1, 'repeated lookups for the same repo must reuse one cached query, not one per PR');
 });
 
 test('lookupProductForPr_ does not attribute PR #4 to a Task whose URL is actually for PR #42 (numeric-prefix collision)', () => {
   const routes = {
-    // Notion's `contains` filter is a coarse substring pre-filter: querying
-    // for PR #4 (needle "acme/widgets/pull/4") also surfaces this Task,
-    // whose Pull Request is really #42. The exact/boundary check inside
-    // lookupProductForPr_ must reject it rather than misattribute Product.
+    // The coarse `contains: repo + '/pull/'` pre-filter surfaces every PR
+    // under the repo, #42 included. prNeedleFromUrl_'s boundary check inside
+    // buildPrProductMap_ must key this Task under needle ".../pull/42", not
+    // let a #4 lookup collide with it.
     'POST /v1/data_sources/tasks-ds/query': () => ({
       results: [{
         properties: {
@@ -111,12 +135,10 @@ test('lookupProductForPr_ does not attribute PR #4 to a Task whose URL is actual
     null,
     'PR #4 must not be attributed via a Task that actually references PR #42'
   );
+  assert.equal(sandbox.lookupProductForPr_('acme/widgets', 42), 'ADP');
 });
 
-test('lookupProductForPr_ paginates the coarse candidate query so the exact match is not lost off a later page', () => {
-  // Regression: a naive single page_size:5 request can leave the one exact
-  // match (PR #4) sitting on page 2 behind five unrelated coarse matches
-  // (#40-#44), silently reporting Unknown/未分類 instead of the real Product.
+test('lookupProductForPr_ paginates the per-repo query so matches on a later page are still found', () => {
   const routes = {
     'POST /v1/data_sources/tasks-ds/query': (body) => {
       if (!body.start_cursor) {
@@ -146,6 +168,31 @@ test('lookupProductForPr_ paginates the coarse candidate query so the exact matc
   const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub(routes) });
 
   assert.equal(sandbox.lookupProductForPr_('acme/widgets', 4), 'AOD');
+});
+
+test('lookupProductForPr_ maps an ambiguous PR (more than one Task referencing it) to null', () => {
+  const routes = {
+    'POST /v1/data_sources/tasks-ds/query': () => ({
+      results: [
+        {
+          properties: {
+            'Pull Request': { url: 'https://github.com/acme/widgets/pull/7' },
+            Product: { type: 'relation', relation: [{ id: 'prod-A' }] },
+          },
+        },
+        {
+          properties: {
+            'Pull Request': { url: 'https://github.com/acme/widgets/pull/7' },
+            Product: { type: 'relation', relation: [{ id: 'prod-B' }] },
+          },
+        },
+      ],
+      has_more: false,
+    }),
+  };
+  const { sandbox } = loadCodeGsSandbox({ scriptProperties: SCRIPT_PROPS, fetch: fetchStub(routes) });
+
+  assert.equal(sandbox.lookupProductForPr_('acme/widgets', 7), null);
 });
 
 test('pullRequestUrlMatches_ requires a path boundary right after the PR number', () => {
