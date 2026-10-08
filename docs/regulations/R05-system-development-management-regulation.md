@@ -86,7 +86,8 @@ Developmentへ着手する前に、少なくとも次を確認する。
 3. 指定Reviewerが利用不能な場合は、R02に従って独立性を保ったReviewerへフェイルオーバーできる。
 4. unresolved P0/P1、失敗した必須CI、現在の遷移に明示的に適用される未完了の必須検証がある状態ではmergeしない。
 5. merge対象headがReview後に変わった場合は、必要な差分を再Reviewする。
-6. Reviewが実質的な設計探索を繰り返す場合は、単なる修正継続ではなくR06に定めるApproach Refinement / Task粒度再評価へ戻す。
+6. ReviewでP0/P1修正が発生した場合は元実装TaskをReadyへ戻し、修正・再レビュー・最終mergeまで同じTaskのE2E Ownershipを維持する。レビューTaskは独立性のため別担当にできるが、元実装Taskの完了をレビュー依頼だけで宣言しない。
+7. Reviewが実質的な設計探索を繰り返す場合は、単なる修正継続ではなくR06に定めるApproach Refinement / Task粒度再評価へ戻す。
 
 P2以下の扱い、Review round上限その他の詳細条件は下位Review基準で管理できる。
 

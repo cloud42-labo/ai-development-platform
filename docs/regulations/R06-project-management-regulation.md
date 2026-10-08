@@ -56,6 +56,15 @@ Taskは少なくとも次の状態を使い分ける。
 
 状態遷移の現在値はNotionで管理する。
 
+### TaskのE2E遂行責任とReview／merge引継ぎ
+
+1. 実行Ownerは、Taskの成果がAcceptance Criteriaを満たし、必要なPRがmergeされ、完了証跡がNotionへ同期されるまで、**Task全体の遂行責任**を保持する。PR作成・review依頼・担当工程の終了だけでTaskをDoneにしない。
+2. 実行Ownerが全工程を自分で操作することは求めない。独立Reviewerと最終mergerはR02の権限に従い分業する。Authorが修正・handoffを終えた場合は、TaskをReviewとして保持し、次の責任Actor、current head、必要な検証、受渡し証跡を明示する。
+3. current-headに修正すべきfindingが発生したら、既存の元実装TaskへReview Fixを戻し、実装ActorをReadyへ再投入する。受け渡し先が未確定のReviewや、review結果を待つだけの無主Taskを放置しない。
+4. Review Fix push後は既存のcommit-update event reviewを再利用し、review完了時にR02の最終mergerへ引き継ぐ。self-merge権限のないAuthorは自己mergeしない。
+5. 完了トランザクションでは、Task・PR current head・Review／CI・merge commit・Acceptance Evidence・Task Time Event・Notion Done／Completed Atを照合する。実装担当工程の終了とTask全体のDoneを混同しない。
+6. 一時的なConnector／Safety障害は対象Taskのfailure scopeとして記録し、次の実行可能な独立Taskを止めない。Scheduler lifecycleの権限を変更しない。
+
 ## 第5条 着手管理
 
 Task着手前に、少なくとも次を確認する。
