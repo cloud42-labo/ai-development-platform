@@ -60,7 +60,7 @@ Claude-side PoC would require Human-approved metered Anthropic/OpenAI API spend,
 which `governance/research-security-policy.md` §5 blocks without prior approval
 ("Do not use an external AI API that can incur metered or pay-as-you-go charges
 unless Human approval for that specific paid path exists before the call"). The
-only no-additional-charge path identified is `chatgpt auth login` under an existing
+only no-additional-charge path identified is `strix auth login chatgpt` under an existing
 ChatGPT subscription — which is Chris's (ChatGPT's) side of this two-AI-actor
 organization, not Claude's. See §7 for what this means for who should run the PoC.
 
@@ -95,7 +95,7 @@ attempting any PoC execution in this session:
 4. Budget — one fetch of the upstream README; no broad crawl performed: OK.
 5. **Billing — fails.** Running the open-source CLI needs a metered Anthropic/OpenAI/
    Google key with no existing Human approval on file for this specific use. The only
-   no-additional-charge path (`chatgpt auth login`) is not this session's identity.
+   no-additional-charge path (`strix auth login chatgpt`) is not this session's identity.
 6. Write authority — N/A (no external write attempted).
 
 Gate result: **stop before execution** (§6: "If any answer is unknown [or fails],
