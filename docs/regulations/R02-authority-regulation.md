@@ -77,6 +77,13 @@ Repository固有の明示ルールまたはOwnerの明示指示により別のme
 3. 権限変更が必要な場合は、Ownerの明示指示、現行規程または既存のRepository固有ルールを根拠とする。
 4. 規程間・記録間の不整合を発見した場合は、可逆的で権限が明確な作業を継続しつつ、不可逆または高影響の当該操作だけを必要に応じて保留する。競合そのものを理由に全作業を停止しない。
 
+### 6.1 Recurring Schedulerの停止権限（Owner専権）
+
+1. Recurring Schedulerの disable / stop / suspend / delete は、対象Schedulerを特定したOwnerの最新の明示指示がある場合に限る。
+2. Runの失敗、Completion未達、Safety拒否、Blocked、Connector障害、証跡保存失敗はScheduler lifecycle変更の権限を与えない。RunだけをFailed/Blockedとして記録し、Recurring Schedulerを維持する。
+3. 一過性Connector障害はmutation前に対象状態を再取得し、初回失敗後最大3回まで同一意図・同一対象で再試行する。Hard Safety Guardは迂回せず、権限不足は無意味な再試行をしない。
+4. 未完了Taskとretry exhaustionはrun evidenceに記録し、次回の適用窓で優先再評価する。Scheduler停止にはOwner承認の対象・期間・再開条件のEvidenceを要する。
+
 ## 第7条 外部サービス・課金・情報取扱い
 
 次の行為は、通常執行権限に含まれない。
