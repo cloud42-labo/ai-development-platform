@@ -29,18 +29,26 @@ Three placement candidates, as the Approach Decision required:
 - **Target**: changed files in the PR diff only (Strix's own quick-scan mode is
   diff-scoped — see PR #112 §1). A full-repo scan on every PR is not proposed; it
   duplicates the periodic control in §1.3 and would multiply runtime/cost per PR.
-- **Judgment**: see §2's severity→decision table. A PR-level gate must resolve to a
-  binary pass/fail per the existing `github-protected-merge` approval rule
-  (`governance/agent-policy.yaml`) — it does not introduce a new approval layer, it
-  feeds a finding into the gate that already requires Owner approval to merge to a
-  protected branch.
+- **Judgment**: see §2's severity→decision table. A PR-level gate does not introduce a
+  new approval layer or a new merge operator — `governance/agent-policy.yaml`'s
+  `github-protected-merge` rule is marked non-authoritative
+  (`docs/instruction-skill-debt-inventory.md`), and the actual authority is
+  `docs/regulations/R02-authority-regulation.md` §4.2: a Strix finding is evidence fed
+  into whichever Author/Reviewer/merger flow already governs the repository (R02 §4.1
+  self-merge repos keep self-merge; R02 §4.2's other repos keep Claude-authored →
+  independent review → Chris merges, or Chris-authored → independent review → Claude
+  merges). The Owner is not the normal merge operator under either case.
 - **Evidence**: Strix's own finding list (or SARIF, once confirmed — see PR #112 §1)
   attached to the PR as a check-run artifact; a one-line summary posted as a PR
   comment, consistent with the existing Codex review comment convention.
-- **Override authority**: only the Owner (via the existing `github-protected-merge`
-  approve-decision path) can accept a merge despite an open P0/P1 finding; an AI actor
-  cannot waive this gate for itself, per `governance/ai-execution-constraints.md`'s
-  AI-to-AI stop gate / self-authority-escalation rule.
+- **Override authority**: none for an open P0/P1 — `docs/regulations/R05-system-development-management-regulation.md`
+  §8.4 prohibits merging with an unresolved P0/P1 finding, full stop; this is the same
+  rule a Codex P0/P1 is already held to on every PR today, and Strix does not get a
+  softer standard or an Owner waiver. An AI actor also cannot privately dismiss its own
+  P0/P1 finding without that evidence, per `governance/ai-execution-constraints.md`'s
+  AI-to-AI stop gate / self-authority-escalation rule — but the resolution path is
+  "fix it or the repository's normal independent reviewer confirms it's not real," not
+  an Owner escalation invented for Strix specifically.
 - **Re-execution**: event-driven on PR head update, the same pattern already defined
   for Codex in `governance/codex-review-event-loop.md` — re-run only on a new head SHA,
   not on every comment/label event.
@@ -67,7 +75,9 @@ Three placement candidates, as the Approach Decision required:
 - **Judgment**: findings feed a Notion Task (via MISC intake per
   `governance/ai-execution-constraints.md`) rather than blocking anything directly —
   this is detection, not a merge/release blocker.
-- **Evidence**: a Notion Task per run with the finding list linked; KMI aggregation
+- **Evidence**: a Notion `Scheduler Run Events` record for every run (clean or not,
+  per the liveness-evidence requirement — see §5); a Stories & Tasks Task only when
+  the run has an actionable finding, with the finding list linked. KMI aggregation
   per §4.
 - **Override authority**: N/A — nothing is blocked by this control; it only creates
   follow-up Tasks.
@@ -83,8 +93,8 @@ once the PoC's false-positive rate and runtime are known (see §5).
 
 | Strix severity | PR Merge Gate | Release Gate | Periodic Control |
 |---|---|---|---|
-| Critical/P0 | Block merge (Owner override required) | Block release (Owner override required) | Open P0 Task immediately (MISC intake), notify |
-| High/P1 | Block merge (Owner override required) | Block release (Owner override required) | Open P1 Task |
+| Critical/P0 | Block merge — no override; resolve (fix, or the repository's required independent reviewer confirms it does not apply) before merge, per R05 §8.4 | Block release on the same terms | Open P0 Task immediately (MISC intake), notify |
+| High/P1 | Block merge — same as P0 | Block release — same as P0 | Open P1 Task |
 | Medium/P2 and below | Do not block; attach as informational finding | Do not block; attach as informational finding | Open backlog Task |
 
 This mirrors the existing Codex review convention already in force
@@ -97,8 +107,8 @@ not introduce a second, differently-calibrated severity standard alongside Codex
 |---|---|---|
 | Scan tool unavailable (Docker daemon down, Strix install/auth failure, network egress blocked) | PR Merge Gate / Release Gate: **do not merge/release as if scanned** — report the tool failure explicitly, do not silently skip the check or treat "scan did not run" as "scan passed". | Periodic Control: skip this run, log the miss, and pick the repo up on the next scheduled run — a single missed periodic scan is not a reason to open a Human Request. |
 | Budget exhaustion (metered LLM spend cap, Strix Cloud quota) | Any gate currently running under a Human-approved metered budget: stop at the cap, do not retry into further spend. | Do not create a new approval/WIP-style constraint from this (per the AI-authored operating-constraint prohibition) — exhausting an already-approved budget is an ordinary `capability_permission_failure`, handled like any other, not a new standing policy. |
-| Suspected false positive | PR Merge Gate: do not auto-dismiss a P0/P1 finding on the AI's own judgment that it is probably wrong — this is exactly the "AI may not waive the gate for itself" boundary in §1.1. Route it to the Owner with the specific reasoning for why it looks like a false positive, same as an open Codex P0/P1 thread today. | Periodic Control: a likely-false P2/below finding can be closed in the backlog Task with the reasoning recorded, without an Owner round-trip — consistent with the existing "P2 is not a blocker" convention. |
-| Scan failure mid-run (crash, timeout) | Treat as "scan did not run", not as "scan found nothing" — same rule as tool-unavailable above. | Retry once per the existing `transient_connector_failure` pattern (`governance/ai-execution-constraints.md`'s failure/recovery contract: re-read state, retry up to 3 times); if still failing, fall through to the tool-unavailable row. |
+| Suspected false positive | PR Merge Gate: do not auto-dismiss a P0/P1 finding on the AI's own judgment that it is probably wrong — this is exactly the "AI may not waive the gate for itself" boundary in §1.1. Route it through the same independent review the repository already requires (R02 §4.1/§4.2) with the specific reasoning for why it looks like a false positive, same as an open Codex P0/P1 thread today; it stays open until that reviewer resolves it, not an Owner round-trip. | Periodic Control: a likely-false P2/below finding can be closed in the backlog Task with the reasoning recorded, without a reviewer round-trip — consistent with the existing "P2 is not a blocker" convention. |
+| Scan failure mid-run (crash, timeout) | Treat as "scan did not run", not as "scan found nothing" — same rule as tool-unavailable above. First classify the failure into one of the four required classes (`governance/ai-execution-constraints.md`'s failure/recovery contract) before deciding how to respond: a crash/timeout with no sign of a policy denial or permission/capability error is `transient_connector_failure` — re-read state and retry, **up to 3 times after the initial failure, never more**; an explicit policy/sandbox denial is `hard_safety_guard` — do not retry, do not route around it; a 401/403/missing-scope/tool-not-installed failure is `capability_permission_failure` — do not retry uselessly, escalate instead; anything else is `ordinary_failure` — record it and fall through to the tool-unavailable row without retrying. Never retry a failure that isn't classified as `transient_connector_failure`. | If `transient_connector_failure` retries are exhausted, fall through to the tool-unavailable row (Periodic Control: skip, log, pick up next scheduled run). |
 
 The common thread: **absence of a clean result is never treated as a clean result.**
 A gate that cannot run reports "not run" and stops the thing it was supposed to gate
@@ -160,10 +170,18 @@ a second design pass. It is not itself the AC8 evidence and does not claim the P
   `config/scheduled-skills.yaml` with its own `windows_jst`/`concurrency_key`, not a
   bespoke new scheduler. No new scheduler infrastructure is proposed.
 - **Evidence**: each run (any of the three gates) writes a durable record — PR
-  comment + check-run artifact for §1.1, release record for §1.2, Notion Task for
-  §1.3 — linked back to this Task (ADP-069-T06) and, once adopted, to its own
-  governance section once this evaluation is promoted into a permanent `governance/`
-  document (not proposed as final text yet — AC10 below).
+  comment + check-run artifact for §1.1, release record for §1.2, a Notion Task only
+  for an actionable (non-clean) finding for §1.3 — linked back to this Task
+  (ADP-069-T06) and, once adopted, to its own governance section once this evaluation
+  is promoted into a permanent `governance/` document (not proposed as final text
+  yet — AC10 below). The periodic control (§1.3) additionally writes a Notion
+  `Scheduler Run Events` record for **every** expected run, clean or not — a clean
+  run, a failed run, and a missed run are otherwise indistinguishable from each other
+  and from "the scan never happened," which defeats `governance/ai-execution-constraints.md`'s
+  daily liveness reconciliation (it must be able to tell `Scheduled`/`Started`/
+  `Completed`/`Failed or Blocked`/`Missed` apart, with retry count and failure class
+  where applicable). A Stories & Tasks Task stays reserved for the finding itself,
+  not for proving the scan ran.
 - **KPI/KMI (draft, to be confirmed against real PoC data)**:
   - finding count by severity, per repo, per period;
   - false-positive rate (findings closed as not-a-bug / total findings) — the
