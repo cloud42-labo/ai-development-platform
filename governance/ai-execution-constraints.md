@@ -15,6 +15,110 @@ Before creating any new record in Notion Stories & Tasks, the acting AI MUST app
 
 Creating first in a formal hierarchy and correcting placement afterward does not satisfy this check. The MISC intake is the required precondition to every new Task write.
 
+## AI-authored operating-constraint prohibition
+
+AI actors may propose operating constraints, but may not make them effective unless an authoritative higher-level source already grants that constraint or the Owner explicitly approves it.
+
+This prohibition includes, at minimum:
+
+- task-count or heavy-work caps;
+- WIP limits;
+- scheduler stop/disable conditions;
+- approval, re-review, or Human gates;
+- priority-override rules;
+- concurrency or serialization limits that defer otherwise executable work;
+- retry ceilings or failure policies;
+- any other rule that changes whether, when, or how an otherwise-authorized Task may execute.
+
+Before adding or changing any such constraint in a Skill, registry, automation prompt, config, Notion operating view, or repository-local procedure, the acting AI MUST:
+
+1. identify the exact authoritative ADP regulation, governance criterion, repository-local rule, or latest explicit Owner instruction that grants the constraint;
+2. record that authority in the change evidence;
+3. treat the change as non-operative if no such authority exists;
+4. never promote an AI-authored design suggestion or historical Notion task text into a binding operating rule by implementation alone.
+
+If an unapproved constraint is discovered, stop enforcing that constraint, preserve unrelated safety/authority gates, record the incident through the Postmortem Improvement Loop, and correct the ADP canonical source before synchronizing Skills and Notion controlled views.
+
+## Scheduler Continuity and lifecycle authority
+
+A failure of one scheduled run does not grant authority to terminate future scheduled runs. **Run outcome authority and recurring-scheduler lifecycle authority are separate.**
+
+### Owner-only recurring scheduler stop gate
+
+An AI MUST NOT disable, stop, suspend, delete, or otherwise deactivate a recurring scheduler unless the latest explicit Owner instruction authorizes that lifecycle change for the exact scheduler.
+
+The following are **not** authority to stop a recurring scheduler:
+
+- Completion Contract failure;
+- a safety-check rejection;
+- a transient connector/service failure;
+- a Task or run becoming `Blocked` / `Failed`;
+- an inability to persist one run's artifact;
+- an AI inference that stopping is safer;
+- an AI-authored Task, Skill, prompt, or controlled view that is not backed by higher authority.
+
+A platform-enforced hard shutdown that the AI cannot override is not an AI lifecycle decision. Record it as an external/hard-safety condition; do not attempt to bypass it.
+
+Before any AI-originated `disable / stop / suspend / delete` mutation against a recurring scheduler, the acting AI MUST verify and record:
+
+1. the exact scheduler;
+2. the latest explicit Owner instruction authorizing the lifecycle change;
+3. whether the change is temporary or permanent;
+4. the intended restart condition where applicable.
+
+Without that evidence, the lifecycle mutation is prohibited.
+
+### Failure and recovery contract
+
+When a scheduled run cannot complete:
+
+1. classify the failure before deciding recovery:
+   - `hard_safety_guard`;
+   - `transient_connector_failure`;
+   - `capability_permission_failure`;
+   - `ordinary_failure`;
+2. for `transient_connector_failure` only, re-read the target state before every mutation retry and retry the same intent/target up to **3 times after the initial failure**;
+3. never duplicate a write that already succeeded or partially succeeded;
+4. never bypass or rephrase around a `hard_safety_guard`;
+5. do not perform useless retries for a demonstrated capability/permission failure;
+6. after retries are exhausted, record the run as `Failed` or `Blocked`, preserve the recurring scheduler as enabled, and record the unfinished work / unblock condition;
+7. at the next applicable scheduled window, re-evaluate unfinished prior-run work before treating the new window as healthy/no-op.
+
+Failing closed for the **run** means not reporting Success without evidence. It does **not** mean killing the **recurring scheduler**.
+
+### Run-level liveness evidence
+
+A governed recurring scheduler MUST have run-level evidence sufficient to distinguish:
+
+- `Scheduled`;
+- `Started`;
+- `Completed`;
+- `Failed` / `Blocked`;
+- `Missed`.
+
+The evidence model MUST also preserve, where applicable:
+
+- scheduled window/time;
+- actual start/completion time;
+- retry count;
+- failure class/reason;
+- whether the scheduler was enabled;
+- whether a stop was explicitly Owner-authorized and the evidence for that authorization;
+- whether unfinished work requires carryover and whether the next applicable run resolved it.
+
+Cloud42's operational implementation uses the Notion `Scheduler Run Events` ledger for this run evidence. That ledger is evidence/telemetry, **not** the scheduler-definition source of truth.
+
+### Daily liveness reconciliation
+
+The daily close/control process MUST compare the expected active recurring schedule against run evidence and identify at least:
+
+- scheduled time passed with no `Started` evidence;
+- transient failure with required retry not attempted;
+- recurring scheduler disabled without explicit Owner-stop evidence;
+- previous incomplete run not reconsidered at the next applicable window.
+
+Where the current authoritative schedule and Owner instruction both establish that a ChatGPT recurring automation should be Active, and it is found disabled without Owner authorization, the control process may restore it to Active and must record the repair. It MUST NOT reactivate an intentionally stopped scheduler with valid Owner-stop evidence.
+
 ## Managed-work execution pre-flight
 
 Before performing any managed work that writes to Notion, GitHub, another connected system, or creates a durable project artifact, the acting AI MUST verify **all** of the following before the first work action:
@@ -118,9 +222,9 @@ Before setting a managed task to `Done`, the acting AI MUST verify **all** of th
 2. **Evidence recorded** — update `Result` with the material outcome, decisions, relevant URLs/commit/PR identifiers, and any remaining limitations.
 3. **Brain Capture classified and completed** — explicitly decide whether the work or the Owner/AI conversation that produced it created a durable organizational-memory delta: Decision / Hypothesis / Principle / Learning / material State Change / Open Question. If yes, execute the `brain-capture` Skill, update the appropriate existing `cloud42-labo/brain` note/project/decision/journal, and verify the update is on main before completion. If no, record `Brain Capture = No durable delta` with a short reason. A conversation or work result with a durable delta MUST NOT remain only in chat/model memory. Do not copy conversation transcripts into brain, and do not move Operational State or Policy away from their authoritative systems.
 4. **Time interval closed** — verify that a Task Time Event exists for the actor/current active interval and set its `Ended At` in JST. Active Time is derived from the event; do not invent an `Actual Time` value independently when the rollup is authoritative. **A task with no applicable Time Event, or with an open Time Event, MUST NOT be marked Done.**
-5. **Completion timestamp recorded** — set `Completed At` in JST after the time record is complete.
-6. **Status transition last** — set `Status = Done` only after the evidence, Brain Capture classification, and time records needed to support Done are present.
-7. **Residual work routed** — if Human/another agent action remains necessary to satisfy the task's own acceptance criteria, do not mark the task Done; create/route the explicit follow-up and use the correct waiting/blocked state. Before routing anything to a Human or moving to `Blocked` for a Human reason, execute the Human gate pre-flight above and route only the genuinely Human-only remainder.
+4. **Completion timestamp recorded** — set `Completed At` in JST after the time record is complete.
+5. **Status transition last** — set `Status = Done` only after the evidence and time records needed to support Done are present.
+6. **Residual work routed** — if Human/another agent action remains necessary to satisfy the task's own acceptance criteria, do not mark the task Done; create/route the explicit follow-up and use the correct waiting/blocked state. Before routing anything to a Human or moving to `Blocked` for a Human reason, execute the Human gate pre-flight above and route only the genuinely Human-only remainder.
 
 ### Human work and PR completion
 
@@ -143,7 +247,7 @@ Documentation of the violation is not closure. Closure requires the preventive w
 
 ## Enforcement rule
 
-Any AI workflow or Skill that creates a Stories & Tasks record MUST create it through the MISC / Backlog intake invariant above. Any AI workflow that performs managed work MUST execute the managed-work execution pre-flight and completion post-flight, including explicit Brain Capture classification (`Updated` or `No durable delta`) before Done. Any AI workflow that would stop, block, de-authorize, add approval/re-review waiting, alter merge responsibility, or withhold an otherwise-Ready handoff from another AI MUST execute the AI-to-AI stop gate pre-flight first. **Any workflow that selects, reports, presents, or starts an existing Human Request MUST execute the Human gate pre-flight immediately beforehand, including the Outcome-before-procedure substitution check; persisted Human labels never waive this requirement.**
+Any AI workflow or Skill that creates a Stories & Tasks record MUST create it through the MISC / Backlog intake invariant above. Any AI workflow that performs managed work MUST execute the managed-work execution pre-flight and completion post-flight. Any AI workflow that would stop, block, de-authorize, add approval/re-review waiting, alter merge responsibility, or withhold an otherwise-Ready handoff from another AI MUST execute the AI-to-AI stop gate pre-flight first. **Any workflow that selects, reports, presents, or starts an existing Human Request MUST execute the Human gate pre-flight immediately beforehand, including the Outcome-before-procedure substitution check; persisted Human labels never waive this requirement.**
 
 Direct Product / Epic / Story placement at Task creation time is invalid even when the Owner named the Product/Epic or the task is an obvious derivative of an existing Story. Those facts are retained as placement evidence for Backlog Refinement only.
 
