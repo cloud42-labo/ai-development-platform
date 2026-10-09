@@ -4,8 +4,8 @@
 > **規程ID:** R04  
 > **承認権者:** Owner  
 > **施行日:** 2026-09-06 JST  
-> **最終改定日:** 2026-10-04 JST  
-> **関連基準:** `governance/source-of-truth.md`  
+> **最終改定日:** 2026-10-05 JST  
+> **関連基準:** `governance/source-of-truth.md` / `governance/postmortem-improvement-loop.md`  
 > **関連手順:** `cloud42-labo/skills`  
 > **移管元:** `docs/operating-guide.md` §1、§5、§13 / `governance/source-of-truth.md`
 
@@ -99,6 +99,7 @@ Google DriveはProductコードやReleaseの正本ではなく、Humanが現在�
 2. Memoryは新しいTaskや規程検討の入力として利用できるが、現行規程を上書きしない。
 3. 再利用価値のある学習を恒久ルール、基準、手順または設計成果物へ昇格する場合は、対象の正本へ意図的に移管する。
 4. brain内のファイル名や配置だけを理由に、当該記録をPolicyとして扱わない。
+
 5. OwnerとChris / Claudeその他の実行主体との会話・作業から、次回以降の判断を変える決定、仮説、設計原則、再利用可能な学び、重要な前提変更、未決論点が生じた場合は、会話履歴だけに依存せずbrainへ組織記憶として記録する。
 6. 前項の記録は会話の逐語録ではなく、元会話を知らない次回実行主体が判断を再開できる最小限のdurable deltaとして要約する。単純なStatusやTask状態はNotion、Policy/Artifactは各GitHub正本へ残し、brainへ無制御に複製しない。
 7. managed-workの完了時は、durable deltaの有無を明示的に判定し、`Brain Capture = Updated` または `Brain Capture = No durable delta` のいずれかを完了証跡へ残す。deltaありの場合はbrainへの反映を確認するまで完了扱いにしない。
