@@ -14,6 +14,7 @@
 - [ ] Postmortem RCA Quality / Root Cause Confidence / Failure Layer / Effectiveness / Regression Replay evidence
 - [ ] Material governance/security/authority Blockers and Human Requests
 - [ ] Relevant Decisions / Operating Guide / governance changes
+- [ ] Scheduler continuity evidence (expected windows / run events / enabled state / retries / stop authority / carryover)
 - [ ] Material GitHub control evidence
 
 ## Portfolio metrics
@@ -33,6 +34,12 @@
 - Documentation-only remediation / subsequent recurrence:
 - Owner/Human escalations:
 - Controls upgraded to executable gates/automation:
+- Scheduler Expected Runs / Started / Completed / Failed-Blocked / Missed:
+- Transient Retry Recoveries / Recovery Rate:
+- Retry Required but Missing:
+- Unauthorized Scheduler Stops:
+- Owner-authorized Scheduler Stops:
+- Open Scheduler Carryovers:
 
 ## Material risks and decisions
 
@@ -52,6 +59,19 @@ Flag any case where:
 - an Effective action was followed by recurrence at the same causal node;
 - documentation-only remediation was followed by recurrence;
 - the replay did not exercise the original failure mode.
+
+## Scheduler continuity findings
+
+| Job | Expected | Started | Completed | Failed/Blocked | Missed | Retry recovery | Unauthorized stop | Open carryover | Decision |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| | | | | | | | | | Healthy / Strengthen / Escalate |
+
+Flag any case where:
+- an expected window has no Started evidence;
+- a transient failure did not receive the required retry attempts;
+- a recurring scheduler was disabled without explicit Owner authorization;
+- a failed run caused future scheduled windows to disappear;
+- an unfinished run was not reconsidered at the next applicable window.
 
 ## Recurrence / common-mode findings
 
