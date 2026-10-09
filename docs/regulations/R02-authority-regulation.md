@@ -105,3 +105,10 @@ Repository固有の明示ルールまたはOwnerの明示指示により別のme
 一時的な権限例外は、R03に従いOwnerが承認できる。例外は対象、行為、期間または終了条件を明確にし、無限定な一般権限として解釈しない。
 
 恒久的な権限変更は、本規程または該当規程の改定を完了して初めて恒久Policyとして扱う。
+
+## 第10条 Product / Work Type固有Workflowの権限解決
+
+1. Ownerが承認したProduct・Work Type・Artifact Type固有Workflowは、一般PR Review/Mergeのfallback規則より優先する。既存のOwner専権・Hard Safety Guardを上書きしない。
+2. 実行前にProduct、Work Type、Artifact Type、Author、Riskと有効なWorkflow正本を特定し、Reviewer・Merger・Publisherを一意に決定する。競合や正本不明時は不可逆操作を保留しOwnerへ照会する。
+3. AOD記事はChris執筆→Claude独立査読→Chris最終編集・mergeとし、一般PRルールだけを理由にCodexを必須挿入しない。
+4. 固有Workflowが存在しない場合に限り、一般PR Review/Merge規則へfallbackする。通常Code PR、self-merge repo、Postmortem独立reviewの固有権限は維持する。
