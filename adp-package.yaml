@@ -684,4 +684,5 @@ migration_path:
       new fields are additive to the existing monthly review template.
     action_required: >-
       Populate the Scheduler Continuity section for monthly reviews created
-      under workflow_version 2.1.0 or later.
+      using templates_version 1.3.0 or later. Workflow adoption is tracked
+      independently by workflow_version; do not infer template migration from it.
